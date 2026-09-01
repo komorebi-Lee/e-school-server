@@ -1,0 +1,15 @@
+{
+  "name": "campus-go-mock-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Campus Go MVP zero-dependency mock API",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
