@@ -31,7 +31,7 @@ function afterSales(){const items=state.data.afterSales.filter(match).filter(sta
 function logs(){const items=state.data.auditLogs.filter(match);const rows=items.map(x=>`<tr><td><strong>${esc(x.action)}</strong><small>${esc(x.id)}</small></td><td>${esc(x.operator)}</td><td>${esc(x.target)}</td><td>${fmtDate(x.createdAt)}</td></tr>`);return toolbar(items.length)+table(['操作','操作人','对象','时间'],rows,items.length)}
 function settings(){const s=state.data.settings;return`<div class="settings-grid"><form id="settingsForm" class="settings-form"><h2>基础运营配置</h2><div class="form-grid"><label>品牌名称<input id="settingBrand" value="${esc(s.brandName)}"></label><label>学校名称<input id="settingSchool" value="${esc(s.schoolName)}"></label><label>校区名称<input id="settingCampus" value="${esc(s.campusName)}"></label><label>客服电话<input id="settingPhone" value="${esc(s.servicePhone)}"></label><label>客服微信<input id="settingWechat" value="${esc(s.serviceWechat)}"></label><label>自带车上牌服务费（元）<input id="settingPlateFee" type="number" value="${s.externalPlateFeeInCents/100}"></label></div><div class="settings-actions"><button class="primary" type="submit">保存配置</button></div></form><aside class="settings-help"><h2>上线前配置提醒</h2><p>当前配置用于本地MVP。正式运营时应由具备权限的管理员修改，并保留审批记录。</p><ul><li>微信支付商户与退款权限</li><li>运营商真实套餐和活动期限</li><li>校园车辆登记材料清单</li><li>配送范围、时段和售后SLA</li><li>隐私政策与数据保存期限</li></ul></aside></div>`}
 
-function render(){document.querySelector('#pageTitle').textContent=titles[state.view];document.querySelector('#breadcrumb').textContent=titles[state.view];const views={dashboard,products,orders,phones,recharges,broadband,plates,afterSales,logs,settings};document.querySelector('#content').innerHTML=views[state.view]();bindView()}
+function render(){document.querySelector('#pageTitle').textContent=titles[state.view];document.querySelector('#breadcrumb').textContent=titles[state.view];const views={dashboard,leads,products,orders,phones,recharges,broadband,plates,afterSales,logs,settings};document.querySelector('#content').innerHTML=views[state.view]();bindView()}
 function bindView(){document.querySelector('#listSearch')?.addEventListener('input',e=>{state.query=e.target.value;render();document.querySelector('#listSearch')?.focus()});document.querySelector('#statusFilter')?.addEventListener('change',e=>{state.status=e.target.value;render()});document.querySelector('#addProduct')?.addEventListener('click',()=>openProduct());document.querySelectorAll('.edit-product').forEach(b=>b.addEventListener('click',()=>openProduct(state.data.products.find(p=>p.id===b.dataset.id))));document.querySelectorAll('.save-status').forEach(b=>b.addEventListener('click',()=>saveStatus(b)));document.querySelectorAll('.detail-button').forEach(b=>b.addEventListener('click',()=>openDetail(b.dataset.view,b.dataset.id)));document.querySelector('#exportButton')?.addEventListener('click',exportCurrent);document.querySelector('#settingsForm')?.addEventListener('submit',saveSettings);document.querySelectorAll('[data-goto]').forEach(x=>x.addEventListener('click',()=>goView(x.dataset.goto)))}
 async function saveStatus(button){const select=document.querySelector(`select[data-view="${button.dataset.view}"][data-id="${button.dataset.id}"]`);await api(`/api/admin/${endpointTypes[button.dataset.view]}/${button.dataset.id}/status`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({status:select.value})});showToast('业务状态已更新');await load()}
 function goView(view){state.view=view;state.query='';state.status='ALL';document.querySelectorAll('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.view===view));render()}
@@ -63,8 +63,7 @@ const leadNextStep = lead => {
   return '电话确认真实需求、预算和预计办理时间，并记录下一步材料。';
 };
 
-titles.leads = '咨询线索';
-leads = function(){
+function leads(){
   const items = (state.data.leads || []).map(x => ({ ...x, status: normalizeLeadStatus(x.status) })).filter(match).filter(statusMatch);
   const rows = items.map(x => {
     const status = normalizeLeadStatus(x.status);
@@ -72,7 +71,7 @@ leads = function(){
     return `<tr><td><strong>${esc(x.leadNo)}</strong><small>${fmtDate(x.createdAt)}</small></td><td><strong>${esc(x.name)}</strong><small>${esc(x.phone)}</small></td><td>${esc(x.businessType)}</td><td>${esc(x.interest)}</td><td><span class="badge ${overdue ? 'red' : 'orange'}">${overdue ? '已超时' : '24小时内'}</span></td><td><span class="badge ${leadStatusClass(status)}">${leadStatusLabels[status]}</span></td><td><div class="row-actions"><button class="text-button lead-open" data-id="${x.id}">跟进</button></div></td></tr>`;
   });
   return toolbar(items.length, { statusesList: leadStatuses }) + table(['编号','客户','业务','意向','时效','状态','操作'], rows, items.length);
-};
+}
 
 function openLeadPanel(id){
   const lead = (state.data.leads || []).find(x => x.id === id);
