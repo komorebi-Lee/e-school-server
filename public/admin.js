@@ -89,7 +89,7 @@ function openLeadPanel(id){
     <div class="detail-section"><h3>当前状态</h3>
       <div class="lead-status-line"><span class="badge ${leadStatusClass(status)}">${leadStatusLabels[status]}</span><small>更新于 ${fmtDate(lead.updatedAt || lead.createdAt)}</small></div>
       <div class="lead-status-actions">
-        ${leadStatuses.map(s => `<button class="lead-action ${s === status ? 'active' : ''}" data-status="${s}" data-id="${lead.id}" ${s === status ? 'disabled' : ''} title="将线索设为${leadStatusLabels[s]}">设为${leadStatusLabels[s]}</button>`).join('')}
+        ${leadStatuses.map(s => `<button class="lead-action ${s === status ? 'active' : ''}" data-status="${s}" data-id="${lead.id}" ${s === status ? 'disabled' : ''} title="切换到${leadStatusLabels[s]}">${leadStatusLabels[s]}</button>`).join('')}
       </div>
     </div>
     <div class="detail-section"><h3>下一步建议</h3><div class="next-step">${esc(leadNextStep(lead))}</div>
