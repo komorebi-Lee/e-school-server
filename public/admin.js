@@ -48,83 +48,12 @@ document.querySelector('#loginForm').addEventListener('submit',e=>{e.preventDefa
 if(state.token){showApp();load().catch(()=>logout())}
 
 titles.leads='咨询线索';
-// 咨询线索只保留四个真实运营阶段；历史状态在展示层归并为“跟进中”。
-Object.assign(statuses, { SUBMITTED:'待联系', FOLLOW_UP:'跟进中', COMPLETED:'已完成', INVALID:'无效线索' });
-const leadStatuses = ['SUBMITTED','FOLLOW_UP','COMPLETED','INVALID'];
-const leadStatusLabels = { SUBMITTED:'待联系', FOLLOW_UP:'跟进中', COMPLETED:'已完成', INVALID:'无效线索' };
-const normalizeLeadStatus = s => ['SUBMITTED','FOLLOW_UP','COMPLETED','INVALID'].includes(s) ? s : 'FOLLOW_UP';
-const leadStatusClass = s => ({ SUBMITTED:'orange', FOLLOW_UP:'blue', COMPLETED:'green', INVALID:'red' }[normalizeLeadStatus(s)]);
-const leadNextStep = lead => {
-  const type = `${lead.businessType || ''}${lead.interest || ''}`;
-  if (/车|E_BIKE|牌/.test(type)) return '确认车型、报价和宿舍地址；核对合格证、购买凭证，并说明校园牌照材料。';
-  if (/话费|充值/.test(type)) return '确认充值号码、金额和活动到账时间，提醒保留客服回复截图。';
-  if (/宽带/.test(type)) return '收集两人购卡号码、宿舍楼栋和安装时间，同步宽带安装条件。';
-  if (/卡|套餐|电话/.test(type)) return '确认运营商、套餐、月费和实名要求，预约校园办理时间。';
-  return '电话确认真实需求、预算和预计办理时间，并记录下一步材料。';
-};
-
+function leads(){const items=(state.data.leads||[]).filter(match).filter(statusMatch);const rows=items.map(x=>`<tr><td><strong>${esc(x.leadNo)}</strong><small>${fmtDate(x.createdAt)}</small></td><td><strong>${esc(x.name)}</strong><small>${esc(x.phone)}</small></td><td>${esc(x.businessType)}</td><td>${esc(x.interest)}</td><td><span class="badge ${x.slaDueAt<new Date().toISOString()?'red':'orange'}">${x.slaDueAt<new Date().toISOString()?'已超时':'24小时内'}</span></td><td><select class="status-select lead-status" data-id="${x.id}">${['SUBMITTED','FOLLOW_UP','CONFIRMED','SERVING','COMPLETED','CLOSED','INVALID','MATERIAL_PENDING'].map(s=>`<option value="${s}" ${x.status===s?'selected':''}>${s}</option>`).join('')}</select><button class="table-button save-lead" data-id="${x.id}">保存</button></td><td><button class="text-button lead-follow" data-id="${x.id}">跟进</button></td></tr>`);return toolbar(items.length,{statusesList:['SUBMITTED','FOLLOW_UP','CONFIRMED','SERVING','COMPLETED','CLOSED','INVALID','MATERIAL_PENDING']})+table(['编号','客户','业务','意向','时效','状态','操作'],rows,items.length)}
+const originalRender=render;render=function(){if(state.view==='leads'){document.querySelector('#pageTitle').textContent='咨询线索';document.querySelector('#breadcrumb').textContent='咨询线索';document.querySelector('#content').innerHTML=leads();bindView();document.querySelectorAll('.save-lead').forEach(b=>b.onclick=async()=>{const s=document.querySelector(`.lead-status[data-id="${b.dataset.id}"]`);await api(`/api/admin/leads/${b.dataset.id}`,{method:'PATCH',headers:{'content-type':'application/json'},body:JSON.stringify({status:s.value})});showToast('线索状态已更新');await load()});document.querySelectorAll('.lead-follow').forEach(b=>b.onclick=async()=>{const content=prompt('填写跟进记录');if(content){await api(`/api/admin/leads/${b.dataset.id}/follow-ups`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content})});showToast('跟进记录已保存');await load()}});return}originalRender()};
+document.addEventListener('DOMContentLoaded',()=>{const nav=document.querySelector('#nav');if(nav&&!nav.querySelector('[data-view="leads"]')){const b=document.createElement('button');b.className='nav-item';b.dataset.view='leads';b.innerHTML='<span>线</span>咨询线索';nav.insertBefore(b,nav.children[1]);}});
+// 运营端状态使用中文展示，接口仍沿用稳定的英文枚举值。
+Object.assign(statuses, { PAID:'待履约', FULFILLING:'配送中', COMPLETED:'已完成', CANCELLED:'已取消', PENDING_REALNAME:'待实名', ACTIVATED:'已激活', PENDING_CREDIT:'待到账', CREDITED:'已到账', PENDING_VERIFY:'待审核', APPROVED:'已通过', REJECTED:'未通过', MATERIAL_PENDING:'待补资料', REVIEWING:'处理中', SUBMITTED:'待联系', FOLLOW_UP:'跟进中', CONFIRMED:'已确认', SERVING:'办理中', CLOSED:'已关闭', INVALID:'无效线索', AFTER_SALE:'售后处理中' });
+const leadStatusLabelsCN = { SUBMITTED:'待联系', FOLLOW_UP:'跟进中', CONFIRMED:'已确认', SERVING:'办理中', COMPLETED:'已完成', CLOSED:'已关闭', INVALID:'无效线索', MATERIAL_PENDING:'待补资料' };
+const leadStatusOptionsCN = Object.keys(leadStatusLabelsCN);
 titles.leads = '咨询线索';
-leads = function(){
-  const items = (state.data.leads || []).map(x => ({ ...x, status: normalizeLeadStatus(x.status) })).filter(match).filter(statusMatch);
-  const rows = items.map(x => {
-    const status = normalizeLeadStatus(x.status);
-    const overdue = x.slaDueAt < new Date().toISOString();
-    return `<tr><td><strong>${esc(x.leadNo)}</strong><small>${fmtDate(x.createdAt)}</small></td><td><strong>${esc(x.name)}</strong><small>${esc(x.phone)}</small></td><td>${esc(x.businessType)}</td><td>${esc(x.interest)}</td><td><span class="badge ${overdue ? 'red' : 'orange'}">${overdue ? '已超时' : '24小时内'}</span></td><td><span class="badge ${leadStatusClass(status)}">${leadStatusLabels[status]}</span></td><td><div class="row-actions"><button class="text-button lead-open" data-id="${x.id}">跟进</button></div></td></tr>`;
-  });
-  return toolbar(items.length, { statusesList: leadStatuses }) + table(['编号','客户','业务','意向','时效','状态','操作'], rows, items.length);
-};
-
-function openLeadPanel(id){
-  const lead = (state.data.leads || []).find(x => x.id === id);
-  if (!lead) return;
-  const status = normalizeLeadStatus(lead.status);
-  const followUps = (lead.followUps || []).slice(0, 5);
-  document.querySelector('#drawerTitle').textContent = lead.leadNo || lead.id;
-  document.querySelector('#drawerBody').innerHTML = `
-    <div class="detail-section"><h3>客户概要</h3><div class="detail-grid">
-      <div class="detail-item"><small>客户</small><strong>${esc(lead.name)}</strong></div>
-      <div class="detail-item"><small>电话</small><strong>${esc(lead.phone)}</strong></div>
-      <div class="detail-item"><small>业务</small><strong>${esc(lead.businessType)}</strong></div>
-      <div class="detail-item"><small>意向</small><strong>${esc(lead.interest)}</strong></div>
-    </div></div>
-    <div class="detail-section"><h3>当前状态</h3>
-      <div class="lead-status-line"><span class="badge ${leadStatusClass(status)}">${leadStatusLabels[status]}</span><small>更新于 ${fmtDate(lead.updatedAt || lead.createdAt)}</small></div>
-      <div class="lead-status-actions">
-        ${leadStatuses.map(s => `<button class="lead-action ${s === status ? 'active' : ''}" data-status="${s}" data-id="${lead.id}" ${s === status ? 'disabled' : ''}>${leadStatusLabels[s]}</button>`).join('')}
-      </div>
-    </div>
-    <div class="detail-section"><h3>下一步建议</h3><div class="next-step">${esc(leadNextStep(lead))}</div>
-      <div class="quick-contact"><a href="tel:${esc(lead.phone)}">拨打客户电话</a><button id="copyLeadInfo">复制客户信息</button></div>
-    </div>
-    <div class="detail-section"><h3>记录联系结果</h3>
-      <textarea id="leadNote" class="lead-note" placeholder="例如：已确认轻风通勤版和校内配送，明天上午回复报价"></textarea>
-      <div class="lead-submit-row"><button id="saveContacted" class="lead-action primary">标记已联系</button><button id="saveCompleted" class="lead-action done">完成跟进</button></div>
-    </div>
-    <div class="detail-section"><h3>最近跟进</h3>${followUps.length ? `<div class="timeline">${followUps.map(f => `<div class="timeline-item"><strong>${esc(f.content)}</strong><span>${esc(f.operator || '运营管理员')} · ${fmtDate(f.createdAt)}</span></div>`).join('')}</div>` : '<p class="muted-empty">暂无跟进记录</p>'}</div>`;
-  document.querySelectorAll('.lead-action[data-status]').forEach(btn => btn.addEventListener('click', () => updateLeadStatus(btn.dataset.id, btn.dataset.status)));
-  document.querySelector('#saveContacted')?.addEventListener('click', () => saveLeadFollow(lead.id, 'FOLLOW_UP'));
-  document.querySelector('#saveCompleted')?.addEventListener('click', () => saveLeadFollow(lead.id, 'COMPLETED'));
-  document.querySelector('#copyLeadInfo')?.addEventListener('click', async () => {
-    const text = `${lead.name} ${lead.phone}\n${lead.businessType}：${lead.interest || ''}`;
-    await navigator.clipboard.writeText(text); showToast('客户信息已复制');
-  });
-  toggleDrawer(true);
-}
-
-async function updateLeadStatus(id, status){
-  await api(`/api/admin/leads/${id}`, { method:'PATCH', headers:{'content-type':'application/json'}, body:JSON.stringify({ status }) });
-  showToast('线索状态已更新'); await load(); openLeadPanel(id);
-}
-
-async function saveLeadFollow(id, status){
-  const note = document.querySelector('#leadNote')?.value.trim() || '';
-  if (!note) return showToast('请先填写联系结果');
-  await api(`/api/admin/leads/${id}/follow-ups`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ content:note, status }) });
-  showToast('跟进结果已保存'); await load(); openLeadPanel(id);
-}
-
-const leadRenderBeforeActionPanel = render;
-render = function(){
-  leadRenderBeforeActionPanel();
-  document.querySelectorAll('.lead-open').forEach(btn => btn.addEventListener('click', () => openLeadPanel(btn.dataset.id)));
-};
+leads = function(){ const items=(state.data.leads||[]).filter(match).filter(statusMatch); const rows=items.map(x=>{const overdue=x.slaDueAt<new Date().toISOString(); return `<tr><td><strong>${esc(x.leadNo)}</strong><small>${fmtDate(x.createdAt)}</small></td><td><strong>${esc(x.name)}</strong><small>${esc(x.phone)}</small></td><td>${esc(x.businessType)}</td><td>${esc(x.interest)}</td><td><span class="badge ${overdue?'red':'orange'}">${overdue?'已超时':'24小时内'}</span></td><td><select class="status-select lead-status" data-id="${x.id}">${leadStatusOptionsCN.map(s=>`<option value="${s}" ${x.status===s?'selected':''}>${leadStatusLabelsCN[s]}</option>`).join('')}</select><button class="table-button save-lead" data-id="${x.id}">保存</button></td><td><button class="text-button lead-follow" data-id="${x.id}">跟进</button></td></tr>`}); return toolbar(items.length,{statusesList:leadStatusOptionsCN})+table(['编号','客户','业务','意向','时效','状态','操作'],rows,items.length); };

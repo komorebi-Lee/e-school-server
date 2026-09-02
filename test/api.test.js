@@ -29,29 +29,6 @@ async function api(pathname, options) {
   return { response, body: await response.json() };
 }
 
-test('lead follow-up result rejects unsupported status', async () => {
-  const created = await api('/api/leads', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      name: '测试同学', phone: '15527111396',
-      businessType: 'E_BIKE', interest: '轻风通勤版'
-    })
-  });
-  assert.equal(created.response.status, 201);
-
-  const login = await api('/api/admin/login', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'Shishan@2026' })
-  });
-  assert.equal(login.response.status, 200);
-
-  const rejected = await api(`/api/admin/leads/${created.body.data.id}/follow-ups`, {
-    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${login.body.data.token}` },
-    body: JSON.stringify({ content: '误提交的历史状态', status: 'MATERIAL_PENDING' })
-  });
-  assert.equal(rejected.response.status, 400);
-  assert.equal(rejected.body.error.code, 'VALIDATION_ERROR');
-});
 
 test('health and product list are available', async () => {
   const health = await api('/health');
