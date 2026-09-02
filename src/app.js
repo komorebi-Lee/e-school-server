@@ -87,6 +87,11 @@ function createApp({ store }) {
         response.writeHead(204); response.end(); return;
       }
 
+      // 微信云托管使用该路径探测容器是否已经就绪。
+      if (request.method === 'GET' && pathname === '/tcb_probe') {
+        return sendJson(response, 200, { ok: true, service: 'campus-go-mock-api', requestId });
+      }
+
       if (request.method === 'GET' && (pathname === '/admin' || pathname.startsWith('/admin/'))) {
         const publicRoot = path.join(__dirname, '..', 'public');
         const requested = pathname === '/admin' ? 'admin.html' : pathname.slice('/admin/'.length);
