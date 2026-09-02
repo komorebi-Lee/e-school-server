@@ -17,7 +17,7 @@
       <div class="brand"><span class="brand-mark">狮</span><div><strong>狮山智生活</strong><small>运营管理中心</small></div></div>
       <div class="campus-switch"><small>当前运营校区</small><strong>华中农业大学</strong><span>狮山校区</span></div>
       <nav id="nav">
-        <div class="nav-group">工作台</div><button class="nav-item active" data-view="dashboard"><span>总</span>经营概览</button>
+<div class="nav-group">工作台</div><button class="nav-item active" data-view="dashboard"><span>总</span>经营概览</button><button class="nav-item" data-view="leads"><span>线</span>咨询线索</button>
         <div class="nav-group">商品交易</div><button class="nav-item" data-view="products"><span>商</span>商品中心</button><button class="nav-item" data-view="orders"><span>车</span>电瓶车订单</button><button class="nav-item" data-view="phones"><span>号</span>电话卡订单</button><button class="nav-item" data-view="recharges"><span>充</span>话费权益</button>
         <div class="nav-group">履约服务</div><button class="nav-item" data-view="broadband"><span>网</span>宽带资格</button><button class="nav-item" data-view="plates"><span>牌</span>牌照辅助</button><button class="nav-item" data-view="afterSales"><span>售</span>售后工单</button>
         <div class="nav-group">系统</div><button class="nav-item" data-view="logs"><span>记</span>操作日志</button><button class="nav-item" data-view="settings"><span>设</span>运营设置</button>
@@ -33,5 +33,5 @@
 
   <div id="drawerBackdrop" class="backdrop hidden"></div><aside id="drawer" class="drawer hidden"><div class="drawer-head"><div><small>业务详情</small><h2 id="drawerTitle">详情</h2></div><button id="closeDrawer">×</button></div><div id="drawerBody" class="drawer-body"></div></aside>
   <div id="modalBackdrop" class="backdrop hidden"></div><section id="productModal" class="modal hidden"><div class="modal-head"><div><small>商品中心</small><h2 id="modalTitle">新增商品</h2></div><button id="closeModal">×</button></div><form id="productForm" class="modal-body"><input id="productId" type="hidden"><div class="form-grid"><label>商品名称<input id="productName" required></label><label>商品分类<select id="productCategory"><option value="E_BIKE_NEW">电瓶车</option><option value="PHONE_PLAN">电话套餐</option><option value="RECHARGE_PROMO">话费权益</option></select></label><label>售价（元）<input id="productPrice" type="number" min="0" step="0.01" required></label><label>库存<input id="productStock" type="number" min="0" required></label></div><label>商品说明<textarea id="productDescription" rows="4" required></textarea></label><label class="switch-line"><input id="productActive" type="checkbox" checked>立即上架</label><div class="modal-actions"><button type="button" id="cancelModal" class="secondary">取消</button><button type="submit" class="primary">保存商品</button></div></form></section>
-  <div id="toast" class="toast"></div><script src="/admin/admin.js"></script>
+  <div id="toast" class="toast"></div><link rel="stylesheet" href="/admin/admin-lead.css"><script src="/admin/admin.js"></script>
 </body></html>
