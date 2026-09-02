@@ -14,6 +14,8 @@ class ApiError extends Error {
 
 const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
+const allowedLeadStatuses = new Set(['SUBMITTED', 'FOLLOW_UP', 'CONFIRMED', 'SERVING', 'COMPLETED', 'CLOSED', 'INVALID', 'MATERIAL_PENDING']);
+const openLeadStatuses = new Set(['SUBMITTED', 'FOLLOW_UP', 'CONFIRMED', 'SERVING', 'MATERIAL_PENDING']);
 
 function sendJson(response, statusCode, body) {
   response.writeHead(statusCode, {
@@ -151,7 +153,7 @@ function createApp({ store }) {
           + data.plateApplications.filter((item) => item.status !== 'COMPLETED').length;
         return sendJson(response, 200, {
           data: {
-            metrics: { revenueInCents, paidOrders: data.orders.length + data.phoneCardOrders.length + data.rechargeOrders.length, pending, lowStock: data.products.filter((item) => item.stock < 10).length, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => ['SUBMITTED','待联系','FOLLOW_UP'].includes(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && !['COMPLETED','CLOSED'].includes(x.status)).length },
+            metrics: { revenueInCents, paidOrders: data.orders.length + data.phoneCardOrders.length + data.rechargeOrders.length, pending, lowStock: data.products.filter((item) => item.stock < 10).length, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length },
             products: data.products,
             orders: data.orders,
             phoneCardOrders: data.phoneCardOrders,
@@ -175,7 +177,12 @@ function createApp({ store }) {
       }
       if (request.method === 'GET' && pathname === '/api/admin/leads') return sendJson(response,200,{data:store.read().leads||[],requestId});
       const leadMatch = pathname.match(/^\/api\/admin\/leads\/([^/]+)$/);
-      if (request.method === 'PATCH' && leadMatch) { const body=await readJson(request); const updated=store.update(data=>{const item=(data.leads||[]).find(x=>x.id===leadMatch[1]); if(!item) throw new ApiError(404,'LEAD_NOT_FOUND','Lead not found'); for(const k of ['status','assignee','interest','expectedTime','deliveryNeed','note']) if(body[k]!==undefined) item[k]=String(body[k]).slice(0,500); item.updatedAt=new Date().toISOString(); addAudit(data,'更新咨询线索',item.leadNo); return item;}); return sendJson(response,200,{data:updated,requestId}); }
+      if (request.method === 'PATCH' && leadMatch) {
+        const body=await readJson(request);
+        if (body.status !== undefined && !allowedLeadStatuses.has(body.status)) throw new ApiError(400,'VALIDATION_ERROR','Unsupported lead status');
+        const updated=store.update(data=>{const item=(data.leads||[]).find(x=>x.id===leadMatch[1]); if(!item) throw new ApiError(404,'LEAD_NOT_FOUND','Lead not found'); for(const k of ['status','assignee','interest','expectedTime','deliveryNeed','note']) if(body[k]!==undefined) item[k]=String(body[k]).slice(0,500); item.updatedAt=new Date().toISOString(); addAudit(data,'更新咨询线索',item.leadNo); return item;});
+        return sendJson(response,200,{data:updated,requestId});
+      }
       const followMatch = pathname.match(/^\/api\/admin\/leads\/([^/]+)\/follow-ups$/);
       if (request.method === 'POST' && followMatch) { const body=await readJson(request); const updated=store.update(data=>{const item=(data.leads||[]).find(x=>x.id===followMatch[1]); if(!item) throw new ApiError(404,'LEAD_NOT_FOUND','Lead not found'); const text=requireString(body.content,'content',{maxLength:500}); item.followUps=item.followUps||[]; item.followUps.unshift({id:`fu_${randomUUID()}`,content:text,operator:body.operator||'运营管理员',createdAt:new Date().toISOString()}); item.status=body.status||'FOLLOW_UP'; item.updatedAt=new Date().toISOString(); return item;}); return sendJson(response,200,{data:updated,requestId}); }
       if (request.method === 'GET' && pathname === '/api/admin/leads/export') { const leads=store.read().leads||[]; return sendJson(response,200,{data:leads,requestId}); }
