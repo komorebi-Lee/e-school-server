@@ -92,11 +92,11 @@ function createApp({ store }) {
         return sendJson(response, 200, { ok: true, service: 'campus-go-mock-api', requestId });
       }
 
-      // 公网域名默认访问根路径，直接展示运营管理端；/admin 继续兼容。
+      // 公网域名默认访问根路径，跳转到运营管理端。
       if (request.method === 'GET' && pathname === '/') {
-        const publicRoot = path.join(__dirname, '..', 'public');
-        if (sendStatic(response, path.join(publicRoot, 'admin.html'))) return;
-        throw new ApiError(404, 'ADMIN_ASSET_NOT_FOUND', 'Admin page not found');
+        response.writeHead(302, { location: '/admin', 'cache-control': 'no-store' });
+        response.end();
+        return;
       }
 
       if (request.method === 'GET' && (pathname === '/admin' || pathname.startsWith('/admin/'))) {
