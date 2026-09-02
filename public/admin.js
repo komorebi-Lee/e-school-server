@@ -89,20 +89,19 @@ function openLeadPanel(id){
     <div class="detail-section"><h3>当前状态</h3>
       <div class="lead-status-line"><span class="badge ${leadStatusClass(status)}">${leadStatusLabels[status]}</span><small>更新于 ${fmtDate(lead.updatedAt || lead.createdAt)}</small></div>
       <div class="lead-status-actions">
-        ${leadStatuses.map(s => `<button class="lead-action ${s === status ? 'active' : ''}" data-status="${s}" data-id="${lead.id}" ${s === status ? 'disabled' : ''}>${leadStatusLabels[s]}</button>`).join('')}
+        ${leadStatuses.map(s => `<button class="lead-action ${s === status ? 'active' : ''}" data-status="${s}" data-id="${lead.id}" ${s === status ? 'disabled' : ''} title="将线索设为${leadStatusLabels[s]}">设为${leadStatusLabels[s]}</button>`).join('')}
       </div>
     </div>
     <div class="detail-section"><h3>下一步建议</h3><div class="next-step">${esc(leadNextStep(lead))}</div>
       <div class="quick-contact"><a href="tel:${esc(lead.phone)}">拨打客户电话</a><button id="copyLeadInfo">复制客户信息</button></div>
     </div>
-    <div class="detail-section"><h3>记录联系结果</h3>
+    <div class="detail-section"><h3>新增跟进记录</h3>
       <textarea id="leadNote" class="lead-note" placeholder="例如：已确认轻风通勤版和校内配送，明天上午回复报价"></textarea>
-      <div class="lead-submit-row"><button id="saveContacted" class="lead-action primary">标记已联系</button><button id="saveCompleted" class="lead-action done">完成跟进</button></div>
+      <div class="lead-submit-row"><button id="saveContacted" class="lead-action primary">保存跟进记录</button></div>
     </div>
     <div class="detail-section"><h3>最近跟进</h3>${followUps.length ? `<div class="timeline">${followUps.map(f => `<div class="timeline-item"><strong>${esc(f.content)}</strong><span>${esc(f.operator || '运营管理员')} · ${fmtDate(f.createdAt)}</span></div>`).join('')}</div>` : '<p class="muted-empty">暂无跟进记录</p>'}</div>`;
   document.querySelectorAll('.lead-action[data-status]').forEach(btn => btn.addEventListener('click', () => updateLeadStatus(btn.dataset.id, btn.dataset.status)));
-  document.querySelector('#saveContacted')?.addEventListener('click', () => saveLeadFollow(lead.id, 'FOLLOW_UP'));
-  document.querySelector('#saveCompleted')?.addEventListener('click', () => saveLeadFollow(lead.id, 'COMPLETED'));
+  document.querySelector('#saveContacted')?.addEventListener('click', () => saveLeadFollow(lead.id));
   document.querySelector('#copyLeadInfo')?.addEventListener('click', async () => {
     const text = `${lead.name} ${lead.phone}\n${lead.businessType}：${lead.interest || ''}`;
     await navigator.clipboard.writeText(text); showToast('客户信息已复制');
@@ -115,10 +114,10 @@ async function updateLeadStatus(id, status){
   showToast('线索状态已更新'); await load(); openLeadPanel(id);
 }
 
-async function saveLeadFollow(id, status){
+async function saveLeadFollow(id){
   const note = document.querySelector('#leadNote')?.value.trim() || '';
   if (!note) return showToast('请先填写联系结果');
-  await api(`/api/admin/leads/${id}/follow-ups`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ content:note, status }) });
+  await api(`/api/admin/leads/${id}/follow-ups`, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ content:note }) });
   showToast('跟进结果已保存'); await load(); openLeadPanel(id);
 }
 
