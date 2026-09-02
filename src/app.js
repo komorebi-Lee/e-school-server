@@ -350,6 +350,20 @@ function createApp({ store }) {
         return sendJson(response, 200, { data: order, requestId });
       }
 
+      if (request.method === 'PATCH' && orderMatch) {
+        const body = await readJson(request);
+        const userId = requireString(body.userId, 'userId');
+        const updated = store.update((data) => {
+          const order = data.orders.find((item) => item.id === orderMatch[1] && item.userId === userId);
+          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+          if (['COMPLETED', 'CANCELLED', 'AFTER_SALE'].includes(order.status)) throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', 'Current order cannot be edited');
+          if (body.fulfillment && typeof body.fulfillment === 'object') order.fulfillment = { ...order.fulfillment, ...body.fulfillment };
+          order.updatedAt = new Date().toISOString();
+          return order;
+        });
+        return sendJson(response, 200, { data: updated, requestId });
+      }
+
       if (request.method === 'POST' && pathname === '/api/after-sales') {
         const body = await readJson(request);
         const userId = requireString(body.userId, 'userId', { maxLength: 64 });
