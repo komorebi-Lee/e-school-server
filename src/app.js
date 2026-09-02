@@ -16,7 +16,6 @@ const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
 const allowedLeadStatuses = new Set(['SUBMITTED', 'FOLLOW_UP', 'COMPLETED', 'INVALID']);
 const openLeadStatuses = new Set(['SUBMITTED', 'FOLLOW_UP']);
-
 function sendJson(response, statusCode, body) {
   response.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
@@ -73,6 +72,13 @@ function publicApplication(application) {
 
 function createApp({ store }) {
   const adminSessions = new Map();
+  const statusLabels = {
+    PAID:'已支付，待配送', FULFILLING:'配送中', COMPLETED:'已完成', CANCELLED:'已取消', AFTER_SALE:'售后中',
+    PENDING_REALNAME:'待实名激活', ACTIVATED:'已激活', REJECTED:'未通过',
+    PENDING_CREDIT:'待到账', CREDITED:'已到账',
+    PENDING_VERIFY:'待核验', APPROVED:'可预约安装',
+    MATERIAL_PENDING:'待补材料', REVIEWING:'审核中'
+  };
   function addAudit(data, action, target) {
     if (!Array.isArray(data.auditLogs)) data.auditLogs = [];
     data.auditLogs.unshift({ id: `log_${randomUUID()}`, operator: '运营管理员', action, target, createdAt: new Date().toISOString() });
@@ -174,6 +180,128 @@ function createApp({ store }) {
         const lead = { id:`lead_${randomUUID()}`, leadNo:`LS${Date.now().toString().slice(-8)}`, userId:requireString(body.userId || 'guest','userId',{maxLength:64}), name:requireString(body.name,'name',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), businessType:requireString(body.businessType,'businessType',{maxLength:40}), interest:requireString(body.interest || '未指定','interest',{maxLength:120}), expectedTime:(body.expectedTime||'尽快').toString().slice(0,40), deliveryNeed:(body.deliveryNeed||'无').toString().slice(0,120), note:(body.note||'').toString().slice(0,500), status:'SUBMITTED', assignee:'', followUps:[], createdAt:now.toISOString(), updatedAt:now.toISOString(), slaDueAt:new Date(now.getTime()+24*3600*1000).toISOString() };
         store.update(data => { if (!Array.isArray(data.leads)) data.leads=[]; data.leads.unshift(lead); addAudit(data,'新增咨询线索',lead.leadNo); });
         return sendJson(response,201,{data:lead,requestId});
+      }
+      if (request.method === 'GET' && pathname === '/api/service-records') {
+        const userId = requireString(url.searchParams.get('userId'), 'userId');
+        const data = store.read();
+        const phoneCardOrders = (data.phoneCardOrders || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.amountInCents || 0, phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
+        const rechargeOrders = (data.rechargeOrders || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents || 0)/100).toFixed(0)}送${((item.receiveInCents || 0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.paidInCents || 0, phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
+        const broadbandApplications = (data.broadbandApplications || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'BROADBAND', typeLabel:'宽带', title:'双人购卡宽带', status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:0, phone:item.ownerPhone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
+        const plateApplications = (data.plateApplications || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel || '校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.feeInCents || 0, phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
+        const items = [...phoneCardOrders, ...rechargeOrders, ...broadbandApplications, ...plateApplications].sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+        return sendJson(response,200,{data:items,total:items.length,requestId});
+      }
+      if (request.method === 'GET' && pathname === '/api/my/orders') {
+        const userId = requireString(url.searchParams.get('userId'), 'userId');
+        const data = store.read();
+        const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '' }));
+        const serviceRecords = (() => {
+          const phoneCardOrders=(data.phoneCardOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.amountInCents||0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const rechargeOrders=(data.rechargeOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents||0)/100).toFixed(0)}送${((item.receiveInCents||0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.paidInCents||0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const broadbandApplications=(data.broadbandApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'BROADBAND', typeLabel:'宽带', title:'双人购卡宽带', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const plateApplications=(data.plateApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel||'校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.feeInCents||0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          return [...phoneCardOrders,...rechargeOrders,...broadbandApplications,...plateApplications];
+        })();
+        return sendJson(response,200,{data:{ebikeOrders,serviceRecords},requestId});
+      }
+      if (request.method === 'POST' && pathname === '/api/phone-card-orders') {
+        const body = await readJson(request);
+        const ownerUserId = requireString(body.userId,'userId',{maxLength:64});
+        const amountInCents = Number(body.amountInCents);
+        if (!Number.isInteger(amountInCents) || amountInCents < 0 || amountInCents > 10000000) throw new ApiError(400,'VALIDATION_ERROR','amountInCents must be between 0 and 10000000');
+        const now = new Date().toISOString();
+        const record = { id:`tel_${randomUUID()}`, userId:ownerUserId, customerName:requireString(body.customerName,'customerName',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), planName:requireString(body.planName,'planName',{maxLength:80}), amountInCents, status:'PENDING_REALNAME', relatedIds:{}, createdAt:now, updatedAt:now };
+        store.update(data=>{ (data.phoneCardOrders=data.phoneCardOrders||[]).unshift(record); (data.rechargeOrders||[]).forEach(item=>{if(item.userId===ownerUserId&&item.phone===record.phone&&!item.relatedIds?.phoneCardOrderId)item.relatedIds={...(item.relatedIds||{}),phoneCardOrderId:record.id};}); addAudit(data,'新增电话卡订单',record.id); });
+        return sendJson(response,201,{data:record,requestId});
+      }
+      if (request.method === 'POST' && pathname === '/api/recharge-orders') {
+        const body = await readJson(request);
+        const ownerUserId = requireString(body.userId,'userId',{maxLength:64});
+        const paidInCents = Number(body.paidInCents);
+        const receiveInCents = Number(body.receiveInCents);
+        if (!Number.isInteger(paidInCents) || paidInCents < 1000 || paidInCents > 10000000 || !Number.isInteger(receiveInCents) || receiveInCents <= paidInCents || receiveInCents > 10000000) throw new ApiError(400,'VALIDATION_ERROR','Invalid recharge amount');
+        const now = new Date().toISOString();
+        const record = { id:`top_${randomUUID()}`, userId:ownerUserId, phone:requireString(body.phone,'phone',{maxLength:30}), paidInCents, receiveInCents, status:'PENDING_CREDIT', relatedIds:{}, createdAt:now, updatedAt:now };
+        store.update(data=>{ const related=(data.phoneCardOrders||[]).find(item=>item.userId===ownerUserId&&item.phone===record.phone); if(related)record.relatedIds={phoneCardOrderId:related.id}; (data.rechargeOrders=data.rechargeOrders||[]).unshift(record); addAudit(data,'新增话费权益订单',record.id); });
+        return sendJson(response,201,{data:record,requestId});
+      }
+      if (request.method === 'POST' && pathname === '/api/broadband-applications') {
+        const body = await readJson(request);
+        const ownerPhone = requireString(body.ownerPhone,'ownerPhone',{maxLength:30});
+        const companionPhone = requireString(body.companionPhone,'companionPhone',{maxLength:30});
+        if (ownerPhone === companionPhone) throw new ApiError(400,'VALIDATION_ERROR','两个号码不能相同');
+        const now = new Date().toISOString();
+        const record = { id:`net_${randomUUID()}`, userId:requireString(body.userId,'userId',{maxLength:64}), ownerPhone, companionPhone, status:'PENDING_VERIFY', relatedIds:{}, createdAt:now, updatedAt:now };
+        store.update(data=>{ (data.broadbandApplications=data.broadbandApplications||[]).unshift(record); addAudit(data,'新增宽带资格申请',record.id); });
+        return sendJson(response,201,{data:record,requestId});
+      }
+      if (request.method === 'POST' && pathname === '/api/plate-applications') {
+        const body = await readJson(request);
+        const userId = requireString(body.userId,'userId',{maxLength:64});
+        const customerName = requireString(body.customerName,'customerName',{maxLength:50});
+        const customerPhone = requireString(body.customerPhone,'customerPhone',{maxLength:30});
+        const vehicleModel = requireString(body.vehicleModel,'vehicleModel',{maxLength:80});
+        const now = new Date().toISOString();
+        const record = store.update(data=>{
+          const order = body.orderId ? (data.orders||[]).find(item=>item.id===body.orderId && item.userId===userId) : null;
+          if (body.orderId && !order) throw new ApiError(404,'ORDER_NOT_FOUND','Order not found');
+          const platformOrder = order && (data.products||[]).find(product=>product.id===order.items?.[0]?.productId)?.category === 'E_BIKE_NEW';
+          const application = { id:`plate_${randomUUID()}`, userId, customerName, phone:customerPhone, vehicleModel, source:platformOrder?'PLATFORM_ORDER':'EXTERNAL', feeInCents:platformOrder?0:((data.adminSettings||{}).externalPlateFeeInCents ?? 4900), relatedOrderId:order?.id || '', status:'MATERIAL_PENDING', relatedIds:order?{ platformOrderIds:[order.id] }:{}, createdAt:now, updatedAt:now };
+          (data.plateApplications=data.plateApplications||[]).unshift(application);
+          addAudit(data,'新增校园牌照辅助申请',application.id);
+          return application;
+        });
+        return sendJson(response,201,{data:record,requestId});
+      }
+      const businessMatch = pathname.match(/^\/api\/service-records\/([^/]+)\/actions$/);
+      if (request.method === 'POST' && businessMatch) {
+        const body = await readJson(request);
+        const userId = requireString(body.userId, 'userId', { maxLength:64 });
+        const action = requireString(body.action, 'action', { maxLength:40 });
+        const recordId = businessMatch[1];
+        const result = store.update((data) => {
+          const collections = [
+            { key:'phoneCardOrders', type:'PHONE_PLAN' },
+            { key:'rechargeOrders', type:'RECHARGE' },
+            { key:'broadbandApplications', type:'BROADBAND' },
+            { key:'plateApplications', type:'PLATE' }
+          ];
+          for (const collection of collections) {
+            const item = (data[collection.key] || []).find(row => row.id === recordId && row.userId === userId);
+            if (!item) continue;
+            if (collection.type === 'PHONE_PLAN' && action === 'APPLY_BROADBAND') {
+              if (item.relatedIds?.broadbandApplicationId) throw new ApiError(409,'ACTION_ALREADY_DONE','该订单已提交宽带资格');
+              const application = { id:`net_${randomUUID().slice(0,8)}`, userId, ownerPhone:item.phone, companionPhone:item.companionPhone || '', relatedOrderId:item.id, status:'PENDING_VERIFY', relatedIds:{ phoneCardOrderId:item.id }, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+              (data.broadbandApplications = data.broadbandApplications || []).unshift(application);
+              item.relatedIds = { ...(item.relatedIds || {}), broadbandApplicationId:application.id };
+              item.updatedAt = new Date().toISOString();
+              addAudit(data, '电话卡订单申请宽带资格', item.id);
+              return { type:'BROADBAND', record:application };
+            }
+            if (collection.type === 'RECHARGE' && action === 'ACTIVATE_CARD') {
+              if (!item.relatedIds?.phoneCardOrderId) throw new ApiError(409,'ACTION_NOT_ALLOWED','请先关联电话卡订单');
+              const cardOrder = (data.phoneCardOrders || []).find(row => row.id === item.relatedIds.phoneCardOrderId && row.userId === userId);
+              if (!cardOrder) throw new ApiError(404,'RELATED_ORDER_NOT_FOUND','未找到关联电话卡订单');
+              if (cardOrder.status === 'ACTIVATED') throw new ApiError(409,'ACTION_ALREADY_DONE','电话卡已激活');
+              cardOrder.status = 'ACTIVATED';
+              cardOrder.updatedAt = new Date().toISOString();
+              addAudit(data, '话费权益订单激活电话卡', cardOrder.id);
+              return { type:'PHONE_PLAN', record:cardOrder };
+            }
+            if (collection.type === 'PLATE' && action === 'SYNC_PLATFORM_ORDER') {
+              const order = (data.orders || []).find(row => row.userId === userId && (item.relatedIds?.platformOrderIds || []).includes(row.id));
+              if (!order) throw new ApiError(404,'PLATFORM_ORDER_NOT_FOUND','未找到平台购车订单');
+              item.source = 'PLATFORM_ORDER';
+              item.feeInCents = 0;
+              item.updatedAt = new Date().toISOString();
+              addAudit(data, '牌照辅助关联平台购车订单', item.id);
+              return { type:'PLATE', record:item };
+            }
+            break;
+          }
+          throw new ApiError(404,'SERVICE_RECORD_NOT_FOUND','Service record not found');
+        });
+        return sendJson(response,200,{data:result.record,type:result.type,requestId});
       }
       if (request.method === 'GET' && pathname === '/api/admin/leads') return sendJson(response,200,{data:store.read().leads||[],requestId});
       const leadMatch = pathname.match(/^\/api\/admin\/leads\/([^/]+)$/);
@@ -335,6 +463,25 @@ function createApp({ store }) {
             updatedAt: now
           };
           data.orders.push(order);
+          const bikeItem = order.items.find((item) => (data.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
+          if (bikeItem) {
+            const plateApplication = {
+              id: `plate_${randomUUID()}`,
+              userId,
+              customerName: order.fulfillment?.contactName || '平台购车用户',
+              phone: order.fulfillment?.contactPhone || '',
+              vehicleModel: bikeItem.name,
+              source: 'PLATFORM_ORDER',
+              feeInCents: 0,
+              relatedOrderId: order.id,
+              status: 'MATERIAL_PENDING',
+              relatedIds: { platformOrderIds: [order.id] },
+              createdAt: now,
+              updatedAt: now
+            };
+            (data.plateApplications = data.plateApplications || []).unshift(plateApplication);
+            addAudit(data, '购车订单自动创建免费牌照辅助', order.orderNo);
+          }
           if (compoundKey) data.idempotencyKeys[compoundKey] = order.id;
           return { order, reused: false };
         });

@@ -103,6 +103,12 @@ test('order total is server-calculated and idempotency prevents duplicate orders
 
   const list = await api('/api/orders?userId=u1');
   assert.equal(list.body.total, 1);
+
+  const linked = await api('/api/my/orders?userId=u1');
+  assert.equal(linked.response.status, 200);
+  assert.equal(linked.body.data.ebikeOrders.length, 1);
+  assert.ok(linked.body.data.ebikeOrders[0].plateApplicationId);
+  assert.ok(linked.body.data.serviceRecords.some((item) => item.type === 'PLATE' && item.amountInCents === 0));
 });
 
 test('after-sale request checks order ownership and prevents duplicates', async () => {
@@ -135,4 +141,29 @@ test('stock validation rejects excessive quantities', async () => {
   });
   assert.equal(result.response.status, 409);
   assert.equal(result.body.error.code, 'INSUFFICIENT_STOCK');
+});
+
+test('phone card service record can apply for broadband once', async () => {
+  const created = await api('/api/phone-card-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      userId: 'linked_user', customerName: '联同学', phone: '15527111396',
+      planName: '校园畅享卡', amountInCents: 2900
+    })
+  });
+  assert.equal(created.response.status, 201);
+  const recordId = created.body.data.id;
+
+  const first = await api(`/api/service-records/${recordId}/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ userId: 'linked_user', action: 'APPLY_BROADBAND' })
+  });
+  assert.equal(first.response.status, 200);
+  assert.equal(first.body.data.status, 'PENDING_VERIFY');
+
+  const repeated = await api(`/api/service-records/${recordId}/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ userId: 'linked_user', action: 'APPLY_BROADBAND' })
+  });
+  assert.equal(repeated.response.status, 409);
 });
