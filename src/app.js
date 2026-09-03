@@ -89,6 +89,39 @@ function withMerchantName(product, merchants) {
   return { ...product, merchantName: merchants.find((merchant) => merchant.id === product.merchantId)?.name || '平台自营' };
 }
 
+function createCollaboration(order, merchantId) {
+  return {
+    merchantId,
+    handoffs: [
+      { role:'PLATFORM', action:'PLATFORM_ACCEPTED', note:'平台已生成订单', createdAt:order.createdAt },
+      { role:'MERCHANT', action:'WAIT_ACCEPT', note:'待商家确认履约', createdAt:order.createdAt }
+    ],
+    roleActions: {
+      MERCHANT: order.status === 'PAID' ? ['ACCEPT'] : order.status === 'FULFILLING' ? ['COMPLETE'] : [],
+      USER: order.status === 'FULFILLING' ? [] : order.status === 'COMPLETED' ? ['REVIEW'] : ['CONFIRM_INFO'],
+      PLATFORM: []
+    },
+    intervention: { status:'NONE', note:'', updatedAt:'' },
+    messages: [
+      { id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'订单已支付，等待商家确认履约。', createdAt:order.createdAt }
+    ]
+  };
+}
+
+function appendCollaborationEvent(order, role, action, note) {
+  const time = new Date().toISOString();
+  order.collaboration ||= { merchantId:'', handoffs:[], roleActions:{ MERCHANT:[],USER:[],PLATFORM:[] }, intervention:{ status:'NONE', note:'', updatedAt:'' }, messages:[] };
+  order.collaboration.handoffs.unshift({ role, action, note, createdAt:time });
+  order.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role, text:note, createdAt:time });
+  order.collaboration.roleActions = {
+    MERCHANT: order.status === 'PAID' ? ['ACCEPT'] : order.status === 'FULFILLING' ? ['COMPLETE'] : [],
+    USER: order.status === 'COMPLETED' ? ['REVIEW'] : ['CONFIRM_INFO'],
+    PLATFORM: order.collaboration.intervention.status === 'REQUESTED' ? ['RESOLVE'] : []
+  };
+  order.collaboration.intervention.status = role === 'PLATFORM' ? 'RESOLVED' : order.collaboration.intervention.status;
+  order.collaboration.intervention.updatedAt = time;
+}
+
 function createApp({ store }) {
   const adminSessions = new Map();
   const merchantSessions = new Map();
@@ -259,6 +292,44 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: items.map((product) => withMerchantName(product, store.read().merchants || [])), total: items.length, requestId });
       }
 
+      if (request.method === 'POST' && pathname === '/api/order-collab') {
+        const body = await readJson(request);
+        const role = requireString(body.role, 'role', { maxLength: 20 });
+        const action = requireString(body.action, 'action', { maxLength: 40 });
+        const orderId = requireString(body.orderId, 'orderId', { maxLength: 80 });
+        const note = requireString(body.note, 'note', { maxLength: 300 });
+        if (!['USER','MERCHANT','PLATFORM'].includes(role)) throw new ApiError(400,'VALIDATION_ERROR','Unsupported role');
+        if (role === 'MERCHANT') requireMerchant(request);
+        if (role === 'PLATFORM') {
+          const adminToken=(request.headers.authorization||'').replace(/^Bearer\s+/i,'');
+          if (!adminSessions.get(adminToken)) throw new ApiError(401,'ADMIN_UNAUTHORIZED','请重新登录管理端');
+        }
+        const order = store.update((data) => {
+          const item = data.orders.find((row) => row.id === orderId);
+          if (!item) throw new ApiError(404,'ORDER_NOT_FOUND','Order not found');
+          if (role === 'USER') {
+            const userId = requireString(body.userId,'userId',{maxLength:64});
+            if (item.userId !== userId) throw new ApiError(403,'ORDER_FORBIDDEN','无权操作该订单');
+          }
+          item.collaboration ||= createCollaboration(item, item.items[0]?.merchantId || '');
+          if (role === 'MERCHANT') {
+            const merchant = (data.merchants||[]).find(row=>row.id===merchantSessions.get((request.headers.authorization||'').replace(/^Bearer\s+/i,''))?.merchantId);
+            if (!merchant || merchant.id !== item.collaboration.merchantId) throw new ApiError(403,'ORDER_FORBIDDEN','无权操作该订单');
+            if (action === 'ACCEPT' && item.status === 'PAID') item.status = 'FULFILLING';
+            else if (action === 'COMPLETE' && item.status === 'FULFILLING') item.status = 'COMPLETED';
+            else if (!['CONTACT','NOTE'].includes(action)) throw new ApiError(409,'ACTION_NOT_ALLOWED','当前状态不支持该商家动作');
+          }
+          if (role === 'PLATFORM' && action === 'INTERVENE') item.collaboration.intervention = { status:'REQUESTED', note, updatedAt:new Date().toISOString() };
+          if (role === 'PLATFORM' && action === 'RESOLVE') item.collaboration.intervention = { status:'RESOLVED', note, updatedAt:new Date().toISOString() };
+          if (role === 'USER' && action === 'APPEAL') item.collaboration.intervention = { status:'REQUESTED', note, updatedAt:new Date().toISOString() };
+          const eventNote = role === 'MERCHANT' ? (action === 'ACCEPT' ? '商家已确认履约' : action === 'COMPLETE' ? '商家已完成服务' : note) : note;
+          appendCollaborationEvent(item, role, action, eventNote);
+          addAudit(data, `${role}订单协同动作：${action}`, item.orderNo);
+          return item;
+        });
+        return sendJson(response,200,{data:order,requestId});
+      }
+
       if (request.method === 'POST' && pathname === '/api/merchants') {
         const body = await readJson(request);
         const userId = requireString(body.userId, 'userId', { maxLength: 64 });
@@ -364,6 +435,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const orders = data.orders
           .filter((order) => order.items.some((item) => products.some((product) => product.id === item.productId)))
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        const enrichedOrders = orders.map((order) => ({
+          ...order,
+          merchantName: merchant.name,
+          collaboration: order.collaboration || createCollaboration(order, merchant.id)
+        }));
         const revenueInCents = orders.reduce((sum, order) => sum + order.totalInCents, 0);
         return sendJson(response, 200, {
           data: {
@@ -376,7 +452,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               lowStockCount: products.filter((product) => product.stock < 10).length
             },
             products,
-            orders
+            orders: enrichedOrders
           },
           requestId
         });
@@ -426,7 +502,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: product, requestId });
       }
 
-      const merchantOrderMatch = pathname.match(/^\/api\/merchant\/orders\/([^/]+)\/status$/);
+        const merchantOrderMatch = pathname.match(/^\/api\/merchant\/orders\/([^/]+)\/status$/);
       if (request.method === 'POST' && merchantOrderMatch) {
         const body = await readJson(request);
         const status = requireString(body.status, 'status', { maxLength: 30 });
@@ -440,6 +516,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!['PAID', 'FULFILLING'].includes(item.status)) throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '当前订单状态不可更新');
           item.status = status;
           item.updatedAt = new Date().toISOString();
+          appendCollaborationEvent(item, 'MERCHANT', status === 'FULFILLING' ? 'ACCEPT' : 'COMPLETE', status === 'FULFILLING' ? '商家已确认履约' : '商家已完成服务');
           addAudit(data, '商家更新订单状态', item.orderNo);
           return item;
         });
@@ -496,7 +573,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/my/orders') {
         const userId = requireString(url.searchParams.get('userId'), 'userId');
         const data = store.read();
-        const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '' }));
+        const merchants = data.merchants || [];
+        const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, collaboration:order.collaboration || createCollaboration(order, order.items?.[0]?.merchantId || ''), merchantName:merchants.find(merchant=>merchant.id===order.collaboration?.merchantId)?.name || '平台自营', plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '' }));
         const serviceRecords = (() => {
           const phoneCardOrders=(data.phoneCardOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.amountInCents||0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           const rechargeOrders=(data.rechargeOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents||0)/100).toFixed(0)}送${((item.receiveInCents||0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.paidInCents||0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
@@ -782,7 +860,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             paymentStatus: 'MOCK_SUCCESS',
             fulfillment: body.fulfillment || { type: 'PICKUP' },
             createdAt: now,
-            updatedAt: now
+            updatedAt: now,
+            collaboration: createCollaboration({ createdAt: now, status:'PAID' }, orderItems[0]?.merchantId || '')
           };
           data.orders.push(order);
           const bikeItem = order.items.find((item) => (data.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');

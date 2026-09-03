@@ -286,3 +286,33 @@ test('phone card service record can apply for broadband once', async () => {
   });
   assert.equal(repeated.response.status, 409);
 });
+
+test('order collaboration is shared by user merchant and platform', async () => {
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'collab-001' },
+    body: JSON.stringify({ userId:'collab_user', items:[{ productId:'prod_ebike_001', quantity:1 }] })
+  });
+  const orderId = created.body.data.id;
+  assert.ok(created.body.data.collaboration);
+
+  const merchantLogin = await api('/api/merchant/login', {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ userId:'merchant_demo', merchantId:'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+
+  const accepted = await api('/api/order-collab', {
+    method:'POST', headers:{ 'content-type':'application/json', authorization:`Bearer ${merchantLogin.body.data.token}` },
+    body:JSON.stringify({ role:'MERCHANT', action:'ACCEPT', orderId, note:'已确认库存，今天安排校内配送。' })
+  });
+  assert.equal(accepted.response.status, 200);
+  assert.equal(accepted.body.data.status, 'FULFILLING');
+
+  const appealed = await api('/api/order-collab', {
+    method:'POST', headers:{ 'content-type':'application/json' },
+    body:JSON.stringify({ role:'USER', action:'APPEAL', orderId, userId:'collab_user', note:'配送时间需要改成明天上午。' })
+  });
+  assert.equal(appealed.response.status, 200);
+  assert.equal(appealed.body.data.collaboration.intervention.status, 'REQUESTED');
+  assert.ok(appealed.body.data.collaboration.messages.some((message)=>message.role==='USER'));
+});
