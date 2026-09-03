@@ -16,6 +16,11 @@ const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
 const allowedLeadStatuses = new Set(['SUBMITTED', 'FOLLOW_UP', 'COMPLETED', 'INVALID']);
 const openLeadStatuses = new Set(['SUBMITTED', 'FOLLOW_UP']);
+const allowedMerchantCategories = new Set(['E_BIKE', 'DIGITAL', 'FOOD', 'LIFE_SERVICE']);
+const allowedMerchantStatuses = new Set(['REVIEWING', 'APPROVED', 'REJECTED']);
+const allowedMerchantOrderStatuses = new Set(['PAID', 'FULFILLING', 'COMPLETED', 'CANCELLED']);
+const allowedMerchantTypes = new Set(['INDIVIDUAL', 'ENTERPRISE', 'PERSONAL']);
+const identityVerifications = new Map();
 function sendJson(response, statusCode, body) {
   response.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
@@ -50,7 +55,7 @@ async function readJson(request) {
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 1024 * 1024) throw new ApiError(413, 'PAYLOAD_TOO_LARGE', 'Request body exceeds 1 MB');
+  if (size > 8 * 1024 * 1024) throw new ApiError(413, 'PAYLOAD_TOO_LARGE', 'Request body exceeds 8 MB');
     chunks.push(chunk);
   }
   if (chunks.length === 0) return {};
@@ -70,8 +75,24 @@ function publicApplication(application) {
   };
 }
 
+function merchantPublic(merchant) {
+  const { ownerName, phone, ...safe } = merchant;
+  return {
+    ...safe,
+    merchantType: safe.merchantType || 'INDIVIDUAL',
+    ownerNameMasked: ownerName ? `${ownerName.slice(0, 1)}**` : '',
+    phoneMasked: phone ? `${phone.slice(0, 3)}****${phone.slice(-4)}` : ''
+  };
+}
+
+function withMerchantName(product, merchants) {
+  return { ...product, merchantName: merchants.find((merchant) => merchant.id === product.merchantId)?.name || '平台自营' };
+}
+
 function createApp({ store }) {
   const adminSessions = new Map();
+  const merchantSessions = new Map();
+  const uploadsDirectory = path.join(path.dirname(store.filePath), 'uploads');
   const statusLabels = {
     PAID:'已支付，待配送', FULFILLING:'配送中', COMPLETED:'已完成', CANCELLED:'已取消', AFTER_SALE:'售后中',
     PENDING_REALNAME:'待实名激活', ACTIVATED:'已激活', REJECTED:'未通过',
@@ -83,6 +104,32 @@ function createApp({ store }) {
     if (!Array.isArray(data.auditLogs)) data.auditLogs = [];
     data.auditLogs.unshift({ id: `log_${randomUUID()}`, operator: '运营管理员', action, target, createdAt: new Date().toISOString() });
     data.auditLogs = data.auditLogs.slice(0, 200);
+  }
+
+  function requireMerchant(request) {
+    const token = (request.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const session = merchantSessions.get(token);
+    if (!session || session.expiresAt < Date.now()) throw new ApiError(401, 'MERCHANT_UNAUTHORIZED', '请重新登录商家工作台');
+    return session;
+  }
+
+function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 0 || number > max) throw new ApiError(400, 'VALIDATION_ERROR', `${field} 格式不正确`);
+    return number;
+  }
+
+  function maskIdNumber(value) {
+    return value.length >= 8 ? `${value.slice(0, 4)}********${value.slice(-4)}` : '********';
+  }
+
+  function validateMockIdNumber(value) {
+    if (!/^\d{17}[\dXx]$/.test(value)) return false;
+    const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+    const checksums = ['1', '0', 'X', '9', '8', '7', '6', '5', '4', '3', '2'];
+    let sum = 0;
+    for (let index = 0; index < 17; index += 1) sum += Number(value[index]) * weights[index];
+    return checksums[sum % 11] === value[17].toUpperCase();
   }
   return async function app(request, response) {
     const requestId = randomUUID();
@@ -123,6 +170,73 @@ function createApp({ store }) {
         return sendJson(response, 200, { data: { token, user: { name: '运营管理员', role: '超级管理员' }, expiresIn: 28800 }, requestId });
       }
 
+      if (request.method === 'POST' && pathname === '/api/uploads') {
+        const body = await readJson(request);
+        const dataBase64 = requireString(body.dataBase64, 'dataBase64', { maxLength: 7000000 });
+        const mimeType = requireString(body.mimeType, 'mimeType', { maxLength: 50 });
+        if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '仅支持 JPG、PNG 或 WebP 图片');
+        }
+        const file = Buffer.from(dataBase64, 'base64');
+        if (file.length < 1024 || file.length > 5 * 1024 * 1024) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '图片大小需在 1KB 到 5MB 之间');
+        }
+        const isJpeg = file[0] === 0xff && file[1] === 0xd8 && file[2] === 0xff;
+        const isPng = file[0] === 0x89 && file[1] === 0x50 && file[2] === 0x4e;
+        const isWebp = file.slice(0, 4).toString('ascii') === 'RIFF' && file.slice(8, 12).toString('ascii') === 'WEBP';
+        if (!isJpeg && !isPng && !isWebp) throw new ApiError(400, 'VALIDATION_ERROR', '图片内容格式不正确');
+        const extension = mimeType === 'image/png' ? '.png' : mimeType === 'image/webp' ? '.webp' : '.jpg';
+        const fileName = `${randomUUID()}${extension}`;
+        fs.mkdirSync(uploadsDirectory, { recursive: true });
+        fs.writeFileSync(path.join(uploadsDirectory, fileName), file);
+        return sendJson(response, 201, { data: { url: `/api/uploads/${fileName}`, size: file.length }, requestId });
+      }
+
+      const uploadMatch = pathname.match(/^\/api\/uploads\/([^/]+)$/);
+      if (request.method === 'GET' && uploadMatch) {
+        const fileName = path.basename(uploadMatch[1]);
+        const filePath = path.join(uploadsDirectory, fileName);
+        if (!fs.existsSync(filePath)) throw new ApiError(404, 'UPLOAD_NOT_FOUND', 'Upload not found');
+        const extension = path.extname(filePath).toLowerCase();
+        const mimeType = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }[extension] || 'application/octet-stream';
+        response.writeHead(200, { 'content-type': mimeType, 'cache-control': 'private, max-age=3600' });
+        response.end(fs.readFileSync(filePath));
+        return;
+      }
+
+      if (request.method === 'POST' && pathname === '/api/identity/verify') {
+        const body = await readJson(request);
+        const userId = requireString(body.userId, 'userId', { maxLength: 64 });
+        const ownerName = requireString(body.ownerName, 'ownerName', { maxLength: 40 });
+        const idNumber = requireString(body.idNumber, 'idNumber', { maxLength: 18 });
+        const normalizedIdNumber = idNumber.toUpperCase();
+        if (!validateMockIdNumber(normalizedIdNumber)) {
+          throw new ApiError(400, 'INVALID_ID_NUMBER', '身份证号格式或校验位不正确');
+        }
+        if (ownerName === '123' || ownerName.length > 10) throw new ApiError(400, 'ID_NAME_MISMATCH', '姓名与身份证号不一致');
+        const verifiedAt = new Date().toISOString();
+        const token = randomUUID();
+        const maskedIdNumber = maskIdNumber(normalizedIdNumber);
+        identityVerifications.set(token, {
+          userId,
+          ownerName,
+          idNumber: normalizedIdNumber,
+          maskedIdNumber,
+          verifiedAt,
+          expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+        });
+        return sendJson(response, 200, {
+          data: {
+            token,
+            status: 'VERIFIED',
+            ownerNameMasked: `${ownerName.slice(0, 1)}${ownerName.length > 1 ? '*' : ''}`,
+            idNumberMasked: maskedIdNumber,
+            verifiedAt
+          },
+          requestId
+        });
+      }
+
       if (pathname.startsWith('/api/admin/')) {
         const token = (request.headers.authorization || '').replace(/^Bearer\s+/i, '');
         const session = adminSessions.get(token);
@@ -142,7 +256,194 @@ function createApp({ store }) {
           .filter((product) => !category || product.category === category)
           .filter((product) => !campusId || product.campusIds.includes(campusId))
           .filter((product) => !query || `${product.name} ${product.description}`.toLowerCase().includes(query));
+        return sendJson(response, 200, { data: items.map((product) => withMerchantName(product, store.read().merchants || [])), total: items.length, requestId });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/merchants') {
+        const body = await readJson(request);
+        const userId = requireString(body.userId, 'userId', { maxLength: 64 });
+        const merchantType = requireString(body.merchantType, 'merchantType', { maxLength: 20 });
+        if (!allowedMerchantTypes.has(merchantType)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant type');
+        const name = requireString(body.name, 'name', { maxLength: 80 });
+        if (name.length < 2) throw new ApiError(400, 'VALIDATION_ERROR', '店铺名称至少 2 个字符');
+        const ownerName = requireString(body.ownerName, 'ownerName', { maxLength: 40 });
+        if (ownerName.length < 2) throw new ApiError(400, 'VALIDATION_ERROR', '经营者姓名至少 2 个字符');
+        const phone = requireString(body.phone, 'phone', { maxLength: 20 });
+        if (!/^1\d{10}$/.test(phone)) throw new ApiError(400, 'VALIDATION_ERROR', 'phone 格式不正确');
+        const category = requireString(body.category, 'category', { maxLength: 30 });
+        if (!allowedMerchantCategories.has(category)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant category');
+        const serviceArea = requireString(body.serviceArea, 'serviceArea', { maxLength: 100 });
+        const description = requireString(body.description, 'description', { maxLength: 300 });
+        const licenseNo = merchantType === 'PERSONAL'
+          ? (typeof body.licenseNo === 'string' ? body.licenseNo.trim() : '')
+          : requireString(body.licenseNo, 'licenseNo', { maxLength: 30 });
+        if (licenseNo && !/^[0-9A-Z]{15,18}$/.test(licenseNo)) throw new ApiError(400, 'VALIDATION_ERROR', 'licenseNo 格式不正确');
+        const licenseUrl = merchantType === 'PERSONAL'
+          ? (typeof body.licenseUrl === 'string' ? body.licenseUrl.trim() : '')
+          : requireString(body.licenseUrl, 'licenseUrl', { maxLength: 200 });
+        if (body.agreeAgreement !== true || body.agreePrivacy !== true) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '请先同意入驻协议和隐私保护指引');
+        }
+        const identityVerificationToken = merchantType === 'PERSONAL' ? requireString(body.identityVerificationToken, 'identityVerificationToken', { maxLength: 80 }) : '';
+        if (identityVerificationToken) {
+          const verification = identityVerifications.get(identityVerificationToken);
+          if (!verification || verification.userId !== userId || verification.ownerName !== ownerName || verification.expiresAt < new Date().toISOString()) {
+            throw new ApiError(400, 'IDENTITY_VERIFICATION_INVALID', '实名验证无效，请重新验证');
+          }
+        } else if (merchantType === 'PERSONAL') {
+          throw new ApiError(400, 'IDENTITY_VERIFICATION_REQUIRED', '请先完成模拟实名验证');
+        }
+
+        const existing = store.read().merchants?.find((item) => item.userId === userId && item.status !== 'REJECTED');
+        if (existing) {
+          return sendJson(response, 200, { data: merchantPublic(existing), idempotent: true, message: '您已有入驻申请', requestId });
+        }
+
+        const application = store.update((data) => {
+          const record = {
+            id: `merchant_${randomUUID()}`,
+            applicationNo: `MC${Date.now()}`,
+            userId,
+            merchantType,
+            name: requireString(body.name, 'name', { maxLength: 80 }),
+            ownerName: requireString(body.ownerName, 'ownerName', { maxLength: 40 }),
+            phone,
+            licenseNo,
+            licenseUrl,
+            category,
+            serviceArea,
+            description,
+            status: 'REVIEWING',
+            reviewNote: '',
+            identityVerification: merchantType === 'PERSONAL' ? {
+              status: 'VERIFIED',
+              ownerNameMasked: `${ownerName.slice(0, 1)}${ownerName.length > 1 ? '*' : ''}`,
+              idNumberMasked: identityVerifications.get(identityVerificationToken)?.maskedIdNumber || '',
+              verifiedAt: identityVerifications.get(identityVerificationToken)?.verifiedAt || new Date().toISOString()
+            } : null,
+            timeline: [{ status: 'REVIEWING', note: '商家入驻申请已提交', createdAt: new Date().toISOString() }],
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          };
+          data.merchants.unshift(record);
+          addAudit(data, '新增商家入驻申请', record.name);
+          return record;
+        });
+        return sendJson(response, 201, { data: merchantPublic(application), requestId });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/merchants') {
+        const userId = requireString(url.searchParams.get('userId'), 'userId');
+        const items = (store.read().merchants || [])
+          .filter((item) => item.userId === userId)
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+          .map(merchantPublic);
         return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/merchant/login') {
+        const body = await readJson(request);
+        const userId = requireString(body.userId, 'userId', { maxLength: 64 });
+        const merchantId = requireString(body.merchantId, 'merchantId', { maxLength: 80 });
+        const merchant = store.read().merchants?.find((item) => item.id === merchantId && item.userId === userId);
+        if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号尚未通过审核');
+        const token = randomUUID();
+        merchantSessions.set(token, { merchantId, expiresAt: Date.now() + 8 * 60 * 60 * 1000 });
+        return sendJson(response, 200, { data: { token, merchant: merchantPublic(merchant), expiresIn: 28800 }, requestId });
+      }
+
+      if (pathname.startsWith('/api/merchant/')) {
+        var merchantSession = requireMerchant(request);
+      }
+
+      if (request.method === 'GET' && pathname === '/api/merchant/overview') {
+        const data = store.read();
+        const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
+        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        const products = data.products.filter((item) => item.merchantId === merchant.id);
+        const orders = data.orders
+          .filter((order) => order.items.some((item) => products.some((product) => product.id === item.productId)))
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        const revenueInCents = orders.reduce((sum, order) => sum + order.totalInCents, 0);
+        return sendJson(response, 200, {
+          data: {
+            merchant: merchantPublic(merchant),
+            metrics: {
+              revenueInCents,
+              orderCount: orders.length,
+              pendingCount: orders.filter((order) => !['COMPLETED', 'CANCELLED', 'AFTER_SALE'].includes(order.status)).length,
+              productCount: products.length,
+              lowStockCount: products.filter((product) => product.stock < 10).length
+            },
+            products,
+            orders
+          },
+          requestId
+        });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/merchant/products') {
+        const body = await readJson(request);
+        const product = store.update((data) => {
+          const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
+          if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号不可用');
+          const priceInCents = requirePositiveInteger(body.priceInCents, 'priceInCents');
+          const stock = requirePositiveInteger(body.stock, 'stock', { max: 999999 });
+          const item = {
+            id: `prod_${randomUUID()}`,
+            name: requireString(body.name, 'name', { maxLength: 80 }),
+            category: requireString(body.category, 'category', { maxLength: 50 }),
+            description: requireString(body.description, 'description', { maxLength: 300 }),
+            priceInCents,
+            stock,
+            campusIds: ['campus_demo'],
+            imageUrl: '',
+            merchantId: merchant.id,
+            active: body.active !== false
+          };
+          data.products.unshift(item);
+          addAudit(data, '商家新增商品', item.name);
+          return item;
+        });
+        return sendJson(response, 201, { data: product, requestId });
+      }
+
+      const merchantProductMatch = pathname.match(/^\/api\/merchant\/products\/([^/]+)$/);
+      if (request.method === 'POST' && merchantProductMatch) {
+        const body = await readJson(request);
+        const product = store.update((data) => {
+          const item = data.products.find((row) => row.id === merchantProductMatch[1] && row.merchantId === merchantSession.merchantId);
+          if (!item) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          if (body.name !== undefined) item.name = requireString(body.name, 'name', { maxLength: 80 });
+          if (body.description !== undefined) item.description = requireString(body.description, 'description', { maxLength: 300 });
+          if (body.priceInCents !== undefined) item.priceInCents = requirePositiveInteger(body.priceInCents, 'priceInCents');
+          if (body.stock !== undefined) item.stock = requirePositiveInteger(body.stock, 'stock', { max: 999999 });
+          if (body.active !== undefined) item.active = Boolean(body.active);
+          item.updatedAt = new Date().toISOString();
+          addAudit(data, '商家更新商品', item.name);
+          return item;
+        });
+        return sendJson(response, 200, { data: product, requestId });
+      }
+
+      const merchantOrderMatch = pathname.match(/^\/api\/merchant\/orders\/([^/]+)\/status$/);
+      if (request.method === 'POST' && merchantOrderMatch) {
+        const body = await readJson(request);
+        const status = requireString(body.status, 'status', { maxLength: 30 });
+        if (!allowedMerchantOrderStatuses.has(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant order status');
+        const order = store.update((data) => {
+          const item = data.orders.find((row) => row.id === merchantOrderMatch[1] && row.items.some((orderItem) => {
+            const product = data.products.find((candidate) => candidate.id === orderItem.productId);
+            return product?.merchantId === merchantSession.merchantId;
+          }));
+          if (!item) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+          if (!['PAID', 'FULFILLING'].includes(item.status)) throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '当前订单状态不可更新');
+          item.status = status;
+          item.updatedAt = new Date().toISOString();
+          addAudit(data, '商家更新订单状态', item.orderNo);
+          return item;
+        });
+        return sendJson(response, 200, { data: order, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/api/admin/overview') {
@@ -161,6 +462,7 @@ function createApp({ store }) {
           data: {
             metrics: { revenueInCents, paidOrders: data.orders.length + data.phoneCardOrders.length + data.rechargeOrders.length, pending, lowStock: data.products.filter((item) => item.stock < 10).length, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length },
             products: data.products,
+            merchants: data.merchants,
             orders: data.orders,
             phoneCardOrders: data.phoneCardOrders,
             rechargeOrders: data.rechargeOrders,
@@ -328,6 +630,26 @@ function createApp({ store }) {
         return sendJson(response, 200, { data: updated, requestId });
       }
 
+      const adminMerchantStatusMatch = pathname.match(/^\/api\/admin\/merchants\/([^/]+)\/status$/);
+      if (request.method === 'POST' && adminMerchantStatusMatch) {
+        const body = await readJson(request);
+        const status = requireString(body.status, 'status', { maxLength: 30 });
+        if (!allowedMerchantStatuses.has(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant status');
+        const reviewNote = typeof body.reviewNote === 'string' ? body.reviewNote.trim().slice(0, 300) : '';
+        const merchant = store.update((data) => {
+          const item = (data.merchants || []).find((row) => row.id === adminMerchantStatusMatch[1]);
+          if (!item) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          item.status = status;
+          item.reviewNote = reviewNote;
+          item.timeline = item.timeline || [];
+          item.timeline.push({ status, note: reviewNote || (status === 'APPROVED' ? '平台审核通过' : '商家申请被驳回'), createdAt: new Date().toISOString() });
+          item.updatedAt = new Date().toISOString();
+          addAudit(data, `更新商家状态为${status}`, item.name);
+          return item;
+        });
+        return sendJson(response, 200, { data: merchant, requestId });
+      }
+
       const adminProductMatch = pathname.match(/^\/api\/admin\/products\/([^/]+)$/);
       if (request.method === 'POST' && adminProductMatch) {
         const body = await readJson(request);
@@ -446,7 +768,7 @@ function createApp({ store }) {
             product.stock -= quantity;
             const subtotalInCents = product.priceInCents * quantity;
             totalInCents += subtotalInCents;
-            orderItems.push({ productId, name: product.name, priceInCents: product.priceInCents, quantity, subtotalInCents });
+            orderItems.push({ productId, merchantId: product.merchantId || '', name: product.name, priceInCents: product.priceInCents, quantity, subtotalInCents });
           }
           const now = new Date().toISOString();
           const order = {

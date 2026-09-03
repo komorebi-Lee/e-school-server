@@ -11,6 +11,7 @@ const seedProducts = [
     stock: 8,
     campusIds: ['campus_demo'],
     imageUrl: 'https://placehold.co/600x400?text=E-Bike',
+    merchantId: 'merchant_001',
     active: true
   },
   {
@@ -22,6 +23,7 @@ const seedProducts = [
     stock: 5,
     campusIds: ['campus_demo'],
     imageUrl: 'https://placehold.co/600x400?text=Rental',
+    merchantId: 'merchant_001',
     active: true
   },
   {
@@ -37,10 +39,43 @@ const seedProducts = [
   }
 ];
 
+const seedMerchants = [
+  {
+    id: 'merchant_001',
+    userId: 'merchant_demo',
+    merchantType: 'INDIVIDUAL',
+    name: '狮山校园车行',
+    ownerName: '范毅',
+    phone: '15527111396',
+    licenseNo: 'DEMO_LICENSE_001',
+    category: 'E_BIKE',
+    serviceArea: '华中农业大学狮山校区',
+    reviewNote: '',
+    status: 'APPROVED',
+    createdAt: '2026-08-28T06:00:00.000Z',
+    updatedAt: '2026-08-28T06:00:00.000Z'
+  },
+  {
+    id: 'merchant_002',
+    merchantType: 'INDIVIDUAL',
+    name: '狮山数码驿站',
+    ownerName: '李强',
+    phone: '15527110002',
+    licenseNo: 'DEMO_LICENSE_002',
+    category: 'DIGITAL',
+    serviceArea: '华中农业大学狮山校区',
+    reviewNote: '',
+    status: 'REVIEWING',
+    createdAt: '2026-08-31T09:00:00.000Z',
+    updatedAt: '2026-08-31T09:00:00.000Z'
+  }
+];
+
 function initialData() {
   return {
     schemaVersion: 1,
     products: seedProducts,
+    merchants: seedMerchants,
     campusCardApplications: [],
     orders: [],
     afterSales: [],
@@ -84,7 +119,7 @@ class JsonStore {
       if (!data || !Array.isArray(data.products)) throw new Error('invalid database');
       const defaults = initialData();
       let changed = false;
-      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'leads', 'auditLogs']) {
+      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'leads', 'auditLogs', 'merchants']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) { data.adminSettings = defaults.adminSettings; changed = true; }

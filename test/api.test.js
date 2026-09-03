@@ -143,6 +143,125 @@ test('stock validation rejects excessive quantities', async () => {
   assert.equal(result.body.error.code, 'INSUFFICIENT_STOCK');
 });
 
+test('merchant can be approved and manage its own products and orders', async () => {
+  const applied = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      userId: 'merchant_user_test', merchantType: 'INDIVIDUAL', name: '测试校园超市', ownerName: '店主',
+      phone: '15527110001', licenseNo: '92420111MAKMT4534R', category: 'LIFE_SERVICE',
+      serviceArea: '狮山校区', description: '校内日用品配送', licenseUrl: '/api/uploads/test-license.jpg',
+      agreeAgreement: true, agreePrivacy: true
+    })
+  });
+  assert.equal(applied.response.status, 201);
+  assert.equal(applied.body.data.status, 'REVIEWING');
+  assert.ok(applied.body.data.applicationNo.startsWith('MC'));
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'Shishan@2026' })
+  });
+  const approved = await api(`/api/admin/merchants/${applied.body.data.id}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ status: 'APPROVED', reviewNote: '营业执照已核对' })
+  });
+  assert.equal(approved.response.status, 200);
+  assert.equal(approved.body.data.timeline.at(-1).status, 'APPROVED');
+  assert.equal(approved.body.data.timeline.at(-1).note, '营业执照已核对');
+
+  const login = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ userId: 'merchant_user_test', merchantId: applied.body.data.id })
+  });
+  assert.equal(login.response.status, 200);
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${login.body.data.token}` };
+
+  const product = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ name: '测试文具包', category: 'SERVICE', description: '校内配送', priceInCents: 2500, stock: 20 })
+  });
+  assert.equal(product.response.status, 201);
+
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ userId: 'buyer_test', items: [{ productId: product.body.data.id, quantity: 1 }] })
+  });
+  assert.equal(created.response.status, 201);
+
+  const overview = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(overview.response.status, 200);
+  assert.equal(overview.body.data.orders.length, 1);
+  assert.equal(overview.body.data.orders[0].items[0].merchantId, product.body.data.merchantId);
+
+  const fulfilled = await api(`/api/merchant/orders/${created.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'COMPLETED' })
+  });
+  assert.equal(fulfilled.response.status, 200);
+  assert.equal(fulfilled.body.data.status, 'COMPLETED');
+});
+
+test('merchant application requires agreements and complete business qualification', async () => {
+  const missingAgreement = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      userId: 'merchant_rule_test', merchantType: 'INDIVIDUAL', name: '测试资质', ownerName: '审核员',
+      phone: '15527110002', licenseNo: '92420111MAKMT4534R', category: 'LIFE_SERVICE',
+      serviceArea: '狮山校区', description: '校内服务', agreeAgreement: false, agreePrivacy: true
+    })
+  });
+  assert.equal(missingAgreement.response.status, 400);
+  assert.equal(missingAgreement.body.error.code, 'VALIDATION_ERROR');
+
+  const invalidLicense = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      userId: 'merchant_rule_test', merchantType: 'INDIVIDUAL', name: '测试资质', ownerName: '审核员',
+      phone: '15527110002', licenseNo: 'invalid', category: 'LIFE_SERVICE',
+      serviceArea: '狮山校区', description: '校内服务', agreeAgreement: true, agreePrivacy: true
+    })
+  });
+  assert.equal(invalidLicense.response.status, 400);
+});
+
+test('personal merchant application does not require a business license', async () => {
+  const verify = await api('/api/identity/verify', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ userId: 'merchant_personal_test', ownerName: '李同学', idNumber: '42010619900101001X' })
+  });
+  assert.equal(verify.response.status, 200);
+  assert.equal(verify.body.data.status, 'VERIFIED');
+
+  const applied = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      userId: 'merchant_personal_test', merchantType: 'PERSONAL', name: '个人代购服务', ownerName: '李同学',
+      phone: '15527110003', category: 'LIFE_SERVICE', serviceArea: '狮山校区',
+      description: '个人跑腿与代购服务', agreeAgreement: true, agreePrivacy: true
+      , identityVerificationToken: verify.body.data.token
+    })
+  });
+  assert.equal(applied.response.status, 201);
+  assert.equal(applied.body.data.licenseNo, '');
+  assert.equal(applied.body.data.licenseUrl, '');
+});
+
+test('merchant qualification upload validates image content and size', async () => {
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(2048, 1)]);
+  const uploaded = await api('/api/uploads', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dataBase64: png.toString('base64'), mimeType: 'image/png' })
+  });
+  assert.equal(uploaded.response.status, 201);
+  assert.match(uploaded.body.data.url, /^\/api\/uploads\/[\w-]+\.png$/);
+
+  const invalidImage = await api('/api/uploads', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dataBase64: Buffer.alloc(2048).toString('base64'), mimeType: 'image/png' })
+  });
+  assert.equal(invalidImage.response.status, 400);
+});
+
 test('phone card service record can apply for broadband once', async () => {
   const created = await api('/api/phone-card-orders', {
     method: 'POST', headers: { 'content-type': 'application/json' },
