@@ -378,7 +378,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/health') {
-        return sendJson(response, 200, { ok: true, service: 'campus-go-mock-api', requestId });
+        const dbExists = fs.existsSync(store.filePath);
+        return sendJson(response, 200, { ok: true, service: 'campus-go-mock-api', dbFile: store.filePath, dbExists, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/api/products') {
