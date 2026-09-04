@@ -94,6 +94,22 @@ test('wechat login exchanges a code for a server-side user identity', async () =
   assert.equal(session.userId, TEST_USER_ID);
 });
 
+test('platform-injected openid creates a session without code exchange', async () => {
+  const result = await api('/api/auth/login', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-wx-source': 'wx-devtools',
+      'x-wx-openid': 'openid_platform_test'
+    },
+    body: JSON.stringify({})
+  });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.data.userId, 'wx_openid_platform_test');
+  const orders = await api('/api/my/orders', { headers: { authorization: `Bearer ${result.body.data.token}` } });
+  assert.equal(orders.response.status, 200);
+});
+
 test('user APIs derive identity from the WeChat session, not request fields', async () => {
   const session = await loginWeChat();
   const created = await api('/api/orders', {

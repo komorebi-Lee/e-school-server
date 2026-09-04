@@ -279,9 +279,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (request.method === 'POST' && pathname === '/api/auth/login') {
         const body = await readJson(request);
-        const code = requireString(body.code, 'code', { maxLength: 128 });
-        const identity = await wechatAuth(code);
-        const userId = identity.userId || `wx_${identity.openid}`;
+        const source = String(request.headers['x-wx-source'] || '');
+        const platformOpenid = String(request.headers['x-wx-openid'] || '').trim();
+        let userId = '';
+        if (platformOpenid && source) {
+          if (!/^[A-Za-z0-9_-]{1,128}$/.test(platformOpenid)) throw new ApiError(401, 'WECHAT_LOGIN_INVALID', '平台身份标识无效');
+          userId = `wx_${platformOpenid}`;
+        } else {
+          const code = requireString(body.code, 'code', { maxLength: 128 });
+          const identity = await wechatAuth(code);
+          userId = identity.userId || `wx_${identity.openid}`;
+        }
         if (!userId) throw new ApiError(502, 'WECHAT_LOGIN_INVALID', '微信登录返回缺少用户标识');
         const token = createHash('sha256').update(`${userId}:${randomUUID()}`).digest('hex');
         userSessions.set(token, { userId, expiresAt: Date.now() + userSessionTtlMs });
