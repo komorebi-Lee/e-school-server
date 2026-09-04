@@ -681,9 +681,18 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const amountInCents = Number(body.amountInCents);
         if (!Number.isInteger(amountInCents) || amountInCents < 0 || amountInCents > 10000000) throw new ApiError(400,'VALIDATION_ERROR','amountInCents must be between 0 and 10000000');
+        const cardIdempotencyKey = String(request.headers['idempotency-key'] || '');
+        if (cardIdempotencyKey) {
+          const compoundKey = `card:${userId}:${cardIdempotencyKey}`;
+          const existingId = store.read().idempotencyKeys?.[compoundKey];
+          if (existingId) {
+            const existing = store.read().phoneCardOrders.find(item=>item.id===existingId);
+            if (existing) return sendJson(response,200,{data:existing,requestId});
+          }
+        }
         const now = new Date().toISOString();
         const record = { id:`tel_${randomUUID()}`, userId, customerName:requireString(body.customerName,'customerName',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), planName:requireString(body.planName,'planName',{maxLength:80}), amountInCents, status:'PENDING_REALNAME', relatedIds:{}, createdAt:now, updatedAt:now };
-        store.update(data=>{ (data.phoneCardOrders=data.phoneCardOrders||[]).unshift(record); (data.rechargeOrders||[]).forEach(item=>{if(item.userId===userId&&item.phone===record.phone&&!item.relatedIds?.phoneCardOrderId)item.relatedIds={...(item.relatedIds||{}),phoneCardOrderId:record.id};}); addAudit(data,'新增电话卡订单',record.id); });
+        store.update(data=>{ (data.phoneCardOrders=data.phoneCardOrders||[]).unshift(record); (data.rechargeOrders||[]).forEach(item=>{if(item.userId===userId&&item.phone===record.phone&&!item.relatedIds?.phoneCardOrderId)item.relatedIds={...(item.relatedIds||{}),phoneCardOrderId:record.id};}); if(cardIdempotencyKey)data.idempotencyKeys[`card:${userId}:${cardIdempotencyKey}`]=record.id; addAudit(data,'新增电话卡订单',record.id); });
         return sendJson(response,201,{data:record,requestId});
       }
       if (request.method === 'POST' && pathname === '/api/recharge-orders') {
@@ -692,9 +701,18 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const paidInCents = Number(body.paidInCents);
         const receiveInCents = Number(body.receiveInCents);
         if (!Number.isInteger(paidInCents) || paidInCents < 1000 || paidInCents > 10000000 || !Number.isInteger(receiveInCents) || receiveInCents <= paidInCents || receiveInCents > 10000000) throw new ApiError(400,'VALIDATION_ERROR','Invalid recharge amount');
+        const idempotencyKey = String(request.headers['idempotency-key'] || '');
+        if (idempotencyKey) {
+          const compoundKey = `recharge:${userId}:${idempotencyKey}`;
+          const existingId = store.read().idempotencyKeys?.[compoundKey];
+          if (existingId) {
+            const existing = store.read().rechargeOrders.find(item=>item.id===existingId);
+            if (existing) return sendJson(response,200,{data:existing,requestId});
+          }
+        }
         const now = new Date().toISOString();
         const record = { id:`top_${randomUUID()}`, userId, phone:requireString(body.phone,'phone',{maxLength:30}), paidInCents, receiveInCents, status:'PENDING_CREDIT', relatedIds:{}, createdAt:now, updatedAt:now };
-        store.update(data=>{ const related=(data.phoneCardOrders||[]).find(item=>item.userId===userId&&item.phone===record.phone); if(related)record.relatedIds={phoneCardOrderId:related.id}; (data.rechargeOrders=data.rechargeOrders||[]).unshift(record); addAudit(data,'新增话费权益订单',record.id); });
+        store.update(data=>{ const related=(data.phoneCardOrders||[]).find(item=>item.userId===userId&&item.phone===record.phone); if(related)record.relatedIds={phoneCardOrderId:related.id}; (data.rechargeOrders=data.rechargeOrders||[]).unshift(record); if(idempotencyKey)data.idempotencyKeys[`recharge:${userId}:${idempotencyKey}`]=record.id; addAudit(data,'新增话费权益订单',record.id); });
         return sendJson(response,201,{data:record,requestId});
       }
       if (request.method === 'POST' && pathname === '/api/broadband-applications') {
