@@ -1,4 +1,5 @@
 const { randomUUID, createHash } = require('node:crypto');
+const https = require('node:https');
 const { URL } = require('node:url');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -28,9 +29,26 @@ async function exchangeWeChatCode(code) {
   if (!appid || !secret) throw new ApiError(503, 'WECHAT_LOGIN_NOT_CONFIGURED', '微信登录尚未配置');
 
   const query = new URLSearchParams({ appid, secret, js_code: code, grant_type: 'authorization_code' });
-  const response = await fetch(`https://api.weixin.qq.com/sns/jscode2session?${query}`);
-  if (!response.ok) throw new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用');
-  const result = await response.json();
+  const result = await new Promise((resolve, reject) => {
+    const request = https.get(`https://api.weixin.qq.com/sns/jscode2session?${query}`, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => {
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用'));
+          return;
+        }
+        try { resolve(JSON.parse(body)); }
+        catch { reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务返回异常')); }
+      });
+    });
+    request.on('error', () => reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用')));
+    request.setTimeout(8000, () => {
+      request.destroy();
+      reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务超时'));
+    });
+  });
   if (!result.openid) throw new ApiError(401, 'WECHAT_LOGIN_FAILED', result.errmsg || '微信登录失败', result.errcode ? { errcode: result.errcode } : undefined);
   return { openid: result.openid, userId: `wx_${result.openid}` };
 }
