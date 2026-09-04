@@ -36,17 +36,25 @@ async function exchangeWeChatCode(code) {
       response.on('data', (chunk) => { body += chunk; });
       response.on('end', () => {
         if (response.statusCode < 200 || response.statusCode >= 300) {
-          reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用'));
+          console.error('[wechat-login] unexpected status', response.statusCode, body.slice(0, 200));
+          reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用', { reason: `HTTP ${response.statusCode}` }));
           return;
         }
         try { resolve(JSON.parse(body)); }
-        catch { reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务返回异常')); }
+        catch {
+          console.error('[wechat-login] non-json body', body.slice(0, 200));
+          reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务返回异常', { reason: 'non-json response' }));
+        }
       });
     });
-    request.on('error', () => reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用')));
+    request.on('error', (error) => {
+      console.error('[wechat-login] request error:', error.message);
+      reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用', { reason: error.message }));
+    });
     request.setTimeout(8000, () => {
       request.destroy();
-      reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务超时'));
+      console.error('[wechat-login] request timeout after 8s');
+      reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用', { reason: 'timeout after 8s' }));
     });
   });
   if (!result.openid) throw new ApiError(401, 'WECHAT_LOGIN_FAILED', result.errmsg || '微信登录失败', result.errcode ? { errcode: result.errcode } : undefined);
