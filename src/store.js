@@ -42,7 +42,7 @@ const seedProducts = [
 const seedMerchants = [
   {
     id: 'merchant_001',
-    userId: 'merchant_demo',
+    userId: 'wx_merchant_demo',
     merchantType: 'INDIVIDUAL',
     name: '狮山校园车行',
     ownerName: '范毅',

@@ -1,4 +1,4 @@
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 const { URL } = require('node:url');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -21,6 +21,19 @@ const allowedMerchantStatuses = new Set(['REVIEWING', 'APPROVED', 'REJECTED']);
 const allowedMerchantOrderStatuses = new Set(['PAID', 'FULFILLING', 'COMPLETED', 'CANCELLED']);
 const allowedMerchantTypes = new Set(['INDIVIDUAL', 'ENTERPRISE', 'PERSONAL']);
 const identityVerifications = new Map();
+
+async function exchangeWeChatCode(code) {
+  const appid = process.env.WECHAT_APPID || process.env.WX_APPID;
+  const secret = process.env.WECHAT_APP_SECRET || process.env.WX_APP_SECRET;
+  if (!appid || !secret) throw new ApiError(503, 'WECHAT_LOGIN_NOT_CONFIGURED', '微信登录尚未配置');
+
+  const query = new URLSearchParams({ appid, secret, js_code: code, grant_type: 'authorization_code' });
+  const response = await fetch(`https://api.weixin.qq.com/sns/jscode2session?${query}`);
+  if (!response.ok) throw new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用');
+  const result = await response.json();
+  if (!result.openid) throw new ApiError(401, 'WECHAT_LOGIN_FAILED', result.errmsg || '微信登录失败', result.errcode ? { errcode: result.errcode } : undefined);
+  return { openid: result.openid, userId: `wx_${result.openid}` };
+}
 function sendJson(response, statusCode, body) {
   response.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
@@ -122,9 +135,18 @@ function appendCollaborationEvent(order, role, action, note) {
   order.collaboration.intervention.updatedAt = time;
 }
 
-function createApp({ store }) {
+function createApp({ store, wechatAuth = exchangeWeChatCode }) {
   const adminSessions = new Map();
   const merchantSessions = new Map();
+  const userSessions = new Map();
+  const userSessionTtlMs = 7 * 24 * 60 * 60 * 1000;
+
+  function requireUser(request) {
+    const token = (request.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const session = token ? userSessions.get(token) : null;
+    if (!session || session.expiresAt < Date.now()) throw new ApiError(401, 'USER_UNAUTHORIZED', '请先使用微信登录');
+    return session;
+  }
   const uploadsDirectory = path.join(path.dirname(store.filePath), 'uploads');
   const statusLabels = {
     PAID:'已支付，待配送', FULFILLING:'配送中', COMPLETED:'已完成', CANCELLED:'已取消', AFTER_SALE:'售后中',
@@ -197,13 +219,29 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (request.method === 'POST' && pathname === '/api/admin/login') {
         const body = await readJson(request);
-        if (body.username !== 'admin' || body.password !== 'Shishan@2026') throw new ApiError(401, 'INVALID_CREDENTIALS', '账号或密码错误');
-        const token = randomUUID();
-        adminSessions.set(token, { username: 'admin', expiresAt: Date.now() + 8 * 60 * 60 * 1000 });
+        const username = process.env.ADMIN_USERNAME || 'admin';
+        const password = process.env.ADMIN_PASSWORD;
+        if (!password || body.username !== username || body.password !== password) {
+          throw new ApiError(401, 'INVALID_CREDENTIALS', '账号或密码错误');
+        }
+        const token = createHash('sha256').update(`${username}:${password}:${randomUUID()}`).digest('hex');
+        adminSessions.set(token, { username, expiresAt: Date.now() + 8 * 60 * 60 * 1000 });
         return sendJson(response, 200, { data: { token, user: { name: '运营管理员', role: '超级管理员' }, expiresIn: 28800 }, requestId });
       }
 
+      if (request.method === 'POST' && pathname === '/api/auth/login') {
+        const body = await readJson(request);
+        const code = requireString(body.code, 'code', { maxLength: 128 });
+        const identity = await wechatAuth(code);
+        const userId = identity.userId || `wx_${identity.openid}`;
+        if (!userId) throw new ApiError(502, 'WECHAT_LOGIN_INVALID', '微信登录返回缺少用户标识');
+        const token = createHash('sha256').update(`${userId}:${randomUUID()}`).digest('hex');
+        userSessions.set(token, { userId, expiresAt: Date.now() + userSessionTtlMs });
+        return sendJson(response, 200, { data: { token, userId, expiresIn: 604800 }, requestId });
+      }
+
       if (request.method === 'POST' && pathname === '/api/uploads') {
+        requireUser(request);
         const body = await readJson(request);
         const dataBase64 = requireString(body.dataBase64, 'dataBase64', { maxLength: 7000000 });
         const mimeType = requireString(body.mimeType, 'mimeType', { maxLength: 50 });
@@ -238,8 +276,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'POST' && pathname === '/api/identity/verify') {
+        const identity = requireUser(request);
         const body = await readJson(request);
-        const userId = requireString(body.userId, 'userId', { maxLength: 64 });
         const ownerName = requireString(body.ownerName, 'ownerName', { maxLength: 40 });
         const idNumber = requireString(body.idNumber, 'idNumber', { maxLength: 18 });
         const normalizedIdNumber = idNumber.toUpperCase();
@@ -251,7 +289,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const token = randomUUID();
         const maskedIdNumber = maskIdNumber(normalizedIdNumber);
         identityVerifications.set(token, {
-          userId,
+          userId: identity.userId,
           ownerName,
           idNumber: normalizedIdNumber,
           maskedIdNumber,
@@ -294,11 +332,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (request.method === 'POST' && pathname === '/api/order-collab') {
         const body = await readJson(request);
-        const role = requireString(body.role, 'role', { maxLength: 20 });
+        const role = body.role || 'USER';
         const action = requireString(body.action, 'action', { maxLength: 40 });
         const orderId = requireString(body.orderId, 'orderId', { maxLength: 80 });
         const note = requireString(body.note, 'note', { maxLength: 300 });
         if (!['USER','MERCHANT','PLATFORM'].includes(role)) throw new ApiError(400,'VALIDATION_ERROR','Unsupported role');
+        const userSession = role === 'USER' ? requireUser(request) : null;
         if (role === 'MERCHANT') requireMerchant(request);
         if (role === 'PLATFORM') {
           const adminToken=(request.headers.authorization||'').replace(/^Bearer\s+/i,'');
@@ -307,10 +346,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const order = store.update((data) => {
           const item = data.orders.find((row) => row.id === orderId);
           if (!item) throw new ApiError(404,'ORDER_NOT_FOUND','Order not found');
-          if (role === 'USER') {
-            const userId = requireString(body.userId,'userId',{maxLength:64});
-            if (item.userId !== userId) throw new ApiError(403,'ORDER_FORBIDDEN','无权操作该订单');
-          }
+          if (role === 'USER' && item.userId !== userSession.userId) throw new ApiError(403,'ORDER_FORBIDDEN','无权操作该订单');
           item.collaboration ||= createCollaboration(item, item.items[0]?.merchantId || '');
           if (role === 'MERCHANT') {
             const merchant = (data.merchants||[]).find(row=>row.id===merchantSessions.get((request.headers.authorization||'').replace(/^Bearer\s+/i,''))?.merchantId);
@@ -331,8 +367,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'POST' && pathname === '/api/merchants') {
+        const identity = requireUser(request);
         const body = await readJson(request);
-        const userId = requireString(body.userId, 'userId', { maxLength: 64 });
         const merchantType = requireString(body.merchantType, 'merchantType', { maxLength: 20 });
         if (!allowedMerchantTypes.has(merchantType)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant type');
         const name = requireString(body.name, 'name', { maxLength: 80 });
@@ -358,14 +394,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const identityVerificationToken = merchantType === 'PERSONAL' ? requireString(body.identityVerificationToken, 'identityVerificationToken', { maxLength: 80 }) : '';
         if (identityVerificationToken) {
           const verification = identityVerifications.get(identityVerificationToken);
-          if (!verification || verification.userId !== userId || verification.ownerName !== ownerName || verification.expiresAt < new Date().toISOString()) {
+          if (!verification || verification.userId !== identity.userId || verification.ownerName !== ownerName || verification.expiresAt < new Date().toISOString()) {
             throw new ApiError(400, 'IDENTITY_VERIFICATION_INVALID', '实名验证无效，请重新验证');
           }
         } else if (merchantType === 'PERSONAL') {
           throw new ApiError(400, 'IDENTITY_VERIFICATION_REQUIRED', '请先完成模拟实名验证');
         }
 
-        const existing = store.read().merchants?.find((item) => item.userId === userId && item.status !== 'REJECTED');
+        const existing = store.read().merchants?.find((item) => item.userId === identity.userId && item.status !== 'REJECTED');
         if (existing) {
           return sendJson(response, 200, { data: merchantPublic(existing), idempotent: true, message: '您已有入驻申请', requestId });
         }
@@ -374,7 +410,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const record = {
             id: `merchant_${randomUUID()}`,
             applicationNo: `MC${Date.now()}`,
-            userId,
+            userId: identity.userId,
             merchantType,
             name: requireString(body.name, 'name', { maxLength: 80 }),
             ownerName: requireString(body.ownerName, 'ownerName', { maxLength: 40 }),
@@ -404,19 +440,19 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/merchants') {
-        const userId = requireString(url.searchParams.get('userId'), 'userId');
+        const identity = requireUser(request);
         const items = (store.read().merchants || [])
-          .filter((item) => item.userId === userId)
+          .filter((item) => item.userId === identity.userId)
           .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
           .map(merchantPublic);
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
       if (request.method === 'POST' && pathname === '/api/merchant/login') {
+        const identity = requireUser(request);
         const body = await readJson(request);
-        const userId = requireString(body.userId, 'userId', { maxLength: 64 });
         const merchantId = requireString(body.merchantId, 'merchantId', { maxLength: 80 });
-        const merchant = store.read().merchants?.find((item) => item.id === merchantId && item.userId === userId);
+        const merchant = store.read().merchants?.find((item) => item.id === merchantId && item.userId === identity.userId);
         if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号尚未通过审核');
         const token = randomUUID();
         merchantSessions.set(token, { merchantId, expiresAt: Date.now() + 8 * 60 * 60 * 1000 });
@@ -554,14 +590,15 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'POST' && pathname === '/api/leads') {
+        const { userId } = requireUser(request);
         const body = await readJson(request);
         const now = new Date();
-        const lead = { id:`lead_${randomUUID()}`, leadNo:`LS${Date.now().toString().slice(-8)}`, userId:requireString(body.userId || 'guest','userId',{maxLength:64}), name:requireString(body.name,'name',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), businessType:requireString(body.businessType,'businessType',{maxLength:40}), interest:requireString(body.interest || '未指定','interest',{maxLength:120}), expectedTime:(body.expectedTime||'尽快').toString().slice(0,40), deliveryNeed:(body.deliveryNeed||'无').toString().slice(0,120), note:(body.note||'').toString().slice(0,500), status:'SUBMITTED', assignee:'', followUps:[], createdAt:now.toISOString(), updatedAt:now.toISOString(), slaDueAt:new Date(now.getTime()+24*3600*1000).toISOString() };
+        const lead = { id:`lead_${randomUUID()}`, leadNo:`LS${Date.now().toString().slice(-8)}`, userId, name:requireString(body.name,'name',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), businessType:requireString(body.businessType,'businessType',{maxLength:40}), interest:requireString(body.interest || '未指定','interest',{maxLength:120}), expectedTime:(body.expectedTime||'尽快').toString().slice(0,40), deliveryNeed:(body.deliveryNeed||'无').toString().slice(0,120), note:(body.note||'').toString().slice(0,500), status:'SUBMITTED', assignee:'', followUps:[], createdAt:now.toISOString(), updatedAt:now.toISOString(), slaDueAt:new Date(now.getTime()+24*3600*1000).toISOString() };
         store.update(data => { if (!Array.isArray(data.leads)) data.leads=[]; data.leads.unshift(lead); addAudit(data,'新增咨询线索',lead.leadNo); });
         return sendJson(response,201,{data:lead,requestId});
       }
       if (request.method === 'GET' && pathname === '/api/service-records') {
-        const userId = requireString(url.searchParams.get('userId'), 'userId');
+        const { userId } = requireUser(request);
         const data = store.read();
         const phoneCardOrders = (data.phoneCardOrders || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.amountInCents || 0, phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
         const rechargeOrders = (data.rechargeOrders || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents || 0)/100).toFixed(0)}送${((item.receiveInCents || 0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.paidInCents || 0, phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
@@ -571,7 +608,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response,200,{data:items,total:items.length,requestId});
       }
       if (request.method === 'GET' && pathname === '/api/my/orders') {
-        const userId = requireString(url.searchParams.get('userId'), 'userId');
+        const { userId } = requireUser(request);
         const data = store.read();
         const merchants = data.merchants || [];
         const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, collaboration:order.collaboration || createCollaboration(order, order.items?.[0]?.merchantId || ''), merchantName:merchants.find(merchant=>merchant.id===order.collaboration?.merchantId)?.name || '平台自营', plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '' }));
@@ -585,39 +622,40 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response,200,{data:{ebikeOrders,serviceRecords},requestId});
       }
       if (request.method === 'POST' && pathname === '/api/phone-card-orders') {
+        const { userId } = requireUser(request);
         const body = await readJson(request);
-        const ownerUserId = requireString(body.userId,'userId',{maxLength:64});
         const amountInCents = Number(body.amountInCents);
         if (!Number.isInteger(amountInCents) || amountInCents < 0 || amountInCents > 10000000) throw new ApiError(400,'VALIDATION_ERROR','amountInCents must be between 0 and 10000000');
         const now = new Date().toISOString();
-        const record = { id:`tel_${randomUUID()}`, userId:ownerUserId, customerName:requireString(body.customerName,'customerName',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), planName:requireString(body.planName,'planName',{maxLength:80}), amountInCents, status:'PENDING_REALNAME', relatedIds:{}, createdAt:now, updatedAt:now };
-        store.update(data=>{ (data.phoneCardOrders=data.phoneCardOrders||[]).unshift(record); (data.rechargeOrders||[]).forEach(item=>{if(item.userId===ownerUserId&&item.phone===record.phone&&!item.relatedIds?.phoneCardOrderId)item.relatedIds={...(item.relatedIds||{}),phoneCardOrderId:record.id};}); addAudit(data,'新增电话卡订单',record.id); });
+        const record = { id:`tel_${randomUUID()}`, userId, customerName:requireString(body.customerName,'customerName',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), planName:requireString(body.planName,'planName',{maxLength:80}), amountInCents, status:'PENDING_REALNAME', relatedIds:{}, createdAt:now, updatedAt:now };
+        store.update(data=>{ (data.phoneCardOrders=data.phoneCardOrders||[]).unshift(record); (data.rechargeOrders||[]).forEach(item=>{if(item.userId===userId&&item.phone===record.phone&&!item.relatedIds?.phoneCardOrderId)item.relatedIds={...(item.relatedIds||{}),phoneCardOrderId:record.id};}); addAudit(data,'新增电话卡订单',record.id); });
         return sendJson(response,201,{data:record,requestId});
       }
       if (request.method === 'POST' && pathname === '/api/recharge-orders') {
+        const { userId } = requireUser(request);
         const body = await readJson(request);
-        const ownerUserId = requireString(body.userId,'userId',{maxLength:64});
         const paidInCents = Number(body.paidInCents);
         const receiveInCents = Number(body.receiveInCents);
         if (!Number.isInteger(paidInCents) || paidInCents < 1000 || paidInCents > 10000000 || !Number.isInteger(receiveInCents) || receiveInCents <= paidInCents || receiveInCents > 10000000) throw new ApiError(400,'VALIDATION_ERROR','Invalid recharge amount');
         const now = new Date().toISOString();
-        const record = { id:`top_${randomUUID()}`, userId:ownerUserId, phone:requireString(body.phone,'phone',{maxLength:30}), paidInCents, receiveInCents, status:'PENDING_CREDIT', relatedIds:{}, createdAt:now, updatedAt:now };
-        store.update(data=>{ const related=(data.phoneCardOrders||[]).find(item=>item.userId===ownerUserId&&item.phone===record.phone); if(related)record.relatedIds={phoneCardOrderId:related.id}; (data.rechargeOrders=data.rechargeOrders||[]).unshift(record); addAudit(data,'新增话费权益订单',record.id); });
+        const record = { id:`top_${randomUUID()}`, userId, phone:requireString(body.phone,'phone',{maxLength:30}), paidInCents, receiveInCents, status:'PENDING_CREDIT', relatedIds:{}, createdAt:now, updatedAt:now };
+        store.update(data=>{ const related=(data.phoneCardOrders||[]).find(item=>item.userId===userId&&item.phone===record.phone); if(related)record.relatedIds={phoneCardOrderId:related.id}; (data.rechargeOrders=data.rechargeOrders||[]).unshift(record); addAudit(data,'新增话费权益订单',record.id); });
         return sendJson(response,201,{data:record,requestId});
       }
       if (request.method === 'POST' && pathname === '/api/broadband-applications') {
+        const { userId } = requireUser(request);
         const body = await readJson(request);
         const ownerPhone = requireString(body.ownerPhone,'ownerPhone',{maxLength:30});
         const companionPhone = requireString(body.companionPhone,'companionPhone',{maxLength:30});
         if (ownerPhone === companionPhone) throw new ApiError(400,'VALIDATION_ERROR','两个号码不能相同');
         const now = new Date().toISOString();
-        const record = { id:`net_${randomUUID()}`, userId:requireString(body.userId,'userId',{maxLength:64}), ownerPhone, companionPhone, status:'PENDING_VERIFY', relatedIds:{}, createdAt:now, updatedAt:now };
+        const record = { id:`net_${randomUUID()}`, userId, ownerPhone, companionPhone, status:'PENDING_VERIFY', relatedIds:{}, createdAt:now, updatedAt:now };
         store.update(data=>{ (data.broadbandApplications=data.broadbandApplications||[]).unshift(record); addAudit(data,'新增宽带资格申请',record.id); });
         return sendJson(response,201,{data:record,requestId});
       }
       if (request.method === 'POST' && pathname === '/api/plate-applications') {
+        const { userId } = requireUser(request);
         const body = await readJson(request);
-        const userId = requireString(body.userId,'userId',{maxLength:64});
         const customerName = requireString(body.customerName,'customerName',{maxLength:50});
         const customerPhone = requireString(body.customerPhone,'customerPhone',{maxLength:30});
         const vehicleModel = requireString(body.vehicleModel,'vehicleModel',{maxLength:80});
@@ -635,8 +673,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
       const businessMatch = pathname.match(/^\/api\/service-records\/([^/]+)\/actions$/);
       if (request.method === 'POST' && businessMatch) {
+        const { userId } = requireUser(request);
         const body = await readJson(request);
-        const userId = requireString(body.userId, 'userId', { maxLength:64 });
         const action = requireString(body.action, 'action', { maxLength:40 });
         const recordId = businessMatch[1];
         const result = store.update((data) => {
@@ -778,6 +816,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'POST' && pathname === '/api/campus-card-applications') {
+        const { userId } = requireUser(request);
         const body = await readJson(request);
         const serviceType = requireString(body.serviceType, 'serviceType');
         if (!allowedCardServices.has(serviceType)) {
@@ -789,7 +828,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const now = new Date().toISOString();
         const application = {
           id: `cca_${randomUUID()}`,
-          userId: requireString(body.userId, 'userId', { maxLength: 64 }),
+          userId,
           schoolId: requireString(body.schoolId, 'schoolId', { maxLength: 64 }),
           campusId: requireString(body.campusId, 'campusId', { maxLength: 64 }),
           serviceType,
@@ -804,7 +843,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/campus-card-applications') {
-        const userId = requireString(url.searchParams.get('userId'), 'userId');
+        const { userId } = requireUser(request);
         const items = store.read().campusCardApplications
           .filter((item) => item.userId === userId)
           .map(publicApplication);
@@ -812,8 +851,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'POST' && pathname === '/api/orders') {
+        const { userId } = requireUser(request);
         const body = await readJson(request);
-        const userId = requireString(body.userId, 'userId', { maxLength: 64 });
         if (!Array.isArray(body.items) || body.items.length === 0) {
           throw new ApiError(400, 'VALIDATION_ERROR', 'items must be a non-empty array');
         }
@@ -890,7 +929,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/orders') {
-        const userId = requireString(url.searchParams.get('userId'), 'userId');
+        const { userId } = requireUser(request);
         const items = store.read().orders
           .filter((order) => order.userId === userId)
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -899,15 +938,15 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       const orderMatch = pathname.match(/^\/api\/orders\/([^/]+)$/);
       if (request.method === 'GET' && orderMatch) {
-        const userId = requireString(url.searchParams.get('userId'), 'userId');
+        const { userId } = requireUser(request);
         const order = store.read().orders.find((item) => item.id === orderMatch[1] && item.userId === userId);
         if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
         return sendJson(response, 200, { data: order, requestId });
       }
 
       if (request.method === 'PATCH' && orderMatch) {
+        const { userId } = requireUser(request);
         const body = await readJson(request);
-        const userId = requireString(body.userId, 'userId');
         const updated = store.update((data) => {
           const order = data.orders.find((item) => item.id === orderMatch[1] && item.userId === userId);
           if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
@@ -920,8 +959,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'POST' && pathname === '/api/after-sales') {
+        const { userId } = requireUser(request);
         const body = await readJson(request);
-        const userId = requireString(body.userId, 'userId', { maxLength: 64 });
         const orderId = requireString(body.orderId, 'orderId', { maxLength: 100 });
         const type = requireString(body.type, 'type');
         if (!allowedAfterSaleTypes.has(type)) {
@@ -956,7 +995,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/after-sales') {
-        const userId = requireString(url.searchParams.get('userId'), 'userId');
+        const { userId } = requireUser(request);
         const items = store.read().afterSales.filter((item) => item.userId === userId);
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }

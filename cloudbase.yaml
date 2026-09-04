@@ -1,6 +1,7 @@
 version: '2.0'
 env:
   PORT: '80'
+  DB_FILE: '/app/data/db.json'
 service:
   name: shishan-server
   port: 80

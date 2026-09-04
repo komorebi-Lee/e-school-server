@@ -7,6 +7,9 @@ const { after, before, test } = require('node:test');
 const { JsonStore } = require('../src/store');
 const { createApp } = require('../src/app');
 
+process.env.ADMIN_USERNAME = 'test-admin';
+process.env.ADMIN_PASSWORD = 'test-admin-password-123';
+
 let server;
 let baseUrl;
 let tempDirectory;
@@ -14,7 +17,10 @@ let tempDirectory;
 before(async () => {
   tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-test-'));
   const store = new JsonStore(path.join(tempDirectory, 'db.json'));
-  server = http.createServer(createApp({ store }));
+  server = http.createServer(createApp({
+    store,
+    wechatAuth: async (code) => ({ openid: `openid_${code}`, userId: `wx_${code}` })
+  }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
@@ -29,9 +35,19 @@ async function api(pathname, options) {
   return { response, body: await response.json() };
 }
 
-test('lead follow-up result rejects unsupported status', async () => {
-  const created = await api('/api/leads', {
+async function loginWeChat(code) {
+  const result = await api('/api/auth/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code })
+  });
+  assert.equal(result.response.status, 200);
+  return result.body.data;
+}
+
+test('lead follow-up result rejects unsupported status', async () => {
+  const session = await loginWeChat('lead_user');
+  const created = await api('/api/leads', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
       name: '测试同学', phone: '15527111396',
       businessType: 'E_BIKE', interest: '轻风通勤版'
@@ -41,13 +57,13 @@ test('lead follow-up result rejects unsupported status', async () => {
 
   const login = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'Shishan@2026' })
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
   });
   assert.equal(login.response.status, 200);
 
   const rejected = await api(`/api/admin/leads/${created.body.data.id}/follow-ups`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${login.body.data.token}` },
-    body: JSON.stringify({ content: '误提交的历史状态', status: 'MATERIAL_PENDING' })
+    body: JSON.stringify({ content: '错误的旧状态', status: 'MATERIAL_PENDING' })
   });
   assert.equal(rejected.response.status, 400);
   assert.equal(rejected.body.error.code, 'VALIDATION_ERROR');
@@ -65,14 +81,15 @@ test('health and product list are available', async () => {
 });
 
 test('campus card application requires consent and masks private fields', async () => {
+  const session = await loginWeChat('card_user');
   const invalid = await api('/api/campus-card-applications', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({ userId: 'u1' })
   });
   assert.equal(invalid.response.status, 400);
 
   const created = await api('/api/campus-card-applications', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
       userId: 'u1', schoolId: 'school_demo', campusId: 'campus_demo',
       serviceType: 'REPLACEMENT', applicantName: '张同学', studentNo: '20260001', consent: true
@@ -85,9 +102,10 @@ test('campus card application requires consent and masks private fields', async 
 });
 
 test('order total is server-calculated and idempotency prevents duplicate orders', async () => {
+  const session = await loginWeChat('u1');
   const request = {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'idempotency-key': 'checkout-001' },
+    headers: { 'content-type': 'application/json', 'idempotency-key': 'checkout-001', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
       userId: 'u1', items: [{ productId: 'prod_ebike_rent_001', quantity: 2, priceInCents: 1 }]
     })
@@ -101,10 +119,10 @@ test('order total is server-calculated and idempotency prevents duplicate orders
   assert.equal(repeated.body.data.id, created.body.data.id);
   assert.equal(repeated.body.idempotencyReused, true);
 
-  const list = await api('/api/orders?userId=u1');
+  const list = await api('/api/orders', { headers: { authorization: `Bearer ${session.token}` } });
   assert.equal(list.body.total, 1);
 
-  const linked = await api('/api/my/orders?userId=u1');
+  const linked = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
   assert.equal(linked.response.status, 200);
   assert.equal(linked.body.data.ebikeOrders.length, 1);
   assert.ok(linked.body.data.ebikeOrders[0].plateApplicationId);
@@ -112,31 +130,34 @@ test('order total is server-calculated and idempotency prevents duplicate orders
 });
 
 test('after-sale request checks order ownership and prevents duplicates', async () => {
-  const orders = await api('/api/orders?userId=u1');
+  const session = await loginWeChat('u1');
+  const orders = await api('/api/orders', { headers: { authorization: `Bearer ${session.token}` } });
   const orderId = orders.body.data[0].id;
+  const other = await loginWeChat('other_user');
   const forbidden = await api('/api/after-sales', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${other.token}` },
     body: JSON.stringify({ userId: 'u2', orderId, type: 'REFUND', reason: '测试退款' })
   });
   assert.equal(forbidden.response.status, 404);
 
   const created = await api('/api/after-sales', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ userId: 'u1', orderId, type: 'REFUND', reason: '测试退款' })
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ orderId, type: 'REFUND', reason: '测试退款' })
   });
   assert.equal(created.response.status, 201);
   assert.equal(created.body.data.status, 'SUBMITTED');
 
   const duplicate = await api('/api/after-sales', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ userId: 'u1', orderId, type: 'REFUND', reason: '重复申请' })
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ orderId, type: 'REFUND', reason: '重复申请' })
   });
   assert.equal(duplicate.response.status, 409);
 });
 
 test('stock validation rejects excessive quantities', async () => {
+  const session = await loginWeChat('u3');
   const result = await api('/api/orders', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({ userId: 'u3', items: [{ productId: 'prod_ebike_001', quantity: 99 }] })
   });
   assert.equal(result.response.status, 409);
@@ -144,12 +165,13 @@ test('stock validation rejects excessive quantities', async () => {
 });
 
 test('merchant can be approved and manage its own products and orders', async () => {
+  const merchantSession = await loginWeChat('merchant_user_test');
   const applied = await api('/api/merchants', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
     body: JSON.stringify({
       userId: 'merchant_user_test', merchantType: 'INDIVIDUAL', name: '测试校园超市', ownerName: '店主',
       phone: '15527110001', licenseNo: '92420111MAKMT4534R', category: 'LIFE_SERVICE',
-      serviceArea: '狮山校区', description: '校内日用品配送', licenseUrl: '/api/uploads/test-license.jpg',
+      serviceArea: '狮山校区', description: '校内日常用品配送', licenseUrl: '/api/uploads/test-license.jpg',
       agreeAgreement: true, agreePrivacy: true
     })
   });
@@ -159,19 +181,18 @@ test('merchant can be approved and manage its own products and orders', async ()
 
   const adminLogin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'Shishan@2026' })
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
   });
   const approved = await api(`/api/admin/merchants/${applied.body.data.id}/status`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
     body: JSON.stringify({ status: 'APPROVED', reviewNote: '营业执照已核对' })
   });
-  assert.equal(approved.response.status, 200);
-  assert.equal(approved.body.data.timeline.at(-1).status, 'APPROVED');
   assert.equal(approved.body.data.timeline.at(-1).note, '营业执照已核对');
+  assert.equal(approved.body.data.timeline.at(-1).status, 'APPROVED');
 
   const login = await api('/api/merchant/login', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ userId: 'merchant_user_test', merchantId: applied.body.data.id })
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: applied.body.data.id })
   });
   assert.equal(login.response.status, 200);
   const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${login.body.data.token}` };
@@ -183,7 +204,7 @@ test('merchant can be approved and manage its own products and orders', async ()
   assert.equal(product.response.status, 201);
 
   const created = await api('/api/orders', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
     body: JSON.stringify({ userId: 'buyer_test', items: [{ productId: product.body.data.id, quantity: 1 }] })
   });
   assert.equal(created.response.status, 201);
@@ -202,8 +223,9 @@ test('merchant can be approved and manage its own products and orders', async ()
 });
 
 test('merchant application requires agreements and complete business qualification', async () => {
+  const session = await loginWeChat('merchant_rule_test');
   const missingAgreement = await api('/api/merchants', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
       userId: 'merchant_rule_test', merchantType: 'INDIVIDUAL', name: '测试资质', ownerName: '审核员',
       phone: '15527110002', licenseNo: '92420111MAKMT4534R', category: 'LIFE_SERVICE',
@@ -214,7 +236,7 @@ test('merchant application requires agreements and complete business qualificati
   assert.equal(missingAgreement.body.error.code, 'VALIDATION_ERROR');
 
   const invalidLicense = await api('/api/merchants', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
       userId: 'merchant_rule_test', merchantType: 'INDIVIDUAL', name: '测试资质', ownerName: '审核员',
       phone: '15527110002', licenseNo: 'invalid', category: 'LIFE_SERVICE',
@@ -225,15 +247,16 @@ test('merchant application requires agreements and complete business qualificati
 });
 
 test('personal merchant application does not require a business license', async () => {
+  const session = await loginWeChat('merchant_personal_test');
   const verify = await api('/api/identity/verify', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ userId: 'merchant_personal_test', ownerName: '李同学', idNumber: '42010619900101001X' })
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ ownerName: '李同学', idNumber: '42010619900101001X' })
   });
   assert.equal(verify.response.status, 200);
   assert.equal(verify.body.data.status, 'VERIFIED');
 
   const applied = await api('/api/merchants', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
       userId: 'merchant_personal_test', merchantType: 'PERSONAL', name: '个人代购服务', ownerName: '李同学',
       phone: '15527110003', category: 'LIFE_SERVICE', serviceArea: '狮山校区',
@@ -247,24 +270,26 @@ test('personal merchant application does not require a business license', async 
 });
 
 test('merchant qualification upload validates image content and size', async () => {
+  const session = await loginWeChat('upload_user');
   const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(2048, 1)]);
   const uploaded = await api('/api/uploads', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({ dataBase64: png.toString('base64'), mimeType: 'image/png' })
   });
   assert.equal(uploaded.response.status, 201);
   assert.match(uploaded.body.data.url, /^\/api\/uploads\/[\w-]+\.png$/);
 
   const invalidImage = await api('/api/uploads', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({ dataBase64: Buffer.alloc(2048).toString('base64'), mimeType: 'image/png' })
   });
   assert.equal(invalidImage.response.status, 400);
 });
 
 test('phone card service record can apply for broadband once', async () => {
+  const session = await loginWeChat('linked_user');
   const created = await api('/api/phone-card-orders', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
       userId: 'linked_user', customerName: '联同学', phone: '15527111396',
       planName: '校园畅享卡', amountInCents: 2900
@@ -274,30 +299,32 @@ test('phone card service record can apply for broadband once', async () => {
   const recordId = created.body.data.id;
 
   const first = await api(`/api/service-records/${recordId}/actions`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({ userId: 'linked_user', action: 'APPLY_BROADBAND' })
   });
   assert.equal(first.response.status, 200);
   assert.equal(first.body.data.status, 'PENDING_VERIFY');
 
   const repeated = await api(`/api/service-records/${recordId}/actions`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({ userId: 'linked_user', action: 'APPLY_BROADBAND' })
   });
   assert.equal(repeated.response.status, 409);
 });
 
 test('order collaboration is shared by user merchant and platform', async () => {
+  const userSession = await loginWeChat('collab_user');
+  const merchantSession = await loginWeChat('merchant_demo');
   const created = await api('/api/orders', {
-    method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'collab-001' },
+    method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'collab-001', authorization: `Bearer ${userSession.token}` },
     body: JSON.stringify({ userId:'collab_user', items:[{ productId:'prod_ebike_001', quantity:1 }] })
   });
   const orderId = created.body.data.id;
   assert.ok(created.body.data.collaboration);
 
   const merchantLogin = await api('/api/merchant/login', {
-    method:'POST', headers:{ 'content-type':'application/json' },
-    body:JSON.stringify({ userId:'merchant_demo', merchantId:'merchant_001' })
+    method:'POST', headers:{ 'content-type':'application/json', authorization:`Bearer ${merchantSession.token}` },
+    body:JSON.stringify({ merchantId:'merchant_001' })
   });
   assert.equal(merchantLogin.response.status, 200);
 
@@ -309,7 +336,7 @@ test('order collaboration is shared by user merchant and platform', async () => 
   assert.equal(accepted.body.data.status, 'FULFILLING');
 
   const appealed = await api('/api/order-collab', {
-    method:'POST', headers:{ 'content-type':'application/json' },
+    method:'POST', headers:{ 'content-type':'application/json', authorization:`Bearer ${userSession.token}` },
     body:JSON.stringify({ role:'USER', action:'APPEAL', orderId, userId:'collab_user', note:'配送时间需要改成明天上午。' })
   });
   assert.equal(appealed.response.status, 200);
