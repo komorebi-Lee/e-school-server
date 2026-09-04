@@ -288,6 +288,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: { token, userId, expiresIn: 604800 }, requestId });
       }
 
+      if (request.method === 'POST' && pathname === '/api/auth/demo-login') {
+        const userId = 'wx_demo_user';
+        const token = createHash('sha256').update(`${userId}:${randomUUID()}`).digest('hex');
+        userSessions.set(token, { userId, expiresAt: Date.now() + userSessionTtlMs });
+        return sendJson(response, 200, { data: { token, userId, expiresIn: 604800 }, requestId });
+      }
+
       if (request.method === 'POST' && pathname === '/api/uploads') {
         requireUser(request);
         const body = await readJson(request);

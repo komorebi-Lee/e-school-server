@@ -158,3 +158,12 @@ test('merchant login requires a WeChat session', async () => {
   });
   assert.equal(result.response.status, 401);
 });
+
+test('demo login issues a working session without wechat verification', async () => {
+  const result = await api('/api/auth/demo-login', { method: 'POST' });
+  assert.equal(result.response.status, 200);
+  const { token, userId } = result.body.data;
+  assert.equal(userId, 'wx_demo_user');
+  const orders = await api('/api/my/orders', { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(orders.response.status, 200);
+});
