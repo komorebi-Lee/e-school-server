@@ -2,12 +2,15 @@
   "name": "campus-go-mock-api",
   "version": "0.1.0",
   "private": true,
-  "description": "Campus Go MVP zero-dependency mock API",
+  "description": "Campus Go API with optional MySQL persistence",
   "type": "commonjs",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node --test"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.0"
   },
   "engines": {
     "node": ">=18"

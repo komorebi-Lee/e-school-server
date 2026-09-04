@@ -8,7 +8,7 @@ service:
   cpu: 0.25
   mem: 0.5
   minNum: 1
-  maxNum: 3
+  maxNum: 1
   containerPort: 80
   healthCheck:
     path: /health

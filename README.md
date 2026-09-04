@@ -25,6 +25,16 @@ http://localhost:3000/admin
 
 管理端账号密码来自环境变量，不再写入前端页面或代码。复制 `.env.example` 为 `.env` 后配置 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`；微信云托管请在服务“环境变量”中配置同名变量，不要把真实密码提交到 Git。
 
+## MySQL 持久化
+
+默认仍使用 JSON 文件存储。配置以下环境变量后自动切换为 MySQL（微信云托管请购买 MySQL 套餐并把内网地址填入服务环境变量）：
+
+```text
+MYSQL_HOST、MYSQL_PORT、MYSQL_DATABASE、MYSQL_USERNAME、MYSQL_PASSWORD
+```
+
+启动时自动建 `app_state` 表；若表为空且 `DB_FILE` 指向的 JSON 文件存在，会把 JSON 数据导入 MySQL 后继续使用。MySQL 不可用时自动降级回 JSON 文件，服务不会启动失败。
+
 管理端还支持商品新增与编辑、业务筛选、详情侧栏、CSV 导出、操作日志和运营设置。演示账号与内存会话仅适用于本地验证；正式部署时必须替换为数据库用户、密码哈希、RBAC 权限和安全会话。
 
 ```powershell

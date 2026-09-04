@@ -2,6 +2,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
 const { JsonStore } = require('./store');
+const { createMysqlStore } = require('./mysql-store');
 const { createApp } = require('./app');
 
 function loadEnvFile(filePath) {
@@ -20,19 +21,44 @@ function loadEnvFile(filePath) {
 
 loadEnvFile(path.join(__dirname, '..', '.env'));
 
-const port = Number(process.env.PORT || 3000);
-const databasePath = process.env.DB_FILE || path.join(__dirname, '..', 'data', 'db.json');
-const store = new JsonStore(databasePath);
-const server = http.createServer(createApp({ store }));
+async function bootstrap() {
+  const port = Number(process.env.PORT || 3000);
+  const databasePath = process.env.DB_FILE || path.join(__dirname, '..', 'data', 'db.json');
+  let store;
+  if (process.env.MYSQL_HOST && process.env.MYSQL_DATABASE) {
+    const { initialData } = require('./store');
+    try {
+      store = await createMysqlStore({
+        host: process.env.MYSQL_HOST,
+        port: process.env.MYSQL_PORT || 3306,
+        user: process.env.MYSQL_USERNAME || 'root',
+        password: process.env.MYSQL_PASSWORD || '',
+        database: process.env.MYSQL_DATABASE,
+        seedData: initialData(),
+        importFilePath: databasePath
+      });
+      console.log(`MySQL store ready (${process.env.MYSQL_HOST}/${process.env.MYSQL_DATABASE})`);
+    } catch (error) {
+      console.error(`MySQL unavailable, falling back to JSON: ${error.message}`);
+      store = new JsonStore(databasePath);
+    }
+  } else {
+    store = new JsonStore(databasePath);
+    console.log(`JSON database: ${databasePath}`);
+  }
+  const server = http.createServer(createApp({ store }));
+  server.listen(port, '0.0.0.0', () => {
+    console.log(`Campus Go API listening on http://localhost:${port}`);
+  });
 
-server.listen(port, '0.0.0.0', () => {
-  console.log(`Campus Go mock API listening on http://localhost:${port}`);
-  console.log(`JSON database: ${databasePath}`);
-});
-
-function shutdown() {
-  server.close(() => process.exit(0));
+  function shutdown() {
+    server.close(() => process.exit(0));
+  }
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+bootstrap().catch((error) => {
+  console.error('Failed to start server:', error);
+  process.exit(1);
+});
