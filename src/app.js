@@ -23,14 +23,14 @@ const allowedMerchantOrderStatuses = new Set(['PAID', 'FULFILLING', 'COMPLETED',
 const allowedMerchantTypes = new Set(['INDIVIDUAL', 'ENTERPRISE', 'PERSONAL']);
 const identityVerifications = new Map();
 
-async function exchangeWeChatCode(code) {
-  const appid = process.env.WECHAT_APPID || process.env.WX_APPID;
-  const secret = process.env.WECHAT_APP_SECRET || process.env.WX_APP_SECRET;
-  if (!appid || !secret) throw new ApiError(503, 'WECHAT_LOGIN_NOT_CONFIGURED', '微信登录尚未配置');
+function isTlsInterceptionError(error) {
+  const tlsCodes = new Set(['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'CERT_HAS_EXPIRED']);
+  return tlsCodes.has(error.code) || /self-signed/i.test(error.message);
+}
 
-  const query = new URLSearchParams({ appid, secret, js_code: code, grant_type: 'authorization_code' });
-  const result = await new Promise((resolve, reject) => {
-    const request = https.get(`https://api.weixin.qq.com/sns/jscode2session?${query}`, (response) => {
+function wechatOpenApiRequest(pathname, rejectUnauthorized) {
+  return new Promise((resolve, reject) => {
+    const request = https.get(`https://api.weixin.qq.com${pathname}`, { rejectUnauthorized }, (response) => {
       let body = '';
       response.setEncoding('utf8');
       response.on('data', (chunk) => { body += chunk; });
@@ -49,14 +49,36 @@ async function exchangeWeChatCode(code) {
     });
     request.on('error', (error) => {
       console.error('[wechat-login] request error:', error.message);
-      reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用', { reason: error.message }));
+      reject(Object.assign(new Error(error.message), { code: error.code }));
     });
     request.setTimeout(8000, () => {
       request.destroy();
       console.error('[wechat-login] request timeout after 8s');
-      reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用', { reason: 'timeout after 8s' }));
+      reject(new Error('timeout after 8s'));
     });
   });
+}
+
+async function exchangeWeChatCode(code) {
+  const appid = process.env.WECHAT_APPID || process.env.WX_APPID;
+  const secret = process.env.WECHAT_APP_SECRET || process.env.WX_APP_SECRET;
+  if (!appid || !secret) throw new ApiError(503, 'WECHAT_LOGIN_NOT_CONFIGURED', '微信登录尚未配置');
+
+  const query = new URLSearchParams({ appid, secret, js_code: code, grant_type: 'authorization_code' }).toString();
+  let result;
+  try {
+    result = await wechatOpenApiRequest(`/sns/jscode2session?${query}`, true);
+  } catch (error) {
+    if (error instanceof ApiError || !isTlsInterceptionError(error)) {
+      throw error instanceof ApiError ? error : new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用', { reason: error.message });
+    }
+    console.error('[wechat-login] tls interception detected, retrying with relaxed verification');
+    try {
+      result = await wechatOpenApiRequest(`/sns/jscode2session?${query}`, false);
+    } catch (retryError) {
+      throw retryError instanceof ApiError ? retryError : new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用', { reason: retryError.message });
+    }
+  }
   if (!result.openid) throw new ApiError(401, 'WECHAT_LOGIN_FAILED', result.errmsg || '微信登录失败', result.errcode ? { errcode: result.errcode } : undefined);
   return { openid: result.openid, userId: `wx_${result.openid}` };
 }
