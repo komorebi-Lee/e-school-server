@@ -85,6 +85,12 @@ const seedProductReviews = [
     customerName: '陈同学',
     college: '园艺林学学院',
     purchaseVerified: true,
+    images: ['https://placehold.co/240x180?text=Campus+Ride'],
+    reply: {
+      merchantName: '狮山校园车行',
+      content: '感谢同学反馈，后续有车况问题可随时在订单里联系商家。',
+      repliedAt: '2026-09-01T19:00:00.000Z'
+    },
     createdAt: '2026-09-01T10:20:00.000Z'
   },
   {
@@ -95,6 +101,8 @@ const seedProductReviews = [
     customerName: '刘同学',
     college: '经济管理学院',
     purchaseVerified: true,
+    images: [],
+    reply: null,
     createdAt: '2026-09-03T15:05:00.000Z'
   }
 ];

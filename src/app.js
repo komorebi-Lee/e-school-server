@@ -427,6 +427,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const data = store.read();
         const product = data.products.find((item) => item.id === productMatch[1] && item.active);
         if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+        const relatedProducts = data.products
+          .filter((item) => item.active && item.id !== product.id && item.category === product.category)
+          .slice(0, 3)
+          .map((item) => withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || []));
         return sendJson(response, 200, {
           data: {
             ...withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || []),
@@ -441,8 +445,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 customerName: review.customerName,
                 college: review.college,
                 purchaseVerified: review.purchaseVerified !== false,
+                images: Array.isArray(review.images) ? review.images.slice(0, 3) : [],
+                reply: review.reply || null,
                 createdAt: review.createdAt
               }))
+            ,
+            relatedProducts
           },
           requestId
         });
@@ -477,6 +485,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             college: '华中农业大学',
             purchaseVerified: true,
             visibility: 'PUBLISHED',
+            images: [],
+            reply: null,
             createdAt: now
           };
           records.unshift(record);
@@ -492,6 +502,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             content: review.content,
             purchaseVerified: review.purchaseVerified,
             visibility: review.visibility,
+            images: Array.isArray(review.images) ? review.images.slice(0, 3) : [],
+            reply: review.reply || null,
             createdAt: review.createdAt
           },
           requestId
