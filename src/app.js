@@ -464,6 +464,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const rating = Number(body.rating);
         const content = requireString(body.content, 'content', { maxLength: 500 });
         if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new ApiError(400, 'VALIDATION_ERROR', 'rating must be an integer between 1 and 5');
+        const images = Array.isArray(body.images) ? body.images.slice(0, 3).map((image) => String(image || '').trim()) : [];
+        if (images.some((image) => !image.startsWith('/api/uploads/'))) throw new ApiError(400, 'VALIDATION_ERROR', '评价图片必须来自平台上传目录');
         const review = store.update((data) => {
           const order = data.orders.find((item) => item.id === orderId && item.userId === userId);
           if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
@@ -485,7 +487,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             college: '华中农业大学',
             purchaseVerified: true,
             visibility: 'PUBLISHED',
-            images: [],
+            images,
             reply: null,
             createdAt: now
           };

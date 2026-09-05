@@ -511,9 +511,22 @@ test('completed order owner can submit one verified product review', async () =>
     body: JSON.stringify({ status: 'COMPLETED' })
   });
 
+  const unsafeImages = await api('/api/product-reviews', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({
+      orderId, productId: product.body.data.id, rating: 5, content: '带外链图的评价',
+      images: ['https://example.com/track.png']
+    })
+  });
+  assert.equal(unsafeImages.response.status, 400);
+  assert.equal(unsafeImages.body.error.code, 'VALIDATION_ERROR');
+
   const review = await api('/api/product-reviews', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
-    body: JSON.stringify({ orderId, productId: product.body.data.id, rating: 5, content: '配送很快，上牌指引也很清楚。' })
+    body: JSON.stringify({
+      orderId, productId: product.body.data.id, rating: 5, content: '配送很快，上牌指引也很清楚。',
+      images: ['/api/uploads/review-photo.jpg']
+    })
   });
   assert.equal(review.response.status, 201);
   assert.equal(review.body.data.purchaseVerified, true);
@@ -528,6 +541,7 @@ test('completed order owner can submit one verified product review', async () =>
   assert.equal(detail.body.data.ratingSummary.purchaseVerifiedCount, 1);
   assert.equal(detail.body.data.reviews[0].id, review.body.data.id);
   assert.equal(detail.body.data.reviews[0].content, '配送很快，上牌指引也很清楚。');
+  assert.deepEqual(detail.body.data.reviews[0].images, ['/api/uploads/review-photo.jpg']);
 
   const invalidVisibility = await api(`/api/admin/product-reviews/${review.body.data.id}/visibility`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
