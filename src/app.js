@@ -1319,10 +1319,21 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const ownerPhone = requireString(body.ownerPhone,'ownerPhone',{maxLength:30});
         const companionPhone = requireString(body.companionPhone,'companionPhone',{maxLength:30});
+        if (!/^1\d{10}$/.test(ownerPhone) || !/^1\d{10}$/.test(companionPhone)) throw new ApiError(400,'VALIDATION_ERROR','请输入正确的双方手机号');
         if (ownerPhone === companionPhone) throw new ApiError(400,'VALIDATION_ERROR','两个号码不能相同');
+        const activatedCardNumbers = new Set((store.read().phoneCardOrders || [])
+          .filter((item) => item.status === 'ACTIVATED')
+          .map((item) => item.phone));
+        if (!activatedCardNumbers.has(ownerPhone) || !activatedCardNumbers.has(companionPhone)) {
+          throw new ApiError(409,'BROADBAND_ELIGIBILITY_NOT_MET','两位同学都需要已激活的校园电话卡');
+        }
+        const hasApplication = (store.read().broadbandApplications || []).some((item) => {
+          return [`${item.ownerPhone}:${item.companionPhone}`, `${item.companionPhone}:${item.ownerPhone}`].includes(`${ownerPhone}:${companionPhone}`) && item.status !== 'REJECTED';
+        });
+        if (hasApplication) throw new ApiError(409,'BROADBAND_APPLICATION_EXISTS','这两位同学的宽带资格申请已存在');
         const now = new Date().toISOString();
-        const record = { id:`net_${randomUUID()}`, userId, ownerPhone, companionPhone, status:'PENDING_VERIFY', relatedIds:{}, createdAt:now, updatedAt:now };
-        store.update(data=>{ (data.broadbandApplications=data.broadbandApplications||[]).unshift(record); addAudit(data,'新增宽带资格申请',record.id); });
+        const record = { id:`net_${randomUUID()}`, userId, ownerPhone, companionPhone, status:'PENDING_VERIFY', relatedIds:{}, qualificationCheckedAt:now, createdAt:now, updatedAt:now };
+        store.update(data=>{ (data.broadbandApplications=data.broadbandApplications||[]).unshift(record); addAudit(data,'新增宽带资格申请','双方已购卡且已激活'); });
         return sendJson(response,201,{data:record,requestId});
       }
       if (request.method === 'POST' && pathname === '/api/plate-applications') {
@@ -1361,7 +1372,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!item) continue;
             if (collection.type === 'PHONE_PLAN' && action === 'APPLY_BROADBAND') {
               if (item.relatedIds?.broadbandApplicationId) throw new ApiError(409,'ACTION_ALREADY_DONE','该订单已提交宽带资格');
-              const application = { id:`net_${randomUUID().slice(0,8)}`, userId, ownerPhone:item.phone, companionPhone:item.companionPhone || '', relatedOrderId:item.id, status:'PENDING_VERIFY', relatedIds:{ phoneCardOrderId:item.id }, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
+              const companionPhone = requireString(body.companionPhone, 'companionPhone', { maxLength: 30 });
+              if (!/^1\d{10}$/.test(companionPhone) || companionPhone === item.phone) throw new ApiError(400,'VALIDATION_ERROR','请填写与本人不同的同伴手机号');
+              const activatedPhones = new Set((data.phoneCardOrders || []).filter((row) => row.status === 'ACTIVATED').map((row) => row.phone));
+              if (!activatedPhones.has(item.phone) || !activatedPhones.has(companionPhone)) throw new ApiError(409,'BROADBAND_ELIGIBILITY_NOT_MET','两位同学都需要已激活的校园电话卡');
+              const application = { id:`net_${randomUUID().slice(0,8)}`, userId, ownerPhone:item.phone, companionPhone, relatedOrderId:item.id, status:'PENDING_VERIFY', relatedIds:{ phoneCardOrderId:item.id }, createdAt:new Date().toISOString(), updatedAt:new Date().toISOString() };
               (data.broadbandApplications = data.broadbandApplications || []).unshift(application);
               item.relatedIds = { ...(item.relatedIds || {}), broadbandApplicationId:application.id };
               item.updatedAt = new Date().toISOString();

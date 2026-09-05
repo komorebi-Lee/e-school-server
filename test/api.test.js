@@ -590,12 +590,53 @@ test('phone card service record can apply for broadband once', async () => {
   await confirmPayment(created.body.paymentOrder.id, session.token);
   const recordId = created.body.data.id;
 
-  const first = await api(`/api/service-records/${recordId}/actions`, {
+  const notEligible = await api('/api/broadband-applications', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ ownerPhone: '15527111396', companionPhone: '15527111496' })
+  });
+  assert.equal(notEligible.response.status, 409);
+  assert.equal(notEligible.body.error.code, 'BROADBAND_ELIGIBILITY_NOT_MET');
+
+  const missingCompanion = await api(`/api/service-records/${recordId}/actions`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({ userId: 'linked_user', action: 'APPLY_BROADBAND' })
   });
+  assert.equal(missingCompanion.response.status, 400);
+
+  const companionSession = await loginWeChat('broadband_companion');
+  const companionCard = await api('/api/phone-card-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${companionSession.token}` },
+    body: JSON.stringify({ customerName: '网同学', phone: '15527111496', productId: 'prod_card_service_001' })
+  });
+  assert.equal(companionCard.response.status, 201);
+  await confirmPayment(companionCard.body.paymentOrder.id, companionSession.token);
+  const adminActivate = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(adminActivate.response.status, 200);
+  await api(`/api/admin/phone-card-orders/${created.body.data.id}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminActivate.body.data.token}` },
+    body: JSON.stringify({ status: 'ACTIVATED' })
+  });
+  await api(`/api/admin/phone-card-orders/${companionCard.body.data.id}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminActivate.body.data.token}` },
+    body: JSON.stringify({ status: 'ACTIVATED' })
+  });
+
+  const first = await api(`/api/service-records/${recordId}/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ userId: 'linked_user', action: 'APPLY_BROADBAND', companionPhone: '15527111496' })
+  });
   assert.equal(first.response.status, 200);
   assert.equal(first.body.data.status, 'PENDING_VERIFY');
+
+  const duplicateApplication = await api('/api/broadband-applications', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ ownerPhone: '15527111396', companionPhone: '15527111496' })
+  });
+  assert.equal(duplicateApplication.response.status, 409);
+  assert.equal(duplicateApplication.body.error.code, 'BROADBAND_APPLICATION_EXISTS');
 
   const repeated = await api(`/api/service-records/${recordId}/actions`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
