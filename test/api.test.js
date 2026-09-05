@@ -50,6 +50,15 @@ async function confirmPayment(paymentId, token) {
   });
 }
 
+function makeImage(mimeType = 'image/png') {
+  if (mimeType === 'image/png') {
+    const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(1200, 1)]);
+    return { dataBase64: bytes.toString('base64'), mimeType };
+  }
+  const bytes = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(1200, 1)]);
+  return { dataBase64: bytes.toString('base64'), mimeType };
+}
+
 test('lead follow-up result rejects unsupported status', async () => {
   const session = await loginWeChat('lead_user');
   const created = await api('/api/leads', {
@@ -1114,11 +1123,12 @@ test('external plate applications require paid service fee and support refunds',
   const created = await api('/api/plate-applications', {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
-    body: JSON.stringify({ customerName: '外部车上牌同学', customerPhone: '15527111396', vehicleModel: '自有通勤车' })
+    body: JSON.stringify({ customerName: '外部车上牌同学', customerPhone: '15527111396', studentNo: '2026101234567', vehicleModel: '自有通勤车' })
   });
   assert.equal(created.response.status, 201);
   assert.equal(created.body.data.status, 'PENDING_PAYMENT');
   assert.equal(created.body.data.paymentStatus, 'UNPAID');
+  assert.equal(created.body.data.studentNo, '2026101234567');
   assert.equal(created.body.paymentOrder.businessType, 'PLATE');
   assert.equal(created.body.paymentOrder.status, 'PENDING');
 
@@ -1126,6 +1136,28 @@ test('external plate applications require paid service fee and support refunds',
   assert.equal(payment.response.status, 200);
   assert.equal(payment.body.data.plateApplication.status, 'MATERIAL_PENDING');
   assert.equal(payment.body.data.plateApplication.paymentStatus, 'PAID');
+
+  const upload = await api('/api/uploads', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify(makeImage())
+  });
+  assert.equal(upload.response.status, 201);
+  const materials = await api(`/api/plate-applications/${created.body.data.id}/materials`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ images: [upload.body.data.url] })
+  });
+  assert.equal(materials.response.status, 200);
+  assert.equal(materials.body.data.materials.length, 1);
+  assert.equal(materials.body.data.materials[0].url, upload.body.data.url);
+
+  const foreignMaterials = await api(`/api/plate-applications/${created.body.data.id}/materials`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ images: ['/api/uploads/not-existing.png'] })
+  });
+  assert.equal(foreignMaterials.response.status, 200);
 
   const adminLogin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },

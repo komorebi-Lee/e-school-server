@@ -1183,7 +1183,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const phoneCardOrders = (data.phoneCardOrders || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.amountInCents || 0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
         const rechargeOrders = (data.rechargeOrders || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents || 0)/100).toFixed(0)}送${((item.receiveInCents || 0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.paidInCents || 0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
         const broadbandApplications = (data.broadbandApplications || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'BROADBAND', typeLabel:'宽带', title:'双人购卡宽带', status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:0, phone:item.ownerPhone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
-        const plateApplications = (data.plateApplications || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel || '校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.feeInCents || 0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
+        const plateApplications = (data.plateApplications || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel || '校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.feeInCents || 0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', phone:item.phone, studentNo:item.studentNo || '', materialCount:(item.materials || []).length, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
         const items = [...phoneCardOrders, ...rechargeOrders, ...broadbandApplications, ...plateApplications].sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
         return sendJson(response,200,{data:items,total:items.length,requestId});
       }
@@ -1196,7 +1196,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const phoneCardOrders=(data.phoneCardOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.amountInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           const rechargeOrders=(data.rechargeOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents||0)/100).toFixed(0)}送${((item.receiveInCents||0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.paidInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           const broadbandApplications=(data.broadbandApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'BROADBAND', typeLabel:'宽带', title:'双人购卡宽带', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
-          const plateApplications=(data.plateApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel||'校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.feeInCents||0, paymentOrderId:item.paymentOrderId||'', paymentStatus:item.paymentStatus||'', relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const plateApplications=(data.plateApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel||'校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.feeInCents||0, paymentOrderId:item.paymentOrderId||'', paymentStatus:item.paymentStatus||'', studentNo:item.studentNo||'', materialCount:(item.materials||[]).length, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           return [...phoneCardOrders,...rechargeOrders,...broadbandApplications,...plateApplications];
         })();
         return sendJson(response,200,{data:{ebikeOrders,serviceRecords},requestId});
@@ -1349,6 +1349,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const customerName = requireString(body.customerName,'customerName',{maxLength:50});
         const customerPhone = requireString(body.customerPhone,'customerPhone',{maxLength:30});
+        const studentNo = requireString(body.studentNo,'studentNo',{maxLength:40});
         const vehicleModel = requireString(body.vehicleModel,'vehicleModel',{maxLength:80});
         const now = new Date().toISOString();
         const result = store.update(data=>{
@@ -1356,7 +1357,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (body.orderId && !order) throw new ApiError(404,'ORDER_NOT_FOUND','Order not found');
           const platformOrder = order && (data.products||[]).find(product=>product.id===order.items?.[0]?.productId)?.category === 'E_BIKE_NEW';
           const feeInCents = platformOrder ? 0 : ((data.adminSettings||{}).externalPlateFeeInCents ?? 4900);
-          const application = { id:`plate_${randomUUID()}`, userId, customerName, phone:customerPhone, vehicleModel, source:platformOrder?'PLATFORM_ORDER':'EXTERNAL', feeInCents, relatedOrderId:order?.id || '', status:platformOrder?'MATERIAL_PENDING':'PENDING_PAYMENT', paymentStatus:platformOrder?'PAID':'UNPAID', relatedIds:order?{ platformOrderIds:[order.id] }:{}, createdAt:now, updatedAt:now };
+          const application = { id:`plate_${randomUUID()}`, userId, customerName, phone:customerPhone, studentNo, vehicleModel, source:platformOrder?'PLATFORM_ORDER':'EXTERNAL', feeInCents, relatedOrderId:order?.id || '', status:platformOrder?'MATERIAL_PENDING':'PENDING_PAYMENT', paymentStatus:platformOrder?'PAID':'UNPAID', relatedIds:order?{ platformOrderIds:[order.id] }:{}, createdAt:now, updatedAt:now };
           if (!platformOrder) {
             const paymentOrder = {
               id:`pay_${randomUUID()}`,
@@ -1385,6 +1386,31 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response,201,{data:result.application,paymentOrder:result.paymentOrder,requestId});
       }
       const businessMatch = pathname.match(/^\/api\/service-records\/([^/]+)\/actions$/);
+      const plateMaterialMatch = pathname.match(/^\/api\/plate-applications\/([^/]+)\/materials$/);
+      if (request.method === 'POST' && plateMaterialMatch) {
+        const { userId } = requireUser(request);
+        const body = await readJson(request);
+        if (!Array.isArray(body.images) || !body.images.length || body.images.length > 6) throw new ApiError(400,'VALIDATION_ERROR','请上传 1 到 6 张材料图片');
+        const images = body.images.map((image, index) => {
+          const url = requireString(image, `images.${index}`, { maxLength: 200 });
+          if (!url.startsWith('/api/uploads/')) throw new ApiError(400,'VALIDATION_ERROR','材料图片必须来自平台上传目录');
+          return url;
+        });
+        const application = store.update((data) => {
+          const item = (data.plateApplications || []).find(row => row.id === plateMaterialMatch[1] && row.userId === userId);
+          if (!item) throw new ApiError(404,'PLATE_APPLICATION_NOT_FOUND','Plate application not found');
+          if (!['MATERIAL_PENDING','REVIEWING'].includes(item.status)) throw new ApiError(409,'PLATE_STATUS_NOT_ALLOWED','当前状态暂不能上传材料');
+          const existing = Array.isArray(item.materials) ? item.materials : [];
+          if (existing.length + images.length > 9) throw new ApiError(409,'PLATE_MATERIAL_LIMIT','每个牌照工单最多上传 9 张材料');
+          const now = new Date().toISOString();
+          item.materials = [...existing, ...images.map(url => ({ id:`mat_${randomUUID().slice(0,8)}`, url, uploadedAt:now }))];
+          item.updatedAt = now;
+          addAudit(data,'用户上传校园牌照材料',item.id);
+          addNotification(data,userId,'PLATE','牌照材料已提交','客服将核对车辆和身份材料，如需补充会另行联系。');
+          return item;
+        });
+        return sendJson(response,200,{data:application,requestId});
+      }
       if (request.method === 'POST' && businessMatch) {
         const { userId } = requireUser(request);
         const body = await readJson(request);
