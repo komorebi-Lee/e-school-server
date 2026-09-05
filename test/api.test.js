@@ -414,6 +414,7 @@ test('merchant can be approved and manage its own products and orders', async ()
   assert.equal(overview.body.data.metrics.settlementMetrics.payableInCents, 2300);
   assert.equal(overview.body.data.merchant.settlementAccountReady, true);
   assert.equal(overview.body.data.merchant.settlementAccountMasked, '6222 **** 0000');
+  assert.ok(!('deliveryCode' in overview.body.data.orders[0]));
 
   const settled = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
@@ -442,9 +443,30 @@ test('merchant can be approved and manage its own products and orders', async ()
   });
   assert.equal(repeatSettle.response.status, 404);
 
-  const fulfilled = await api(`/api/merchant/orders/${created.body.data.id}/status`, {
+  const paidOrder = await api(`/api/orders/${created.body.data.id}`, {
+    headers: { authorization: `Bearer ${merchantSession.token}` }
+  });
+  assert.equal(paidOrder.response.status, 200);
+  const deliveryCode = paidOrder.body.data.deliveryCode;
+  assert.match(deliveryCode, /^\d{6}$/);
+
+  const missingCode = await api(`/api/merchant/orders/${created.body.data.id}/status`, {
     method: 'POST', headers: merchantAuth,
     body: JSON.stringify({ status: 'COMPLETED' })
+  });
+  assert.equal(missingCode.response.status, 409);
+  assert.equal(missingCode.body.error.code, 'DELIVERY_CODE_INVALID');
+
+  const wrongCode = await api(`/api/merchant/orders/${created.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'COMPLETED', deliveryCode: '000000' })
+  });
+  assert.equal(wrongCode.response.status, 409);
+  assert.equal(wrongCode.body.error.code, 'DELIVERY_CODE_INVALID');
+
+  const fulfilled = await api(`/api/merchant/orders/${created.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'COMPLETED', deliveryCode })
   });
   assert.equal(fulfilled.response.status, 200);
   assert.equal(fulfilled.body.data.status, 'COMPLETED');
@@ -613,6 +635,28 @@ test('order collaboration is shared by user merchant and platform', async () => 
   assert.equal(appealed.response.status, 200);
   assert.equal(appealed.body.data.collaboration.intervention.status, 'REQUESTED');
   assert.ok(appealed.body.data.collaboration.messages.some((message)=>message.role==='USER'));
+
+  const paidOrder = await api(`/api/orders/${orderId}`, {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  assert.equal(paidOrder.response.status, 200);
+  const deliveryCode = paidOrder.body.data.deliveryCode;
+  assert.match(deliveryCode, /^\d{6}$/);
+
+  const rejectedComplete = await api('/api/order-collab', {
+    method:'POST', headers:{ 'content-type':'application/json', authorization:`Bearer ${merchantLogin.body.data.token}` },
+    body:JSON.stringify({ role:'MERCHANT', action:'COMPLETE', orderId, note:'尝试无码完成', deliveryCode:'000000' })
+  });
+  assert.equal(rejectedComplete.response.status, 409);
+  assert.equal(rejectedComplete.body.error.code, 'DELIVERY_CODE_INVALID');
+
+  const completed = await api('/api/order-collab', {
+    method:'POST', headers:{ 'content-type':'application/json', authorization:`Bearer ${merchantLogin.body.data.token}` },
+    body:JSON.stringify({ role:'MERCHANT', action:'COMPLETE', orderId, note:'交付码已核对', deliveryCode })
+  });
+  assert.equal(completed.response.status, 200);
+  assert.equal(completed.body.data.status, 'COMPLETED');
+  assert.ok(completed.body.data.collaboration.handoffs.some((event)=>event.note === '商家已核验交付码，订单已完成'));
 });
 
 test('completed order owner can submit one verified product review', async () => {
@@ -661,9 +705,16 @@ test('completed order owner can submit one verified product review', async () =>
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
     body: JSON.stringify({ status: 'FULFILLING' })
   });
+  const paidOrder = await api(`/api/orders/${orderId}`, {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  assert.equal(paidOrder.response.status, 200);
+  const deliveryCode = paidOrder.body.data.deliveryCode;
+  assert.match(deliveryCode, /^\d{6}$/);
+
   await api(`/api/merchant/orders/${orderId}/status`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
-    body: JSON.stringify({ status: 'COMPLETED' })
+    body: JSON.stringify({ status: 'COMPLETED', deliveryCode })
   });
 
   const unsafeImages = await api('/api/product-reviews', {

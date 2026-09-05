@@ -72,6 +72,19 @@ function validateDeliverySchedule(fulfillment, settings) {
   if (!configuredSlots.includes(slot)) throw new ApiError(400, 'VALIDATION_ERROR', '请选择平台提供的配送时段');
 }
 
+function issueDeliveryCode(order, now) {
+  if (!order.deliveryCode) {
+    order.deliveryCode = String(Math.floor(100000 + Math.random() * 900000));
+    order.deliveryCodeIssuedAt = now;
+  }
+  return order.deliveryCode;
+}
+
+function sanitizeOrderForMerchant(order) {
+  const { deliveryCode, deliveryCodeIssuedAt, ...safe } = order;
+  return safe;
+}
+
 function wechatOpenApiRequest(pathname, rejectUnauthorized) {
   return new Promise((resolve, reject) => {
     const request = https.get(`https://api.weixin.qq.com${pathname}`, { rejectUnauthorized }, (response) => {
@@ -708,13 +721,19 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const merchant = (data.merchants||[]).find(row=>row.id===merchantSessions.get((request.headers.authorization||'').replace(/^Bearer\s+/i,''))?.merchantId);
             if (!merchant || merchant.id !== item.collaboration.merchantId) throw new ApiError(403,'ORDER_FORBIDDEN','无权操作该订单');
             if (action === 'ACCEPT' && item.status === 'PAID') item.status = 'FULFILLING';
-            else if (action === 'COMPLETE' && item.status === 'FULFILLING') item.status = 'COMPLETED';
+            else if (action === 'COMPLETE' && item.status === 'FULFILLING') {
+              const providedCode = typeof body.deliveryCode === 'string' ? requireString(body.deliveryCode, 'deliveryCode', { maxLength: 6 }) : '';
+              if (!item.deliveryCode || providedCode !== item.deliveryCode) {
+                throw new ApiError(409, 'DELIVERY_CODE_INVALID', '交付码不正确，请向用户确认后完成订单');
+              }
+              item.status = 'COMPLETED';
+            }
             else if (!['CONTACT','NOTE'].includes(action)) throw new ApiError(409,'ACTION_NOT_ALLOWED','当前状态不支持该商家动作');
           }
           if (role === 'PLATFORM' && action === 'INTERVENE') item.collaboration.intervention = { status:'REQUESTED', note, updatedAt:new Date().toISOString() };
           if (role === 'PLATFORM' && action === 'RESOLVE') item.collaboration.intervention = { status:'RESOLVED', note, updatedAt:new Date().toISOString() };
           if (role === 'USER' && action === 'APPEAL') item.collaboration.intervention = { status:'REQUESTED', note, updatedAt:new Date().toISOString() };
-          const eventNote = role === 'MERCHANT' ? (action === 'ACCEPT' ? '商家已确认履约' : action === 'COMPLETE' ? '商家已完成服务' : note) : note;
+          const eventNote = role === 'MERCHANT' ? (action === 'ACCEPT' ? '商家已确认履约' : action === 'COMPLETE' ? '商家已核验交付码，订单已完成' : note) : note;
           appendCollaborationEvent(item, role, action, eventNote);
           addAudit(data, `${role}订单协同动作：${action}`, item.orderNo);
           return item;
@@ -836,7 +855,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               .filter((order) => order.items.some((item) => merchantProductIds.has(item.productId) || item.merchantId === merchant.id))
               .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
         const enrichedOrders = orders.map((order) => ({
-          ...order,
+          ...sanitizeOrderForMerchant(order),
           merchantName: merchant.name,
           collaboration: order.collaboration || createCollaboration(order, merchant.id)
         }));
@@ -944,10 +963,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }));
           if (!item) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
           if (!['PAID', 'FULFILLING'].includes(item.status)) throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '当前订单状态不可更新');
+          if (status === 'COMPLETED') {
+            const providedCode = typeof body.deliveryCode === 'string' ? requireString(body.deliveryCode, 'deliveryCode', { maxLength: 6 }) : '';
+            if (!item.deliveryCode || providedCode !== item.deliveryCode) {
+              throw new ApiError(409, 'DELIVERY_CODE_INVALID', '交付码不正确，请向用户确认后完成订单');
+            }
+          }
           item.status = status;
           item.updatedAt = new Date().toISOString();
-          appendCollaborationEvent(item, 'MERCHANT', status === 'FULFILLING' ? 'ACCEPT' : 'COMPLETE', status === 'FULFILLING' ? '商家已确认履约' : '商家已完成服务');
+          appendCollaborationEvent(item, 'MERCHANT', status === 'FULFILLING' ? 'ACCEPT' : 'COMPLETE', status === 'FULFILLING' ? '商家已确认履约' : '商家已核验交付码，订单已完成');
           addAudit(data, '商家更新订单状态', item.orderNo);
+          if (status === 'COMPLETED') addNotification(data, item.userId, 'ORDER', '订单已完成', `订单 ${item.orderNo} 已通过交付码核验并完成。`);
           return item;
         });
         return sendJson(response, 200, { data: order, requestId });
@@ -1135,7 +1161,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const data = store.read();
         const merchants = data.merchants || [];
-        const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, statusLabel:statusLabels[order.status]||order.status, collaboration:order.collaboration || createCollaboration(order, order.items?.[0]?.merchantId || ''), merchantName:merchants.find(merchant=>merchant.id===order.collaboration?.merchantId)?.name || '平台自营', plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '' }));
+          const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, statusLabel:statusLabels[order.status]||order.status, collaboration:order.collaboration || createCollaboration(order, order.items?.[0]?.merchantId || ''), merchantName:merchants.find(merchant=>merchant.id===order.collaboration?.merchantId)?.name || '平台自营', plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '' }));
         const serviceRecords = (() => {
           const phoneCardOrders=(data.phoneCardOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.amountInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           const rechargeOrders=(data.rechargeOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents||0)/100).toFixed(0)}送${((item.receiveInCents||0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.paidInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
@@ -1719,6 +1745,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           linkedOrder.status = 'PAID';
           linkedOrder.paymentStatus = 'PAID';
           linkedOrder.updatedAt = now;
+          issueDeliveryCode(linkedOrder, now);
           for (const orderItem of linkedOrder.items) {
             const product = (innerData.products || []).find((candidate) => candidate.id === orderItem.productId);
             if (product) product.stock = Math.max(0, Number(product.stock || 0) - Number(orderItem.quantity || 0));
@@ -1800,6 +1827,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             order.paymentStatus = 'PAID';
             order.status = 'PAID';
             order.updatedAt = now;
+            issueDeliveryCode(order, now);
             for (const orderItem of order.items) {
               const product = data.products.find((candidate) => candidate.id === orderItem.productId);
               if (!product) continue;
