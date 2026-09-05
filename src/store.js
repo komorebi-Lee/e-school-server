@@ -172,6 +172,7 @@ function initialData() {
       servicePhone: '15527111396',
       serviceWechat: '15527111396',
       externalPlateFeeInCents: 4900,
+      commissionRatePercent: 2,
       deliveryFeeInCents: 0,
       deliveryResponseHours: 24,
       plateResponseHours: 48,

@@ -45,6 +45,7 @@ function publicSettings(settings = {}) {
     servicePhone: settings.servicePhone || '',
     serviceWechat: settings.serviceWechat || '',
     deliveryFeeInCents: settings.deliveryFeeInCents || 0,
+    commissionRatePercent: settings.commissionRatePercent ?? 2,
     deliveryResponseHours: settings.deliveryResponseHours || 24,
     plateResponseHours: settings.plateResponseHours || 48,
     afterSaleResponseHours: settings.afterSaleResponseHours || 24,
@@ -273,6 +274,8 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
   function createSettlements(data, order, now) {
     if (!Array.isArray(data.settlements)) data.settlements = [];
     if (!order?.id || data.settlements.some((item) => item.orderId === order.id)) return [];
+    const configuredRate = Number(data.adminSettings?.commissionRatePercent);
+    const commissionRatePercent = Number.isInteger(configuredRate) && configuredRate >= 0 && configuredRate <= 50 ? configuredRate : 2;
     const grouped = new Map();
     for (const item of order.items || []) {
       const merchantId = item.merchantId || '';
@@ -286,13 +289,14 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
         orderNo: order.orderNo || '',
         merchantId,
         amountInCents: 0,
+        commissionRatePercent,
         platformFeeInCents: 0,
         settlementStatus: 'PENDING_SETTLE',
         createdAt: now,
         updatedAt: now,
         refundedAt: ''
       };
-      const platformFee = Math.round(gross * 0.02);
+      const platformFee = Math.round(gross * commissionRatePercent / 100);
       settlement.amountInCents += gross;
       settlement.platformFeeInCents += platformFee;
       grouped.set(merchantId, settlement);
@@ -787,6 +791,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }));
         const settlements = (data.settlements || []).filter((item) => item.merchantId === merchant.id);
         const settlementMetrics = {
+          commissionRatePercent: Number(data.adminSettings?.commissionRatePercent ?? 2),
           payableInCents: settlements.filter((item) => item.settlementStatus === 'PENDING_SETTLE').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0),
           settledInCents: settlements.filter((item) => item.settlementStatus === 'SETTLED').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0),
           refundedInCents: settlements.filter((item) => item.settlementStatus === 'REFUNDED').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0)
@@ -1442,6 +1447,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           for (const field of ['brandName', 'schoolName', 'campusName', 'servicePhone', 'serviceWechat']) if (body[field] !== undefined) current[field] = requireString(body[field], field, { maxLength: 80 });
           if (body.externalPlateFeeInCents !== undefined) { const fee = Number(body.externalPlateFeeInCents); if (!Number.isInteger(fee) || fee < 0) throw new ApiError(400, 'VALIDATION_ERROR', '服务费格式不正确'); current.externalPlateFeeInCents = fee; }
           if (body.deliveryFeeInCents !== undefined) { const fee = Number(body.deliveryFeeInCents); if (!Number.isInteger(fee) || fee < 0 || fee > 10000000) throw new ApiError(400, 'VALIDATION_ERROR', '配送费格式不正确'); current.deliveryFeeInCents = fee; }
+          if (body.commissionRatePercent !== undefined) {
+            const rate = Number(body.commissionRatePercent);
+            if (!Number.isInteger(rate) || rate < 0 || rate > 50) throw new ApiError(400, 'VALIDATION_ERROR', '平台佣金比例需为 0-50 的整数');
+            current.commissionRatePercent = rate;
+          }
           for (const field of ['deliveryResponseHours', 'plateResponseHours', 'afterSaleResponseHours']) {
             if (body[field] !== undefined) {
               const hours = Number(body[field]);

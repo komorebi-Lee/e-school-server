@@ -341,6 +341,15 @@ test('merchant can be approved and manage its own products and orders', async ()
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
   });
+  const invalidRate = await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ commissionRatePercent: 51 })
+  });
+  assert.equal(invalidRate.response.status, 400);
+  await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ commissionRatePercent: 8 })
+  });
   const approved = await api(`/api/admin/merchants/${applied.body.data.id}/status`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
     body: JSON.stringify({ status: 'APPROVED', reviewNote: '营业执照已核对' })
@@ -374,20 +383,28 @@ test('merchant can be approved and manage its own products and orders', async ()
   assert.equal(overview.body.data.orders[0].items[0].merchantId, product.body.data.merchantId);
   assert.equal(overview.body.data.settlements.length, 1);
   assert.equal(overview.body.data.settlements[0].amountInCents, 2500);
-  assert.equal(overview.body.data.settlements[0].payableAmountInCents, 2450);
-  assert.equal(overview.body.data.metrics.settlementMetrics.payableInCents, 2450);
+  assert.equal(overview.body.data.settlements[0].commissionRatePercent, 8);
+  assert.equal(overview.body.data.settlements[0].platformFeeInCents, 200);
+  assert.equal(overview.body.data.settlements[0].payableAmountInCents, 2300);
+  assert.equal(overview.body.data.metrics.settlementMetrics.commissionRatePercent, 8);
+  assert.equal(overview.body.data.metrics.settlementMetrics.payableInCents, 2300);
 
   const settled = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
     body: JSON.stringify({ reference: 'TEST-PAYOUT-001' })
   });
   assert.equal(settled.response.status, 200);
-  assert.equal(settled.body.data.totalInCents, 2450);
+  assert.equal(settled.body.data.totalInCents, 2300);
   assert.equal(settled.body.data.settlementCount, 1);
   assert.equal(settled.body.data.settlementReference, 'TEST-PAYOUT-001');
   const settledOverview = await api('/api/merchant/overview', { headers: merchantAuth });
   assert.equal(settledOverview.body.data.metrics.settlementMetrics.payableInCents, 0);
-  assert.equal(settledOverview.body.data.metrics.settlementMetrics.settledInCents, 2450);
+  assert.equal(settledOverview.body.data.metrics.settlementMetrics.settledInCents, 2300);
+  const resetRate = await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ commissionRatePercent: 2 })
+  });
+  assert.equal(resetRate.body.data.commissionRatePercent, 2);
   const repeatSettle = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
     body: JSON.stringify({ reference: 'TEST-PAYOUT-002' })
@@ -715,6 +732,7 @@ test('payment lifecycle creates notifications and supports cancel or refund', as
   const linkedSettlement = adminOverviewBeforeRefund.body.data.settlements.find((item) => item.paymentId === paidOrder.body.paymentOrder.id);
   assert.ok(linkedSettlement);
   assert.equal(linkedSettlement.settlementStatus, 'PENDING_SETTLE');
+  assert.equal(linkedSettlement.commissionRatePercent, 2);
   assert.equal(linkedSettlement.payableAmountInCents, linkedSettlement.amountInCents - linkedSettlement.platformFeeInCents);
 
   const refund = await api(`/api/admin/payment-orders/${paidOrder.body.paymentOrder.id}/refund`, {
