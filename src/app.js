@@ -24,7 +24,7 @@ const allowedMerchantTypes = new Set(['INDIVIDUAL', 'ENTERPRISE', 'PERSONAL']);
 const adminOrderStatuses = {
   orders: new Set(['PENDING_PAYMENT', 'PAID', 'FULFILLING', 'COMPLETED', 'CANCELLED', 'AFTER_SALE']),
   'phone-card-orders': new Set(['PENDING_REALNAME', 'ACTIVATED', 'REJECTED']),
-  'recharge-orders': new Set(['PENDING_CREDIT', 'CREDITED', 'REJECTED']),
+  'recharge-orders': new Set(['PENDING_PAYMENT', 'PENDING_CREDIT', 'CREDITED', 'CANCELLED', 'REJECTED']),
   'broadband-applications': new Set(['PENDING_VERIFY', 'APPROVED', 'REJECTED']),
   'plate-applications': new Set(['MATERIAL_PENDING', 'REVIEWING', 'COMPLETED', 'REJECTED']),
   'after-sales': new Set(['SUBMITTED', 'REVIEWING', 'CLOSED'])
@@ -839,6 +839,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           paymentOrder.refundedAt = now;
           paymentOrder.updatedAt = now;
           const order = (data.orders || []).find((item) => item.id === paymentOrder.orderId);
+          const rechargeOrder = (data.rechargeOrders || []).find((item) => item.id === paymentOrder.businessId && item.paymentOrderId === paymentOrder.id);
+          if (rechargeOrder) {
+            rechargeOrder.status = 'CANCELLED';
+            rechargeOrder.paymentStatus = 'REFUNDED';
+            rechargeOrder.updatedAt = now;
+          }
           if (order) {
             order.status = 'CANCELLED';
             order.paymentStatus = 'REFUNDED';
@@ -849,8 +855,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             }
           }
           addAudit(data, '\u7ba1\u7406\u7aef\u9000\u6b3e', paymentOrder.paymentNo);
-          addNotification(data, paymentOrder.userId, 'ORDER', '\u8ba2\u5355\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${paymentOrder.orderNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
-          return { order, paymentOrder };
+          if (rechargeOrder) {
+            addNotification(data, paymentOrder.userId, 'RECHARGE', '\u8bdd\u8d39\u6743\u76ca\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${paymentOrder.paymentNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
+          } else {
+            addNotification(data, paymentOrder.userId, 'ORDER', '\u8ba2\u5355\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${paymentOrder.orderNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
+          }
+          return { order, rechargeOrder, paymentOrder };
         });
         return sendJson(response, 200, { data: updated, requestId });
       }
@@ -858,9 +868,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/admin/overview') {
         const data = store.read();
         const leads = data.leads || [];
-        const revenueInCents = data.orders.reduce((sum, order) => sum + (order.totalInCents || 0), 0)
+        const revenueInCents = data.orders.filter((item) => item.status !== 'PENDING_PAYMENT' && item.status !== 'CANCELLED').reduce((sum, order) => sum + (order.totalInCents || 0), 0)
           + data.phoneCardOrders.reduce((sum, order) => sum + (order.amountInCents || 0), 0)
-          + data.rechargeOrders.reduce((sum, order) => sum + (order.paidInCents || 0), 0)
+          + data.rechargeOrders.filter((item) => ['PENDING_CREDIT', 'CREDITED'].includes(item.status)).reduce((sum, order) => sum + (order.paidInCents || 0), 0)
           + data.plateApplications.reduce((sum, item) => sum + (item.feeInCents || 0), 0);
         const pending = data.orders.filter((item) => !['COMPLETED', 'CANCELLED'].includes(item.status)).length
           + data.phoneCardOrders.filter((item) => item.status !== 'ACTIVATED').length
@@ -901,7 +911,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const data = store.read();
         const phoneCardOrders = (data.phoneCardOrders || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.amountInCents || 0, phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
-        const rechargeOrders = (data.rechargeOrders || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents || 0)/100).toFixed(0)}送${((item.receiveInCents || 0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.paidInCents || 0, phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
+        const rechargeOrders = (data.rechargeOrders || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents || 0)/100).toFixed(0)}送${((item.receiveInCents || 0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.paidInCents || 0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
         const broadbandApplications = (data.broadbandApplications || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'BROADBAND', typeLabel:'宽带', title:'双人购卡宽带', status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:0, phone:item.ownerPhone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
         const plateApplications = (data.plateApplications || []).filter(item => item.userId === userId).map(item => ({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel || '校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status] || item.status, amountInCents:item.feeInCents || 0, phone:item.phone, relatedIds:item.relatedIds || {}, createdAt:item.createdAt, updatedAt:item.updatedAt || item.createdAt }));
         const items = [...phoneCardOrders, ...rechargeOrders, ...broadbandApplications, ...plateApplications].sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
@@ -914,7 +924,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, statusLabel:statusLabels[order.status]||order.status, collaboration:order.collaboration || createCollaboration(order, order.items?.[0]?.merchantId || ''), merchantName:merchants.find(merchant=>merchant.id===order.collaboration?.merchantId)?.name || '平台自营', plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '' }));
         const serviceRecords = (() => {
           const phoneCardOrders=(data.phoneCardOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.amountInCents||0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
-          const rechargeOrders=(data.rechargeOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents||0)/100).toFixed(0)}送${((item.receiveInCents||0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.paidInCents||0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const rechargeOrders=(data.rechargeOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents||0)/100).toFixed(0)}送${((item.receiveInCents||0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.paidInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           const broadbandApplications=(data.broadbandApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'BROADBAND', typeLabel:'宽带', title:'双人购卡宽带', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           const plateApplications=(data.plateApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel||'校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.feeInCents||0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           return [...phoneCardOrders,...rechargeOrders,...broadbandApplications,...plateApplications];
@@ -983,9 +993,35 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
         }
         const now = new Date().toISOString();
-        const record = { id:`top_${randomUUID()}`, userId, phone:requireString(body.phone,'phone',{maxLength:30}), paidInCents, receiveInCents, status:'PENDING_CREDIT', relatedIds:{}, createdAt:now, updatedAt:now };
-        store.update(data=>{ const related=(data.phoneCardOrders||[]).find(item=>item.userId===userId&&item.phone===record.phone); if(related)record.relatedIds={phoneCardOrderId:related.id}; (data.rechargeOrders=data.rechargeOrders||[]).unshift(record); if(idempotencyKey)data.idempotencyKeys[`recharge:${userId}:${idempotencyKey}`]=record.id; addAudit(data,'新增话费权益订单',record.id); });
-        return sendJson(response,201,{data:record,requestId});
+        const record = { id:`top_${randomUUID()}`, userId, phone:requireString(body.phone,'phone',{maxLength:30}), paidInCents, receiveInCents, status:'PENDING_PAYMENT', paymentStatus:'UNPAID', relatedIds:{}, createdAt:now, updatedAt:now };
+        const result = store.update(data=>{
+          const related=(data.phoneCardOrders||[]).find(item=>item.userId===userId&&item.phone===record.phone);
+          if(related)record.relatedIds={phoneCardOrderId:related.id};
+          (data.rechargeOrders=data.rechargeOrders||[]).unshift(record);
+          if(idempotencyKey)data.idempotencyKeys[`recharge:${userId}:${idempotencyKey}`]=record.id;
+          if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
+          const paymentOrder = {
+            id:`pay_${randomUUID()}`,
+            paymentNo:`PAY${Date.now()}${Math.floor(Math.random()*9000+1000)}`,
+            businessType:'RECHARGE',
+            businessId:record.id,
+            userId,
+            amountInCents:paidInCents,
+            currency:'CNY',
+            status:'PENDING',
+            idempotencyKey:idempotencyKey?`recharge:${userId}:${idempotencyKey}`:'',
+            channel:'MOCK',
+            createdAt:now,
+            updatedAt:now,
+            paidAt:'',
+            refundedAt:''
+          };
+          data.paymentOrders.unshift(paymentOrder);
+          record.paymentOrderId=paymentOrder.id;
+          addAudit(data,'新增待支付话费权益订单',record.id);
+          return { record, paymentOrder };
+        });
+        return sendJson(response,201,{data:result.record,paymentOrder:result.paymentOrder,requestId});
       }
       if (request.method === 'POST' && pathname === '/api/broadband-applications') {
         const { userId } = requireUser(request);
@@ -1430,13 +1466,22 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const paymentOrder = data.paymentOrders.find((item) => item.id === paymentMatch[1] && item.userId === userId);
           if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
           const order = data.orders.find((item) => item.id === paymentOrder.orderId && item.userId === userId);
-          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+          const rechargeOrder = data.rechargeOrders.find((item) => item.id === paymentOrder.businessId && item.userId === userId);
+          if (!order && !rechargeOrder) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
           const now = new Date().toISOString();
           if (action === 'confirm') {
             if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u5355\u53ef\u64cd\u4f5c');
             paymentOrder.status = 'PAID';
             paymentOrder.paidAt = now;
             paymentOrder.updatedAt = now;
+            if (rechargeOrder) {
+              rechargeOrder.status = 'PENDING_CREDIT';
+              rechargeOrder.paymentStatus = 'PAID';
+              rechargeOrder.updatedAt = now;
+              addAudit(data, '\u8bdd\u8d39\u6743\u76ca\u652f\u4ed8\u6210\u529f', rechargeOrder.id);
+              addNotification(data, userId, 'RECHARGE', '\u8bdd\u8d39\u6743\u76ca\u652f\u4ed8\u6210\u529f', `\u5145 ${Math.round(rechargeOrder.paidInCents/100)} \u9001 ${Math.round((rechargeOrder.receiveInCents-rechargeOrder.paidInCents)/100)} \u5df2\u652f\u4ed8\uff0c\u7b49\u5f85\u8fd0\u8425\u786e\u8ba4\u5230\u8d26\u3002`);
+              return { rechargeOrder, paymentOrder };
+            }
             order.paymentStatus = 'PAID';
             order.status = 'PAID';
             order.updatedAt = now;
@@ -1475,6 +1520,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u5355\u53ef\u64cd\u4f5c');
             paymentOrder.status = 'CANCELLED';
             paymentOrder.updatedAt = now;
+            if (rechargeOrder) {
+              rechargeOrder.status = 'CANCELLED';
+              rechargeOrder.paymentStatus = 'CANCELLED';
+              rechargeOrder.updatedAt = now;
+              addAudit(data, '\u8bdd\u8d39\u6743\u76ca\u5f85\u652f\u4ed8\u5df2\u53d6\u6d88', rechargeOrder.id);
+              addNotification(data, userId, 'RECHARGE', '\u8bdd\u8d39\u6743\u76ca\u5df2\u53d6\u6d88', '\u60a8\u7684\u5f85\u652f\u4ed8\u8bdd\u8d39\u6743\u76ca\u8ba2\u5355\u5df2\u53d6\u6d88\u3002');
+              return { order: rechargeOrder, paymentOrder };
+            }
             order.status = 'CANCELLED';
             order.paymentStatus = 'CANCELLED';
             order.updatedAt = now;
@@ -1484,7 +1537,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           throw new ApiError(403, 'FORBIDDEN', '\u4ec5\u7ba1\u7406\u7aef\u53ef\u9000\u6b3e');
         });
-        return sendJson(response, 200, { data: { order: updated.order, paymentOrder: updated.paymentOrder }, requestId });
+        return sendJson(response, 200, { data: { order: updated.order, rechargeOrder: updated.rechargeOrder, paymentOrder: updated.paymentOrder }, requestId });
       }
 
       if (request.method === 'PATCH' && orderMatch) {

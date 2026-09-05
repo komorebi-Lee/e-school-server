@@ -709,3 +709,47 @@ test('payment lifecycle creates notifications and supports cancel or refund', as
   assert.equal(marked.response.status, 200);
   assert.ok(marked.body.data.updated > 0);
 });
+
+test('recharge payments create pending credit orders and notifications', async () => {
+  const session = await loginWeChat('recharge_payment');
+  const created = await api('/api/recharge-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'recharge-payment-001', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ phone: '15527110099', paidInCents: 20000, receiveInCents: 25000 })
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.data.status, 'PENDING_PAYMENT');
+  assert.equal(created.body.data.paymentStatus, 'UNPAID');
+  assert.ok(created.body.paymentOrder);
+  assert.equal(created.body.paymentOrder.amountInCents, 20000);
+
+  const repeated = await api('/api/recharge-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'recharge-payment-001', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ phone: '15527110099', paidInCents: 20000, receiveInCents: 25000 })
+  });
+  assert.equal(repeated.response.status, 200);
+  assert.equal(repeated.body.data.id, created.body.data.id);
+
+  const confirmed = await confirmPayment(created.body.paymentOrder.id, session.token);
+  assert.equal(confirmed.response.status, 200);
+  assert.equal(confirmed.body.data.rechargeOrder.status, 'PENDING_CREDIT');
+  assert.equal(confirmed.body.data.rechargeOrder.paymentStatus, 'PAID');
+  assert.equal(confirmed.body.data.paymentOrder.status, 'PAID');
+
+  const records = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.ok(records.body.data.serviceRecords.some((item) => item.type === 'RECHARGE' && item.status === 'PENDING_CREDIT'));
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const refunded = await api(`/api/admin/payment-orders/${created.body.paymentOrder.id}/refund`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ note: 'recharge refund test' })
+  });
+  assert.equal(refunded.response.status, 200);
+  assert.equal(refunded.body.data.rechargeOrder.status, 'CANCELLED');
+  assert.equal(refunded.body.data.rechargeOrder.paymentStatus, 'REFUNDED');
+
+  const notifications = await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.ok(notifications.body.data.some((item) => item.type === 'RECHARGE' && item.title.includes('支付成功')));
+});
