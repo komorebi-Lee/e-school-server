@@ -495,10 +495,11 @@ test('merchant can be approved and manage its own products and orders', async ()
 
   const closed = await api(`/api/merchant/after-sales/${afterSale.body.data.id}/status`, {
     method: 'POST', headers: merchantAuth,
-    body: JSON.stringify({ status: 'CLOSED' })
+    body: JSON.stringify({ status: 'CLOSED', resolutionNote: '已联系售后网点，检测结果正常并恢复交付。' })
   });
   assert.equal(closed.response.status, 200);
   assert.equal(closed.body.data.status, 'CLOSED');
+  assert.equal(closed.body.data.resolutionNote, '已联系售后网点，检测结果正常并恢复交付。');
 
   const refreshed = await api('/api/merchant/overview', { headers: merchantAuth });
   assert.equal(refreshed.response.status, 200);
@@ -1172,7 +1173,7 @@ test('admin after-sale closure refunds paid orders and notifies users', async ()
   });
   const closed = await api(`/api/admin/after-sales/${afterSale.body.data.id}/status`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
-    body: JSON.stringify({ status: 'CLOSED' })
+    body: JSON.stringify({ status: 'CLOSED', resolutionNote: '已核实订单问题并完成退款' })
   });
   assert.equal(closed.response.status, 200);
   assert.equal(closed.body.data.status, 'CLOSED');
@@ -1237,6 +1238,84 @@ test('merchant workspace receives operational notifications and metrics', async 
   await api('/api/merchant/notifications/read', { method: 'POST', headers: merchantHeaders });
   const readNotifications = await api('/api/merchant/notifications', { headers: merchantHeaders });
   assert.equal(readNotifications.body.unreadCount, 0);
+});
+
+test('after-sale evidence and merchant resolution note are persisted', async () => {
+  const session = await loginWeChat('after_sale_evidence_user');
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantAuth = { authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(order.response.status, 201);
+  const paid = await confirmPayment(order.body.paymentOrder.id, session.token);
+  assert.equal(paid.response.status, 200);
+
+  const upload = await api('/api/uploads', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify(makeImage())
+  });
+  assert.equal(upload.response.status, 201);
+  const evidenceUrl = upload.body.data.url;
+
+  const created = await api('/api/after-sales', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      orderId: order.body.data.id,
+      type: 'REPAIR',
+      reason: '车辆交付后无法正常启动',
+      images: [evidenceUrl]
+    })
+  });
+  assert.equal(created.response.status, 201);
+  assert.deepEqual(created.body.data.images, [evidenceUrl]);
+
+  const foreign = await api(`/api/after-sales/${created.body.data.id}/materials`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ images: ['https://example.com/fake.jpg'] })
+  });
+  assert.equal(foreign.response.status, 400);
+  assert.equal(foreign.body.error.code, 'VALIDATION_ERROR');
+
+  const materials = await api(`/api/after-sales/${created.body.data.id}/materials`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ images: [evidenceUrl] })
+  });
+  assert.equal(materials.response.status, 200);
+  assert.equal(materials.body.data.images.length, 2);
+
+  const missingNote = await api(`/api/merchant/after-sales/${created.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'CLOSED' })
+  });
+  assert.equal(missingNote.response.status, 400);
+  assert.equal(missingNote.body.error.code, 'VALIDATION_ERROR');
+
+  const closed = await api(`/api/merchant/after-sales/${created.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'CLOSED', resolutionNote: '已上门检修并完成试车' })
+  });
+  assert.equal(closed.response.status, 200);
+  assert.equal(closed.body.data.status, 'CLOSED');
+  assert.equal(closed.body.data.resolutionNote, '已上门检修并完成试车');
+
+  const forbiddenMaterials = await api(`/api/after-sales/${created.body.data.id}/materials`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ images: [evidenceUrl] })
+  });
+  assert.equal(forbiddenMaterials.response.status, 409);
+
+  const notifications = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.ok(notifications.body.data.some((item) => item.type === 'AFTER_SALE' && item.title === '售后处理完成' && item.content === '已上门检修并完成试车'));
 });
 
 test('external plate applications require paid service fee and support refunds', async () => {

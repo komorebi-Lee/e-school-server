@@ -1059,6 +1059,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const status = requireString(body.status, 'status', { maxLength: 30 });
         if (!['SUBMITTED', 'REVIEWING', 'CLOSED'].includes(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant after-sale status');
+        const resolutionNote = status === 'CLOSED' ? requireString(body.resolutionNote, 'resolutionNote', { maxLength: 500 }) : '';
         const afterSale = store.update((data) => {
           const item = (data.afterSales || []).find((record) => record.id === merchantAfterSaleMatch[1]);
           if (!item) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', 'After-sale record not found');
@@ -1069,15 +1070,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!order) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', 'After-sale record not found');
           item.status = status;
           item.updatedAt = new Date().toISOString();
+          if (status === 'CLOSED') item.resolutionNote = resolutionNote;
           if (status === 'CLOSED' && item.type === 'REFUND') {
             applyOrderRefund(data, order, item.updatedAt);
-            appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', '退款已完成，订单关闭');
+            appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', `退款已完成，订单关闭：${resolutionNote}`);
           } else if (status === 'CLOSED') {
             order.status = 'COMPLETED';
             order.updatedAt = item.updatedAt;
-            appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', '售后处理完成，订单继续履约');
-            addNotification(data, order.userId, 'AFTER_SALE', '售后处理完成', '您的售后已关闭，订单继续按约定履约。');
+            appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', `售后处理完成：${resolutionNote}`);
+            addNotification(data, order.userId, 'AFTER_SALE', '售后处理完成', resolutionNote);
           }
+          if (status === 'REVIEWING') addNotification(data, order.userId, 'AFTER_SALE', '售后正在处理', '商家已开始处理您的售后申请。');
           addAudit(data, '商家更新售后状态', item.id);
           return item;
         });
@@ -1574,6 +1577,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && adminStatusMatch) {
         const body = await readJson(request);
         const status = requireString(body.status, 'status', { maxLength: 50 });
+        const resolutionNote = adminStatusMatch[1] === 'after-sales' && status === 'CLOSED'
+          ? requireString(body.resolutionNote, 'resolutionNote', { maxLength: 500 })
+          : '';
         const collectionMap = { orders: 'orders', 'phone-card-orders': 'phoneCardOrders', 'recharge-orders': 'rechargeOrders', 'broadband-applications': 'broadbandApplications', 'plate-applications': 'plateApplications', 'after-sales': 'afterSales' };
         const notificationTemplates = {
           orders: {
@@ -1625,8 +1631,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const order = (data.orders || []).find((row) => row.id === item.orderId);
             if (order && item.type === 'REFUND') applyOrderRefund(data, order, item.updatedAt);
             else if (order) { order.status = 'COMPLETED'; order.updatedAt = item.updatedAt; }
+            item.resolutionNote = resolutionNote;
           }
-          const template = notificationTemplates[adminStatusMatch[1]]?.[status];
+          const template = adminStatusMatch[1] === 'after-sales' && status === 'CLOSED'
+            ? null
+            : notificationTemplates[adminStatusMatch[1]]?.[status];
+          if (adminStatusMatch[1] === 'after-sales' && status === 'CLOSED' && item.userId) {
+            addNotification(data, item.userId, 'AFTER_SALE', '售后处理完成', resolutionNote);
+          }
           if (template && item.userId) {
             const detail = item.planName || item.vehicleModel || item.reason || item.orderNo || item.id;
             addNotification(data, item.userId, template[0], template[1], `${detail}：${template[2]}`);
@@ -2161,6 +2173,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported after-sale type');
         }
         const reason = requireString(body.reason, 'reason', { maxLength: 500 });
+        const images = Array.isArray(body.images) ? body.images.slice(0, 3) : [];
+        const normalizedImages = images.map((image, index) => {
+          const url = requireString(image, `images.${index}`, { maxLength: 200 });
+          if (!url.startsWith('/api/uploads/')) throw new ApiError(400, 'VALIDATION_ERROR', '售后图片必须来自平台上传目录');
+          return url;
+        });
         const afterSale = store.update((data) => {
           const order = data.orders.find((item) => item.id === orderId && item.userId === userId);
           if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
@@ -2177,6 +2195,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             type,
             typeLabel: { REFUND: '申请退款', RETURN: '退货', REPAIR: '维修' }[type] || type,
             reason,
+            images: normalizedImages,
             status: 'SUBMITTED',
             responseDueAt: new Date(new Date(now).getTime() + 24 * 60 * 60 * 1000).toISOString(),
             resolutionDueAt: new Date(new Date(now).getTime() + 72 * 60 * 60 * 1000).toISOString(),
@@ -2197,6 +2216,30 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const items = store.read().afterSales.filter((item) => item.userId === userId);
         return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
+      const afterSaleMaterialMatch = pathname.match(/^\/api\/after-sales\/([^/]+)\/materials$/);
+      if (request.method === 'POST' && afterSaleMaterialMatch) {
+        const { userId } = requireUser(request);
+        const body = await readJson(request);
+        if (!Array.isArray(body.images) || !body.images.length || body.images.length > 3) throw new ApiError(400, 'VALIDATION_ERROR', '请上传 1 到 3 张问题图片');
+        const images = body.images.map((image, index) => {
+          const url = requireString(image, `images.${index}`, { maxLength: 200 });
+          if (!url.startsWith('/api/uploads/')) throw new ApiError(400, 'VALIDATION_ERROR', '售后图片必须来自平台上传目录');
+          return url;
+        });
+        const afterSale = store.update((data) => {
+          const item = (data.afterSales || []).find((record) => record.id === afterSaleMaterialMatch[1] && record.userId === userId);
+          if (!item) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', 'After-sale record not found');
+          if (item.status === 'CLOSED') throw new ApiError(409, 'AFTER_SALE_STATUS_NOT_ALLOWED', '售后已关闭，不能补充图片');
+          const existing = Array.isArray(item.images) ? item.images : [];
+          if (existing.length + images.length > 9) throw new ApiError(409, 'AFTER_SALE_IMAGE_LIMIT', '售后图片最多 9 张');
+          item.images = [...existing, ...images];
+          item.updatedAt = new Date().toISOString();
+          addAudit(data, '用户补充售后图片', item.id);
+          return item;
+        });
+        return sendJson(response, 200, { data: afterSale, requestId });
       }
 
       throw new ApiError(404, 'ROUTE_NOT_FOUND', 'Route not found');
