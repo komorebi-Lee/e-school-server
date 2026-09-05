@@ -142,6 +142,7 @@ function initialData() {
     campusCardApplications: [],
     orders: [],
     paymentOrders: [],
+    settlements: [],
     notifications: [],
     afterSales: [],
     productReviews: seedProductReviews,
@@ -199,7 +200,7 @@ class JsonStore {
       if (!data || !Array.isArray(data.products)) throw new Error('invalid database');
       const defaults = initialData();
       let changed = false;
-      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'notifications']) {
+      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'notifications']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) { data.adminSettings = defaults.adminSettings; changed = true; }

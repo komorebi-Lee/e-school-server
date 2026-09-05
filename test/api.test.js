@@ -372,6 +372,10 @@ test('merchant can be approved and manage its own products and orders', async ()
   assert.equal(overview.response.status, 200);
   assert.equal(overview.body.data.orders.length, 1);
   assert.equal(overview.body.data.orders[0].items[0].merchantId, product.body.data.merchantId);
+  assert.equal(overview.body.data.settlements.length, 1);
+  assert.equal(overview.body.data.settlements[0].amountInCents, 2500);
+  assert.equal(overview.body.data.settlements[0].payableAmountInCents, 2450);
+  assert.equal(overview.body.data.metrics.settlementMetrics.payableInCents, 2450);
 
   const fulfilled = await api(`/api/merchant/orders/${created.body.data.id}/status`, {
     method: 'POST', headers: merchantAuth,
@@ -688,6 +692,13 @@ test('payment lifecycle creates notifications and supports cancel or refund', as
   });
   assert.equal(payments.response.status, 200);
   assert.ok(payments.body.data.some((item) => item.id === paidOrder.body.paymentOrder.id));
+  const adminOverviewBeforeRefund = await api('/api/admin/overview', {
+    headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
+  });
+  const linkedSettlement = adminOverviewBeforeRefund.body.data.settlements.find((item) => item.paymentId === paidOrder.body.paymentOrder.id);
+  assert.ok(linkedSettlement);
+  assert.equal(linkedSettlement.settlementStatus, 'PENDING_SETTLE');
+  assert.equal(linkedSettlement.payableAmountInCents, linkedSettlement.amountInCents - linkedSettlement.platformFeeInCents);
 
   const refund = await api(`/api/admin/payment-orders/${paidOrder.body.paymentOrder.id}/refund`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
@@ -696,6 +707,12 @@ test('payment lifecycle creates notifications and supports cancel or refund', as
   assert.equal(refund.response.status, 200);
   assert.equal(refund.body.data.paymentOrder.status, 'REFUNDED');
   assert.equal(refund.body.data.order.status, 'CANCELLED');
+  const adminOverviewAfterRefund = await api('/api/admin/overview', {
+    headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
+  });
+  const refundedSettlement = adminOverviewAfterRefund.body.data.settlements.find((item) => item.paymentId === paidOrder.body.paymentOrder.id);
+  assert.equal(refundedSettlement.settlementStatus, 'REFUNDED');
+  assert.ok(refundedSettlement.refundedAt);
 
   const notifications = await api('/api/my/notifications', {
     headers: { authorization: `Bearer ${session.token}` }

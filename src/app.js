@@ -270,6 +270,51 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     return notification;
   }
 
+  function createSettlements(data, order, now) {
+    if (!Array.isArray(data.settlements)) data.settlements = [];
+    if (!order?.id || data.settlements.some((item) => item.orderId === order.id)) return [];
+    const grouped = new Map();
+    for (const item of order.items || []) {
+      const merchantId = item.merchantId || '';
+      if (!merchantId) continue;
+      const gross = Number(item.subtotalInCents || (Number(item.priceInCents || 0) * Number(item.quantity || 0)));
+      if (!Number.isFinite(gross) || gross <= 0) continue;
+      const settlement = grouped.get(merchantId) || {
+        id: `stl_${randomUUID()}`,
+        paymentId: order.paymentOrderId || '',
+        orderId: order.id,
+        orderNo: order.orderNo || '',
+        merchantId,
+        amountInCents: 0,
+        platformFeeInCents: 0,
+        settlementStatus: 'PENDING_SETTLE',
+        createdAt: now,
+        updatedAt: now,
+        refundedAt: ''
+      };
+      const platformFee = Math.round(gross * 0.02);
+      settlement.amountInCents += gross;
+      settlement.platformFeeInCents += platformFee;
+      grouped.set(merchantId, settlement);
+    }
+    const created = [...grouped.values()];
+    for (const settlement of created) {
+      settlement.payableAmountInCents = settlement.amountInCents - settlement.platformFeeInCents;
+      data.settlements.unshift(settlement);
+    }
+    return created;
+  }
+
+  function markSettlementsRefunded(data, orderId, now) {
+    if (!orderId || !Array.isArray(data.settlements)) return;
+    for (const settlement of data.settlements) {
+      if (settlement.orderId !== orderId || settlement.settlementStatus === 'REFUNDED') continue;
+      settlement.settlementStatus = 'REFUNDED';
+      settlement.updatedAt = now;
+      settlement.refundedAt = now;
+    }
+  }
+
   function applyOrderRefund(data, order, now) {
     const paymentOrder = (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId);
     if (paymentOrder && paymentOrder.status === 'PAID') {
@@ -284,6 +329,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
       const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
       if (product) product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
     }
+    markSettlementsRefunded(data, order.id, now);
     addAudit(data, '\u552e\u540e\u9000\u6b3e\u5b8c\u6210', order.orderNo);
     addNotification(data, order.userId, 'ORDER', '\u8ba2\u5355\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${order.orderNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
     return paymentOrder;
@@ -712,17 +758,23 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (request.method === 'GET' && pathname === '/api/merchant/overview') {
         const data = store.read();
-        const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
-        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
-        const products = data.products.filter((item) => item.merchantId === merchant.id);
-        const orders = data.orders
-          .filter((order) => order.items.some((item) => products.some((product) => product.id === item.productId)))
-          .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+            const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
+            if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+            const products = data.products.filter((item) => item.merchantId === merchant.id);
+            const merchantProductIds = new Set(products.map((product) => product.id));
+            const orders = data.orders
+              .filter((order) => order.items.some((item) => merchantProductIds.has(item.productId) || item.merchantId === merchant.id))
+              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
         const enrichedOrders = orders.map((order) => ({
           ...order,
           merchantName: merchant.name,
           collaboration: order.collaboration || createCollaboration(order, merchant.id)
         }));
+        const settlements = (data.settlements || []).filter((item) => item.merchantId === merchant.id);
+        const settlementMetrics = {
+          payableInCents: settlements.filter((item) => item.settlementStatus === 'PENDING_SETTLE').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0),
+          refundedInCents: settlements.filter((item) => item.settlementStatus === 'REFUNDED').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0)
+        };
         const revenueInCents = orders.reduce((sum, order) => sum + order.totalInCents, 0);
         const afterSales = (data.afterSales || []).filter((record) => orders.some((order) => order.id === record.orderId));
         return sendJson(response, 200, {
@@ -733,11 +785,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               orderCount: orders.length,
               pendingCount: orders.filter((order) => !['COMPLETED', 'CANCELLED', 'AFTER_SALE'].includes(order.status)).length,
               productCount: products.length,
-              lowStockCount: products.filter((product) => product.stock < 10).length
+              lowStockCount: products.filter((product) => product.stock < 10).length,
+              settlementMetrics
             },
             products,
             orders: enrichedOrders,
-            afterSales
+            afterSales,
+            settlements
           },
           requestId
         });
@@ -883,6 +937,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               if (product) product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
             }
           }
+          markSettlementsRefunded(data, order?.id || '', now);
           addAudit(data, '\u7ba1\u7406\u7aef\u9000\u6b3e', paymentOrder.paymentNo);
           if (rechargeOrder) {
             addNotification(data, paymentOrder.userId, 'RECHARGE', '\u8bdd\u8d39\u6743\u76ca\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${paymentOrder.paymentNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
@@ -923,6 +978,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             notifications: data.notifications || [],
             afterSales: data.afterSales,
             productReviews: data.productReviews || [],
+            settlements: data.settlements || [],
             settings: data.adminSettings,
             auditLogs: data.auditLogs
             ,leads
@@ -1555,6 +1611,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             addNotification(innerData, userId, 'PLATE', '\u514d\u8d39\u724c\u7167\u8f85\u52a9\u5df2\u53d1\u8d77', '\u5e73\u53f0\u8d2d\u8f66\u540e\u53ef\u4eab\u53d7\u514d\u8d39\u6821\u56ed\u724c\u7167\u8f85\u52a9\u3002');
           }
           linkedOrder.collaboration ||= createCollaboration(linkedOrder, linkedOrder.items[0]?.merchantId || '');
+          createSettlements(innerData, linkedOrder, now);
           linkedOrder.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'\u652f\u4ed8\u6210\u529f\uff0c\u5f85\u5546\u5bb6\u786e\u8ba4\u5c65\u7ea6\u3002', createdAt:now });
           addAudit(innerData, '\u7528\u6237\u6a21\u62df\u652f\u4ed8\u6210\u529f', linkedOrder.orderNo);
           addNotification(innerData, userId, 'ORDER', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${linkedOrder.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
@@ -1627,6 +1684,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               addNotification(data, userId, 'PLATE', '\u514d\u8d39\u724c\u7167\u8f85\u52a9\u5df2\u53d1\u8d77', '\u6211\u4eec\u5df2\u4e3a\u60a8\u521b\u5efa\u6821\u56ed\u724c\u7167\u8f85\u52a9\u5de5\u5355\uff0c\u8bf7\u51c6\u5907\u8f66\u8f86\u4e0e\u8eab\u4efd\u6750\u6599\u3002');
             }
             order.collaboration ||= createCollaboration(order, order.items[0]?.merchantId || '');
+            createSettlements(data, order, now);
             order.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'\u652f\u4ed8\u6210\u529f\uff0c\u5f85\u5546\u5bb6\u786e\u8ba4\u5c65\u7ea6\u3002', createdAt:now });
             addAudit(data, '\u6a21\u62df\u652f\u4ed8\u56de\u8c03\u6210\u529f', order.orderNo);
             addNotification(data, userId, 'ORDER', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${order.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
