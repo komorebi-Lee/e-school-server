@@ -104,7 +104,9 @@ test('phone plans and recharge promos are centrally configurable', async () => {
 
   const promos = await api('/api/recharge-promos');
   assert.equal(promos.response.status, 200);
+  assert.ok(promos.body.data.some((promo) => promo.pay === 100 && promo.receive === 150));
   assert.ok(promos.body.data.some((promo) => promo.pay === 150 && promo.receive === 200));
+  assert.ok(promos.body.data.some((promo) => promo.pay === 200 && promo.receive === 250));
 
   const adminLogin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },

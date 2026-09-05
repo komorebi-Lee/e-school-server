@@ -65,8 +65,10 @@ const seedProducts = [
 ];
 
 const seedRechargePromos = [
+  { id: 'promo_recharge_100', pay: 100, receive: 150, badge: '多得50元', active: true },
   { id: 'promo_recharge_150', pay: 150, receive: 200, badge: '多得50元', active: true },
-  { id: 'promo_recharge_200', pay: 200, receive: 300, badge: '多得100元', active: true }
+  { id: 'promo_recharge_200_old', pay: 200, receive: 300, badge: '多得100元', active: true },
+  { id: 'promo_recharge_200', pay: 200, receive: 250, badge: '多得50元', active: true }
 ];
 
 const seedMerchants = [
