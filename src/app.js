@@ -49,6 +49,8 @@ function publicSettings(settings = {}) {
     deliveryResponseHours: settings.deliveryResponseHours || 24,
     plateResponseHours: settings.plateResponseHours || 48,
     afterSaleResponseHours: settings.afterSaleResponseHours || 24,
+    afterSaleResolutionHours: settings.afterSaleResolutionHours || 72,
+    paymentTimeoutMinutes: settings.paymentTimeoutMinutes || 30,
     deliveryTimeSlots: Array.isArray(settings.deliveryTimeSlots) && settings.deliveryTimeSlots.length ? settings.deliveryTimeSlots : ['尽快配送'],
     platformNotice: settings.platformNotice || '服务范围和办理结果以学校及合作方最终确认为准。'
   };
@@ -78,6 +80,58 @@ function issueDeliveryCode(order, now) {
     order.deliveryCodeIssuedAt = now;
   }
   return order.deliveryCode;
+}
+
+// 可售库存 = 实际库存 - 待支付订单占用的库存，避免同一批车被重复卖出。
+function availableStock(product) {
+  return Math.max(0, Number(product?.stock || 0) - Number(product?.reservedStock || 0));
+}
+
+function withAvailableStock(product) {
+  return { ...product, reservedStock: Number(product.reservedStock || 0), availableStock: availableStock(product) };
+}
+
+function reserveOrderStock(data, order) {
+  for (const orderItem of order.items || []) {
+    const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
+    if (product) product.reservedStock = Number(product.reservedStock || 0) + Number(orderItem.quantity || 0);
+  }
+  order.stockReservation = 'HELD';
+}
+
+function releaseOrderStock(data, order) {
+  if (order.stockReservation !== 'HELD') return false;
+  for (const orderItem of order.items || []) {
+    const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
+    if (product) product.reservedStock = Math.max(0, Number(product.reservedStock || 0) - Number(orderItem.quantity || 0));
+  }
+  order.stockReservation = 'RELEASED';
+  return true;
+}
+
+function consumeOrderStock(data, order) {
+  if (order.stockReservation === 'CONSUMED') return false;
+  const held = order.stockReservation === 'HELD';
+  for (const orderItem of order.items || []) {
+    const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
+    if (!product) continue;
+    if (held) product.reservedStock = Math.max(0, Number(product.reservedStock || 0) - Number(orderItem.quantity || 0));
+    product.stock = Math.max(0, Number(product.stock || 0) - Number(orderItem.quantity || 0));
+  }
+  order.stockReservation = 'CONSUMED';
+  return true;
+}
+
+// 退款/售后退货时把已扣减的库存还回可售池。
+function restoreOrderStock(data, order) {
+  if (order.stockReservation === 'HELD') return releaseOrderStock(data, order);
+  if (order.stockReservation === 'RESTORED') return false;
+  for (const orderItem of order.items || []) {
+    const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
+    if (product) product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
+  }
+  order.stockReservation = 'RESTORED';
+  return true;
 }
 
 function sanitizeOrderForMerchant(order) {
@@ -406,10 +460,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     order.status = 'CANCELLED';
     order.paymentStatus = 'REFUNDED';
     order.updatedAt = now;
-    for (const orderItem of order.items) {
-      const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
-      if (product) product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
-    }
+    restoreOrderStock(data, order);
     markSettlementsRefunded(data, order.id, now);
     if (paymentOrder) {
       addFinanceEvent(data, 'REFUND', `REFUND_${paymentOrder.id}`, -(paymentOrder.amountInCents || 0), {
@@ -426,6 +477,44 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     const session = merchantSessions.get(token);
     if (!session || session.expiresAt < Date.now()) throw new ApiError(401, 'MERCHANT_UNAUTHORIZED', '请重新登录商家工作台');
     return session;
+  }
+
+  // 待支付订单超时后自动关闭并释放库存，让库存回到真实可售状态。
+  function expirePendingOrders(data, now = new Date().toISOString()) {
+    const timeoutMinutes = Number(data.adminSettings?.paymentTimeoutMinutes || 30);
+    const expired = [];
+    for (const order of data.orders || []) {
+      if (order.status !== 'PENDING_PAYMENT') continue;
+      const dueAt = order.paymentExpiresAt || new Date(new Date(order.createdAt).getTime() + timeoutMinutes * 60 * 1000).toISOString();
+      if (dueAt > now) continue;
+      order.status = 'CANCELLED';
+      order.paymentStatus = 'EXPIRED';
+      order.cancelReason = 'PAYMENT_TIMEOUT';
+      order.updatedAt = now;
+      releaseOrderStock(data, order);
+      const paymentOrder = (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId);
+      if (paymentOrder && paymentOrder.status === 'PENDING') {
+        paymentOrder.status = 'CANCELLED';
+        paymentOrder.updatedAt = now;
+      }
+      addAudit(data, '待支付订单超时自动关闭', order.orderNo);
+      addNotification(data, order.userId, 'ORDER', '订单已超时关闭', `订单 ${order.orderNo} 超过 ${timeoutMinutes} 分钟未支付，已自动关闭并释放库存。`);
+      expired.push(order.orderNo);
+    }
+    return expired;
+  }
+
+  function sweepExpiredOrders() {
+    const snapshot = store.read();
+    const now = new Date().toISOString();
+    const timeoutMinutes = Number(snapshot.adminSettings?.paymentTimeoutMinutes || 30);
+    const hasExpired = (snapshot.orders || []).some((order) => {
+      if (order.status !== 'PENDING_PAYMENT') return false;
+      const dueAt = order.paymentExpiresAt || new Date(new Date(order.createdAt).getTime() + timeoutMinutes * 60 * 1000).toISOString();
+      return dueAt <= now;
+    });
+    if (!hasExpired) return [];
+    return store.update((data) => expirePendingOrders(data, new Date().toISOString()));
   }
 
 function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
@@ -595,6 +684,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/products') {
+        sweepExpiredOrders();
         const data = store.read();
         const products = data.products;
         const category = url.searchParams.get('category');
@@ -604,7 +694,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .filter((product) => !category || product.category === category)
           .filter((product) => !campusId || product.campusIds.includes(campusId))
           .filter((product) => !query || `${product.name} ${product.description}`.toLowerCase().includes(query));
-        return sendJson(response, 200, { data: items.map((product) => withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])), total: items.length, requestId });
+        return sendJson(response, 200, { data: items.map((product) => withAvailableStock(withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || []))), total: items.length, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/api/recharge-promos') {
@@ -618,6 +708,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       const productMatch = pathname.match(/^\/api\/products\/([^/]+)$/);
       if (request.method === 'GET' && productMatch) {
+        sweepExpiredOrders();
         const data = store.read();
         const product = data.products.find((item) => item.id === productMatch[1] && item.active);
         if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
@@ -625,10 +716,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const relatedProducts = data.products
           .filter((item) => item.active && item.id !== product.id && item.category === product.category)
           .slice(0, 3)
-          .map((item) => withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || []));
+          .map((item) => withAvailableStock(withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || [])));
         return sendJson(response, 200, {
           data: {
-            ...withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || []),
+            ...withAvailableStock(withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])),
             reviews: (data.productReviews || [])
               .filter((review) => review.productId === product.id && review.visibility !== 'HIDDEN')
               .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -864,6 +955,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/merchant/overview') {
+        sweepExpiredOrders();
         const data = store.read();
             const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
             if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
@@ -915,12 +1007,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               pendingCount: orders.filter((order) => ['PAID', 'FULFILLING'].includes(order.status)).length,
               afterSaleCount: afterSales.filter((record) => record.status !== 'CLOSED').length,
               productCount: products.length,
-              lowStockCount: products.filter((product) => product.stock < 10).length,
+              lowStockCount: products.filter((product) => availableStock(product) < 10).length,
+              afterSaleOverdueCount: afterSales.filter((record) => record.status !== 'CLOSED' && record.responseDueAt && record.responseDueAt < new Date().toISOString()).length,
               reviewCount: reviews.length,
               pendingReplyCount: reviews.filter((review) => !review.reply).length,
               settlementMetrics
             },
-            products,
+            products: products.map(withAvailableStock),
             orders: enrichedOrders,
             afterSales,
             reviews,
@@ -1133,10 +1226,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             order.status = 'CANCELLED';
             order.paymentStatus = 'REFUNDED';
             order.updatedAt = now;
-            for (const orderItem of order.items) {
-              const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
-              if (product) product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
-            }
+            restoreOrderStock(data, order);
           }
           markSettlementsRefunded(data, order?.id || '', now);
           addFinanceEvent(data, 'REFUND', `REFUND_${paymentOrder.id}`, -(paymentOrder.amountInCents || 0), {
@@ -1159,6 +1249,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/admin/overview') {
+        sweepExpiredOrders();
         const data = store.read();
         const leads = data.leads || [];
         const revenueInCents = data.orders.filter((item) => item.status !== 'PENDING_PAYMENT' && item.status !== 'CANCELLED').reduce((sum, order) => sum + (order.totalInCents || 0), 0)
@@ -1183,8 +1274,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         };
         return sendJson(response, 200, {
           data: {
-            metrics: { revenueInCents, paidOrders, pending, lowStock: data.products.filter((item) => item.stock < 10).length, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length },
-            products: data.products,
+            metrics: { revenueInCents, paidOrders, pending, lowStock: data.products.filter((item) => availableStock(item) < 10).length, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length, afterSaleOverdue: (data.afterSales || []).filter((item) => item.status !== 'CLOSED' && item.responseDueAt && item.responseDueAt < new Date().toISOString()).length },
+            products: data.products.map(withAvailableStock),
             rechargePromos: data.rechargePromos || [],
             merchants: data.merchants,
             orders: data.orders,
@@ -1249,6 +1340,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
       if (request.method === 'GET' && pathname === '/api/my/orders') {
         const { userId } = requireUser(request);
+        sweepExpiredOrders();
         const data = store.read();
         const merchants = data.merchants || [];
           const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, statusLabel:statusLabels[order.status]||order.status, collaboration:order.collaboration || createCollaboration(order, order.items?.[0]?.merchantId || ''), merchantName:merchants.find(merchant=>merchant.id===order.collaboration?.merchantId)?.name || '平台自营', plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '' }));
@@ -1743,12 +1835,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isInteger(rate) || rate < 0 || rate > 50) throw new ApiError(400, 'VALIDATION_ERROR', '平台佣金比例需为 0-50 的整数');
             current.commissionRatePercent = rate;
           }
-          for (const field of ['deliveryResponseHours', 'plateResponseHours', 'afterSaleResponseHours']) {
+          for (const field of ['deliveryResponseHours', 'plateResponseHours', 'afterSaleResponseHours', 'afterSaleResolutionHours']) {
             if (body[field] !== undefined) {
               const hours = Number(body[field]);
               if (!Number.isInteger(hours) || hours < 1 || hours > 168) throw new ApiError(400, 'VALIDATION_ERROR', `${field} 需为 1-168 小时`);
               current[field] = hours;
             }
+          }
+          if (body.paymentTimeoutMinutes !== undefined) {
+            const minutes = Number(body.paymentTimeoutMinutes);
+            if (!Number.isInteger(minutes) || minutes < 5 || minutes > 1440) throw new ApiError(400, 'VALIDATION_ERROR', '支付超时需为 5-1440 分钟');
+            current.paymentTimeoutMinutes = minutes;
           }
           if (body.deliveryTimeSlots !== undefined) {
             if (!Array.isArray(body.deliveryTimeSlots) || body.deliveryTimeSlots.length < 1 || body.deliveryTimeSlots.length > 8) throw new ApiError(400, 'VALIDATION_ERROR', '配送时段需为 1-8 个');
@@ -1818,6 +1915,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }
 
         const result = store.update((data) => {
+          expirePendingOrders(data);
           const compoundKey = idempotencyKey ? `${userId}:${idempotencyKey}` : '';
           if (compoundKey && data.idempotencyKeys[compoundKey]) {
             const existing = data.orders.find((order) => order.id === data.idempotencyKeys[compoundKey]);
@@ -1839,8 +1937,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           for (const [productId, quantity] of mergedQuantities) {
             const product = data.products.find((item) => item.id === productId && item.active);
             if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', `Product ${productId} not found`);
-            if (product.stock < quantity) {
-              throw new ApiError(409, 'INSUFFICIENT_STOCK', `Insufficient stock for ${product.name}`);
+            if (availableStock(product) < quantity) {
+              throw new ApiError(409, 'INSUFFICIENT_STOCK', `${product.name} 可售库存不足，当前仅剩 ${availableStock(product)} 件`);
             }
             const subtotalInCents = product.priceInCents * quantity;
             totalInCents += subtotalInCents;
@@ -1850,6 +1948,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (isDelivery) validateDeliverySchedule(body.fulfillment, settings);
           if (isDelivery) totalInCents += deliveryFeeInCents;
           const now = new Date().toISOString();
+          const paymentTimeoutMinutes = Number(settings.paymentTimeoutMinutes || 30);
           const order = {
             id: `ord_${randomUUID()}`,
             orderNo: `CG${Date.now()}${Math.floor(Math.random() * 9000 + 1000)}`,
@@ -1859,6 +1958,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             currency: 'CNY',
             status: 'PENDING_PAYMENT',
             paymentStatus: 'UNPAID',
+            paymentExpiresAt: new Date(new Date(now).getTime() + paymentTimeoutMinutes * 60 * 1000).toISOString(),
+            stockReservation: 'NONE',
             fulfillment: body.fulfillment || { type: 'PICKUP' },
             feeSummary: {
               itemsInCents: totalInCents - (isDelivery ? deliveryFeeInCents : 0),
@@ -1870,6 +1971,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             collaboration: createCollaboration({ createdAt: now, status:'PAID' }, orderItems[0]?.merchantId || '')
           };
           data.orders.push(order);
+          reserveOrderStock(data, order);
           if (compoundKey) data.idempotencyKeys[compoundKey] = order.id;
           if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
           const paymentOrder = {
@@ -1936,10 +2038,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           linkedOrder.paymentStatus = 'PAID';
           linkedOrder.updatedAt = now;
           issueDeliveryCode(linkedOrder, now);
-          for (const orderItem of linkedOrder.items) {
-            const product = (innerData.products || []).find((candidate) => candidate.id === orderItem.productId);
-            if (product) product.stock = Math.max(0, Number(product.stock || 0) - Number(orderItem.quantity || 0));
-          }
+          consumeOrderStock(innerData, linkedOrder);
           const bikeItem = linkedOrder.items.find((item) => (innerData.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
           if (bikeItem) {
             const plateApplication = {
@@ -2031,11 +2130,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             order.status = 'PAID';
             order.updatedAt = now;
             issueDeliveryCode(order, now);
-            for (const orderItem of order.items) {
-              const product = data.products.find((candidate) => candidate.id === orderItem.productId);
-              if (!product) continue;
-              product.stock = Math.max(0, Number(product.stock || 0) - Number(orderItem.quantity || 0));
-            }
+            consumeOrderStock(data, order);
             const bikeItem = order.items.find((item) => (data.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
             if (bikeItem) {
               const plateApplication = {
@@ -2098,6 +2193,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             order.status = 'CANCELLED';
             order.paymentStatus = 'CANCELLED';
             order.updatedAt = now;
+            releaseOrderStock(data, order);
             addAudit(data, '\u7528\u6237\u53d6\u6d88\u5f85\u652f\u4ed8', order.orderNo);
             addNotification(data, userId, 'ORDER', '\u8ba2\u5355\u5df2\u53d6\u6d88', `\u8ba2\u5355 ${order.orderNo} \u5df2\u53d6\u6d88\uff0c\u82e5\u9700\u8981\u53ef\u91cd\u65b0\u4e0b\u5355\u3002`);
             return { order, paymentOrder };
@@ -2152,6 +2248,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           order.status = 'CANCELLED';
           order.paymentStatus = 'CANCELLED';
           order.updatedAt = now;
+          releaseOrderStock(data, order);
           const paymentOrder = (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId);
           if (paymentOrder && paymentOrder.status === 'PENDING') {
             paymentOrder.status = 'CANCELLED';
@@ -2188,6 +2285,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const duplicate = data.afterSales.find((item) => item.orderId === orderId && item.status !== 'CLOSED');
           if (duplicate) throw new ApiError(409, 'ACTIVE_AFTER_SALE_EXISTS', 'An active after-sale request already exists');
           const now = new Date().toISOString();
+          const settings = publicSettings(data.adminSettings);
           const record = {
             id: `as_${randomUUID()}`,
             userId,
@@ -2197,8 +2295,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             reason,
             images: normalizedImages,
             status: 'SUBMITTED',
-            responseDueAt: new Date(new Date(now).getTime() + 24 * 60 * 60 * 1000).toISOString(),
-            resolutionDueAt: new Date(new Date(now).getTime() + 72 * 60 * 60 * 1000).toISOString(),
+            responseDueAt: new Date(new Date(now).getTime() + settings.afterSaleResponseHours * 60 * 60 * 1000).toISOString(),
+            resolutionDueAt: new Date(new Date(now).getTime() + settings.afterSaleResolutionHours * 60 * 60 * 1000).toISOString(),
             createdAt: now,
             updatedAt: now
           };

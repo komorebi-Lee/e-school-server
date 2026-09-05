@@ -121,7 +121,9 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 }
 ```
 
-为了让 MVP 可直接演示，创建后的订单状态是 `PAID`，支付状态是 `MOCK_SUCCESS`。生产环境必须改为“待支付 → 微信预支付 → 回调验签 → 已支付”。
+创建后的订单状态是 `PENDING_PAYMENT`，同时生成模拟支付单并按 `paymentTimeoutMinutes`（管理端可配，默认 30 分钟）写入 `paymentExpiresAt`。库存在这一刻只做预占（`reservedStock`），支付成功才真正扣减 `stock`；用户取消或超时未付会自动释放预占并把订单置为 `CANCELLED` + `paymentStatus=EXPIRED`。生产环境仍需把模拟支付替换为“微信预支付 → 回调验签 → 已支付”。
+
+商品接口会额外返回 `reservedStock` 和 `availableStock`，下单校验、低库存指标和前端“可售/售罄”文案都以 `availableStock` 为准。
 
 - `GET /api/orders?userId=user_demo`
 - `GET /api/orders/:id?userId=user_demo`
@@ -149,4 +151,5 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - JSON 文件适合本机演示和产品联调，不支持多进程并发；生产环境应替换为事务数据库和 Redis。
 - CORS 当前开放用于本地联调，部署时应限制来源。
 - 未接入真实微信支付、实名服务、校方校园卡系统、物流或消息通知。
-- 商品库存创建订单时直接扣减；正式版本应使用预占、支付确认和超时释放机制。
+- 库存已实现“预占 → 支付扣减 → 取消/超时释放 → 退款回补”闭环，但仍是单进程 JSON/MySQL 快照方案，高并发场景需要数据库行级锁或独立库存服务。
+- 超时关单依赖读接口触发的惰性清扫（商品、订单、概览接口），没有独立定时任务；长时间无人访问时订单会在下一次访问时统一关闭。

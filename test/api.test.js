@@ -13,10 +13,11 @@ process.env.ADMIN_PASSWORD = 'test-admin-password-123';
 let server;
 let baseUrl;
 let tempDirectory;
+let store;
 
 before(async () => {
   tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-test-'));
-  const store = new JsonStore(path.join(tempDirectory, 'db.json'));
+  store = new JsonStore(path.join(tempDirectory, 'db.json'));
   server = http.createServer(createApp({
     store,
     wechatAuth: async (code) => ({ openid: `openid_${code}`, userId: `wx_${code}` })
@@ -1381,4 +1382,140 @@ test('external plate applications require paid service fee and support refunds',
     method: 'GET', headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
   });
   assert.ok(overviewAfterRefund.body.data.financeEvents.find((event) => event.referenceId === `REFUND_${created.body.paymentOrder.id}`));
+});
+
+async function loginAdmin() {
+  const result = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(result.response.status, 200);
+  return { authorization: `Bearer ${result.body.data.token}`, 'content-type': 'application/json' };
+}
+
+async function createStockProduct(adminHeaders, name, stock) {
+  const created = await api('/api/admin/products', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ name, category: 'E_BIKE_NEW', description: '库存占用回归测试专用车型', priceInCents: 100000, stock })
+  });
+  assert.equal(created.response.status, 201);
+  return created.body.data.id;
+}
+
+test('pending orders reserve stock and release it on cancel or payment', async () => {
+  const adminHeaders = await loginAdmin();
+  const productId = await createStockProduct(adminHeaders, '库存占用测试车', 3);
+
+  const initial = await api(`/api/products/${productId}`);
+  assert.equal(initial.response.status, 200);
+  assert.equal(initial.body.data.stock, 3);
+  assert.equal(initial.body.data.availableStock, 3);
+  assert.equal(initial.body.data.reservedStock, 0);
+
+  const session = await loginWeChat('stock_hold_user');
+  const held = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId, quantity: 2 }] })
+  });
+  assert.equal(held.response.status, 201);
+  assert.ok(held.body.data.paymentExpiresAt);
+  assert.equal(held.body.data.stockReservation, 'HELD');
+
+  const reserved = await api(`/api/products/${productId}`);
+  assert.equal(reserved.body.data.stock, 3);
+  assert.equal(reserved.body.data.reservedStock, 2);
+  assert.equal(reserved.body.data.availableStock, 1);
+
+  const other = await loginWeChat('stock_rival_user');
+  const blocked = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${other.token}` },
+    body: JSON.stringify({ items: [{ productId, quantity: 2 }] })
+  });
+  assert.equal(blocked.response.status, 409);
+  assert.equal(blocked.body.error.code, 'INSUFFICIENT_STOCK');
+  assert.ok(blocked.body.error.message.includes('可售库存不足'));
+
+  const cancelled = await api(`/api/orders/${held.body.data.id}/cancel`, {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(cancelled.response.status, 200);
+  assert.equal(cancelled.body.data.stockReservation, 'RELEASED');
+
+  const released = await api(`/api/products/${productId}`);
+  assert.equal(released.body.data.stock, 3);
+  assert.equal(released.body.data.reservedStock, 0);
+  assert.equal(released.body.data.availableStock, 3);
+
+  const paidOrder = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId, quantity: 2 }] })
+  });
+  assert.equal(paidOrder.response.status, 201);
+  const paid = await confirmPayment(paidOrder.body.paymentOrder.id, session.token);
+  assert.equal(paid.response.status, 200);
+
+  const consumed = await api(`/api/products/${productId}`);
+  assert.equal(consumed.body.data.stock, 1);
+  assert.equal(consumed.body.data.reservedStock, 0);
+  assert.equal(consumed.body.data.availableStock, 1);
+});
+
+test('unpaid orders expire on the configured payment timeout and free the stock', async () => {
+  const adminHeaders = await loginAdmin();
+
+  const tooShort = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ paymentTimeoutMinutes: 4 })
+  });
+  assert.equal(tooShort.response.status, 400);
+  const tooLongResolution = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ afterSaleResolutionHours: 200 })
+  });
+  assert.equal(tooLongResolution.response.status, 400);
+
+  const configured = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ paymentTimeoutMinutes: 15, afterSaleResolutionHours: 48 })
+  });
+  assert.equal(configured.response.status, 200);
+  assert.equal(configured.body.data.paymentTimeoutMinutes, 15);
+  assert.equal(configured.body.data.afterSaleResolutionHours, 48);
+
+  const productId = await createStockProduct(adminHeaders, '超时释放测试车', 2);
+  const session = await loginWeChat('stock_timeout_user');
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId, quantity: 1 }] })
+  });
+  assert.equal(created.response.status, 201);
+  const expectedTimeout = new Date(created.body.data.paymentExpiresAt).getTime() - new Date(created.body.data.createdAt).getTime();
+  assert.equal(expectedTimeout, 15 * 60 * 1000);
+
+  const beforeSweep = await api(`/api/products/${productId}`);
+  assert.equal(beforeSweep.body.data.availableStock, 1);
+
+  store.update((data) => {
+    const order = data.orders.find((item) => item.id === created.body.data.id);
+    order.paymentExpiresAt = new Date(Date.now() - 60 * 1000).toISOString();
+  });
+
+  const afterSweep = await api(`/api/products/${productId}`);
+  assert.equal(afterSweep.body.data.stock, 2);
+  assert.equal(afterSweep.body.data.reservedStock, 0);
+  assert.equal(afterSweep.body.data.availableStock, 2);
+
+  const orders = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
+  const expiredOrder = orders.body.data.ebikeOrders.find((item) => item.id === created.body.data.id);
+  assert.equal(expiredOrder.status, 'CANCELLED');
+  assert.equal(expiredOrder.paymentStatus, 'EXPIRED');
+  assert.equal(expiredOrder.cancelReason, 'PAYMENT_TIMEOUT');
+  assert.equal(expiredOrder.stockReservation, 'RELEASED');
+
+  const notifications = await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.ok(notifications.body.data.some((item) => item.title === '订单已超时关闭'));
+
+  const restored = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ paymentTimeoutMinutes: 30, afterSaleResolutionHours: 72 })
+  });
+  assert.equal(restored.response.status, 200);
 });
