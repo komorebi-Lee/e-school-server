@@ -1114,6 +1114,42 @@ test('phone card payments enter real-name activation and support refunds', async
   assert.equal(cancel.body.data.paymentOrder.status, 'CANCELLED');
 });
 
+test('admin metrics exclude unpaid and refunded service records', async () => {
+  const admin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(admin.response.status, 200);
+  const adminHeaders = { authorization: `Bearer ${admin.body.data.token}` };
+  const before = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.equal(before.response.status, 200);
+
+  const session = await loginWeChat('metric_phone_user');
+  const created = await api('/api/phone-card-orders', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ customerName: '指标同学', phone: '15527111789', productId: 'prod_card_service_001' })
+  });
+  assert.equal(created.response.status, 201);
+  const pending = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.equal(pending.body.data.metrics.paidOrders, before.body.data.metrics.paidOrders);
+  assert.equal(pending.body.data.metrics.pending, before.body.data.metrics.pending);
+
+  await confirmPayment(created.body.paymentOrder.id, session.token);
+  const paid = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.equal(paid.body.data.metrics.paidOrders, before.body.data.metrics.paidOrders + 1);
+  assert.equal(paid.body.data.metrics.pending, before.body.data.metrics.pending + 1);
+
+  const refunded = await api(`/api/admin/payment-orders/${created.body.paymentOrder.id}/refund`, {
+    method: 'POST', headers: { 'content-type': 'application/json', ...adminHeaders },
+    body: JSON.stringify({ note: 'metric refund' })
+  });
+  assert.equal(refunded.response.status, 200);
+  const after = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.equal(after.body.data.metrics.paidOrders, before.body.data.metrics.paidOrders);
+  assert.equal(after.body.data.metrics.pending, before.body.data.metrics.pending);
+});
+
 test('admin after-sale closure refunds paid orders and notifies users', async () => {
   const session = await loginWeChat('refund_after_sale');
   const created = await api('/api/orders', {

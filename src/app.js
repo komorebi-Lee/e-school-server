@@ -1116,11 +1116,15 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           + data.phoneCardOrders.filter((item) => ['PENDING_REALNAME', 'ACTIVATED'].includes(item.status)).reduce((sum, order) => sum + (order.amountInCents || 0), 0)
           + data.rechargeOrders.filter((item) => ['PENDING_CREDIT', 'CREDITED'].includes(item.status)).reduce((sum, order) => sum + (order.paidInCents || 0), 0)
           + data.plateApplications.filter((item) => item.paymentStatus === 'PAID').reduce((sum, item) => sum + (item.feeInCents || 0), 0);
-        const pending = data.orders.filter((item) => !['COMPLETED', 'CANCELLED'].includes(item.status)).length
-          + data.phoneCardOrders.filter((item) => item.status !== 'ACTIVATED' && item.status !== 'CANCELLED' && item.status !== 'PENDING_PAYMENT').length
-          + data.rechargeOrders.filter((item) => item.status !== 'CREDITED').length
-          + data.broadbandApplications.filter((item) => item.status !== 'APPROVED').length
-          + data.plateApplications.filter((item) => item.status !== 'COMPLETED').length;
+        const paidOrders = data.orders.filter((item) => ['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(item.status)).length
+          + data.phoneCardOrders.filter((item) => ['PENDING_REALNAME', 'ACTIVATED'].includes(item.status)).length
+          + data.rechargeOrders.filter((item) => ['PENDING_CREDIT', 'CREDITED'].includes(item.status)).length
+          + data.plateApplications.filter((item) => item.paymentStatus === 'PAID').length;
+        const pending = data.orders.filter((item) => ['PAID', 'FULFILLING', 'AFTER_SALE'].includes(item.status)).length
+          + data.phoneCardOrders.filter((item) => item.status === 'PENDING_REALNAME').length
+          + data.rechargeOrders.filter((item) => item.status === 'PENDING_CREDIT').length
+          + data.broadbandApplications.filter((item) => item.status === 'PENDING_VERIFY').length
+          + data.plateApplications.filter((item) => ['MATERIAL_PENDING', 'REVIEWING'].includes(item.status)).length;
         const financeEvents = data.financeEvents || [];
         const financeSummary = {
           paymentInCents: financeEvents.filter((event) => event.eventType === 'PAYMENT').reduce((sum, event) => sum + event.amountInCents, 0),
@@ -1130,7 +1134,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         };
         return sendJson(response, 200, {
           data: {
-            metrics: { revenueInCents, paidOrders: data.orders.length + data.phoneCardOrders.length + data.rechargeOrders.length, pending, lowStock: data.products.filter((item) => item.stock < 10).length, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length },
+            metrics: { revenueInCents, paidOrders, pending, lowStock: data.products.filter((item) => item.stock < 10).length, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length },
             products: data.products,
             rechargePromos: data.rechargePromos || [],
             merchants: data.merchants,
