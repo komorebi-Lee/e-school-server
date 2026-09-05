@@ -330,6 +330,7 @@ test('merchant can be approved and manage its own products and orders', async ()
       userId: 'merchant_user_test', merchantType: 'INDIVIDUAL', name: '测试校园超市', ownerName: '店主',
       phone: '15527110001', licenseNo: '92420111MAKMT4534R', category: 'LIFE_SERVICE',
       serviceArea: '狮山校区', description: '校内日常用品配送', licenseUrl: '/api/uploads/test-license.jpg',
+      settlementAccountName: '店主', settlementBank: '校园演示银行', settlementAccount: '6222 0000 0000 0000',
       agreeAgreement: true, agreePrivacy: true
     })
   });
@@ -388,6 +389,8 @@ test('merchant can be approved and manage its own products and orders', async ()
   assert.equal(overview.body.data.settlements[0].payableAmountInCents, 2300);
   assert.equal(overview.body.data.metrics.settlementMetrics.commissionRatePercent, 8);
   assert.equal(overview.body.data.metrics.settlementMetrics.payableInCents, 2300);
+  assert.equal(overview.body.data.merchant.settlementAccountReady, true);
+  assert.equal(overview.body.data.merchant.settlementAccountMasked, '6222 **** 0000');
 
   const settled = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
@@ -462,7 +465,7 @@ test('merchant application requires agreements and complete business qualificati
     body: JSON.stringify({
       userId: 'merchant_rule_test', merchantType: 'INDIVIDUAL', name: '测试资质', ownerName: '审核员',
       phone: '15527110002', licenseNo: 'invalid', category: 'LIFE_SERVICE',
-      serviceArea: '狮山校区', description: '校内服务', agreeAgreement: true, agreePrivacy: true
+      serviceArea: '狮山校区', description: '校内服务', settlementAccountName: '审核员', settlementBank: '校园演示银行', settlementAccount: '6222000000000000', agreeAgreement: true, agreePrivacy: true
     })
   });
   assert.equal(invalidLicense.response.status, 400);
@@ -483,12 +486,28 @@ test('personal merchant application does not require a business license', async 
       userId: 'merchant_personal_test', merchantType: 'PERSONAL', name: '个人代购服务', ownerName: '李同学',
       phone: '15527110003', category: 'LIFE_SERVICE', serviceArea: '狮山校区',
       description: '个人跑腿与代购服务', agreeAgreement: true, agreePrivacy: true
-      , identityVerificationToken: verify.body.data.token
+      , settlementAccountName: '李同学', settlementBank: '校园演示银行', settlementAccount: '6222000000001234', identityVerificationToken: verify.body.data.token
     })
   });
   assert.equal(applied.response.status, 201);
   assert.equal(applied.body.data.licenseNo, '');
   assert.equal(applied.body.data.licenseUrl, '');
+  assert.equal(applied.body.data.settlementAccountReady, true);
+  assert.equal(applied.body.data.settlementAccountMasked, '6222 **** 1234');
+});
+
+test('merchant settlement account is required and masked', async () => {
+  const session = await loginWeChat('settlement_account_user');
+  const missingAccount = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      merchantType: 'PERSONAL', name: '收款资料测试', ownerName: '王同学', phone: '15527110009',
+      category: 'LIFE_SERVICE', serviceArea: '狮山校区', description: '收款资料校验',
+      identityVerificationToken: 'missing', agreeAgreement: true, agreePrivacy: true
+    })
+  });
+  assert.equal(missingAccount.response.status, 400);
+  assert.equal(missingAccount.body.error.code, 'VALIDATION_ERROR');
 });
 
 test('merchant qualification upload validates image content and size', async () => {
@@ -577,6 +596,7 @@ test('completed order owner can submit one verified product review', async () =>
       userId: 'review_merchant', merchantType: 'INDIVIDUAL', name: '评价测试车行', ownerName: '店长',
       phone: '15527110003', licenseNo: '92420111MAKMT4534R', category: 'E_BIKE',
       serviceArea: '狮山校区', description: '校内配送', licenseUrl: '/api/uploads/test-license.jpg',
+      settlementAccountName: '店长', settlementBank: '校园演示银行', settlementAccount: '6222000000005678',
       agreeAgreement: true, agreePrivacy: true
     })
   });

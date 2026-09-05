@@ -167,12 +167,14 @@ function publicApplication(application) {
 }
 
 function merchantPublic(merchant) {
-  const { ownerName, phone, ...safe } = merchant;
+  const { ownerName, phone, settlementAccount = '', ...safe } = merchant;
   return {
     ...safe,
     merchantType: safe.merchantType || 'INDIVIDUAL',
     ownerNameMasked: ownerName ? `${ownerName.slice(0, 1)}**` : '',
-    phoneMasked: phone ? `${phone.slice(0, 3)}****${phone.slice(-4)}` : ''
+    phoneMasked: phone ? `${phone.slice(0, 3)}****${phone.slice(-4)}` : '',
+    settlementAccountMasked: settlementAccount ? `${settlementAccount.slice(0, 4)} **** ${settlementAccount.slice(-4)}` : '',
+    settlementAccountReady: Boolean(settlementAccount)
   };
 }
 
@@ -693,6 +695,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         if (!allowedMerchantCategories.has(category)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant category');
         const serviceArea = requireString(body.serviceArea, 'serviceArea', { maxLength: 100 });
         const description = requireString(body.description, 'description', { maxLength: 300 });
+        const settlementAccountName = requireString(body.settlementAccountName, 'settlementAccountName', { maxLength: 80 });
+        const settlementBank = requireString(body.settlementBank, 'settlementBank', { maxLength: 80 });
+        const settlementAccount = requireString(body.settlementAccount, 'settlementAccount', { maxLength: 40 }).replace(/\s+/g, '');
+        if (!/^\d{9,32}$/.test(settlementAccount)) throw new ApiError(400, 'VALIDATION_ERROR', '收款账户格式不正确');
         const licenseNo = merchantType === 'PERSONAL'
           ? (typeof body.licenseNo === 'string' ? body.licenseNo.trim() : '')
           : requireString(body.licenseNo, 'licenseNo', { maxLength: 30 });
@@ -732,6 +738,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             category,
             serviceArea,
             description,
+            settlementAccountName,
+            settlementBank,
+            settlementAccount,
             status: 'REVIEWING',
             reviewNote: '',
             identityVerification: merchantType === 'PERSONAL' ? {
@@ -1029,6 +1038,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const result = store.update((data) => {
           const merchant = data.merchants.find((item) => item.id === adminSettlementMatch[1]);
           if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          if (!merchant.settlementAccountName || !merchant.settlementBank || !merchant.settlementAccount) {
+            throw new ApiError(409, 'SETTLEMENT_ACCOUNT_INCOMPLETE', '商家收款账户资料不完整，暂不能结算');
+          }
           const totalInCents = settleMerchant(data, merchant.id, new Date().toISOString(), settlementReference);
           const settlementCount = (data.settlements || []).filter((item) => item.merchantId === merchant.id && item.settlementStatus === 'SETTLED').length;
           addAudit(data, '平台确认商家结算', `${merchant.name} ${settlementReference}`);
