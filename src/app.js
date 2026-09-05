@@ -270,6 +270,25 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     return notification;
   }
 
+  function applyOrderRefund(data, order, now) {
+    const paymentOrder = (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId);
+    if (paymentOrder && paymentOrder.status === 'PAID') {
+      paymentOrder.status = 'REFUNDED';
+      paymentOrder.refundedAt = now;
+      paymentOrder.updatedAt = now;
+    }
+    order.status = 'CANCELLED';
+    order.paymentStatus = 'REFUNDED';
+    order.updatedAt = now;
+    for (const orderItem of order.items) {
+      const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
+      if (product) product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
+    }
+    addAudit(data, '\u552e\u540e\u9000\u6b3e\u5b8c\u6210', order.orderNo);
+    addNotification(data, order.userId, 'ORDER', '\u8ba2\u5355\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${order.orderNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
+    return paymentOrder;
+  }
+
   function requireMerchant(request) {
     const token = (request.headers.authorization || '').replace(/^Bearer\s+/i, '');
     const session = merchantSessions.get(token);
@@ -804,10 +823,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!order) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', 'After-sale record not found');
           item.status = status;
           item.updatedAt = new Date().toISOString();
-          if (status === 'CLOSED') {
+          if (status === 'CLOSED' && item.type === 'REFUND') {
+            applyOrderRefund(data, order, item.updatedAt);
+            appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', '退款已完成，订单关闭');
+          } else if (status === 'CLOSED') {
             order.status = 'COMPLETED';
             order.updatedAt = item.updatedAt;
             appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', '售后处理完成，订单继续履约');
+            addNotification(data, order.userId, 'AFTER_SALE', '售后处理完成', '您的售后已关闭，订单继续按约定履约。');
           }
           addAudit(data, '商家更新售后状态', item.id);
           return item;
@@ -1168,11 +1191,62 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const status = requireString(body.status, 'status', { maxLength: 50 });
         const collectionMap = { orders: 'orders', 'phone-card-orders': 'phoneCardOrders', 'recharge-orders': 'rechargeOrders', 'broadband-applications': 'broadbandApplications', 'plate-applications': 'plateApplications', 'after-sales': 'afterSales' };
+        const notificationTemplates = {
+          orders: {
+            PENDING_PAYMENT:['ORDER','订单待支付','请尽快完成支付，超时未支付可取消订单。'],
+            PAID:['ORDER','订单已支付','商家已收到订单，将尽快安排校内配送。'],
+            FULFILLING:['ORDER','订单配送中','商家正在按约定安排校内配送。'],
+            COMPLETED:['ORDER','订单已完成','本次服务已完成，欢迎评价本次体验。'],
+            CANCELLED:['ORDER','订单已取消','您的订单已取消，如需服务请重新下单。'],
+            AFTER_SALE:['ORDER','售后处理中','您的售后请求已进入处理流程。']
+          },
+          'phone-card-orders': {
+            PENDING_PAYMENT:['PHONE_PLAN','电话卡订单待支付','请完成支付后进入实名激活流程。'],
+            PENDING_REALNAME:['PHONE_PLAN','电话卡待实名激活','运营人员将协助您完成实名激活。'],
+            ACTIVATED:['PHONE_PLAN','电话卡已激活','您的校园电话卡已激活，可正常使用。'],
+            CANCELLED:['PHONE_PLAN','电话卡订单已取消','您的电话卡订单已取消。'],
+            REJECTED:['PHONE_PLAN','电话卡办理未通过','办理未通过，请联系客服确认原因。']
+          },
+          'recharge-orders': {
+            PENDING_PAYMENT:['RECHARGE','话费权益待支付','请完成支付后等待确认到账。'],
+            PENDING_CREDIT:['RECHARGE','话费权益待到账','支付成功，运营将确认优惠到账。'],
+            CREDITED:['RECHARGE','话费权益已到账','您的限时话费权益已到账。'],
+            CANCELLED:['RECHARGE','话费权益已取消','您的话费权益订单已取消。'],
+            REJECTED:['RECHARGE','话费权益办理未通过','办理未通过，请联系客服确认原因。']
+          },
+          'broadband-applications': {
+            PENDING_VERIFY:['BROADBAND','宽带资格待核验','我们正在核验双人购卡宽带资格。'],
+            APPROVED:['BROADBAND','宽带资格已通过','资格核验通过，可预约宽带安装。'],
+            REJECTED:['BROADBAND','宽带资格未通过','资格核验未通过，请联系客服确认原因。']
+          },
+          'plate-applications': {
+            MATERIAL_PENDING:['PLATE','校园牌照待补材料','请按提示补充车辆和身份材料。'],
+            REVIEWING:['PLATE','校园牌照审核中','校园牌照材料已进入审核流程。'],
+            COMPLETED:['PLATE','校园牌照办理完成','校园牌照辅助办理已完成。'],
+            REJECTED:['PLATE','校园牌照办理未通过','办理未通过，请联系客服确认原因。']
+          },
+          'after-sales': {
+            SUBMITTED:['AFTER_SALE','售后已受理','您的售后请求已受理，预计 24 小时内响应。'],
+            REVIEWING:['AFTER_SALE','售后处理中','客服正在处理您的售后请求。'],
+            CLOSED:['AFTER_SALE','售后已关闭','您的售后工单已关闭。']
+          }
+        };
         if (!adminOrderStatuses[adminStatusMatch[1]].has(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported status');
         const updated = store.update((data) => {
           const item = data[collectionMap[adminStatusMatch[1]]].find((record) => record.id === adminStatusMatch[2]);
           if (!item) throw new ApiError(404, 'ADMIN_RECORD_NOT_FOUND', 'Record not found');
-          item.status = status; item.updatedAt = new Date().toISOString(); addAudit(data, `更新${adminStatusMatch[1]}状态为${status}`, item.id); return item;
+          item.status = status; item.updatedAt = new Date().toISOString(); addAudit(data, `更新${adminStatusMatch[1]}状态为${status}`, item.id);
+          if (adminStatusMatch[1] === 'after-sales' && status === 'CLOSED') {
+            const order = (data.orders || []).find((row) => row.id === item.orderId);
+            if (order && item.type === 'REFUND') applyOrderRefund(data, order, item.updatedAt);
+            else if (order) { order.status = 'COMPLETED'; order.updatedAt = item.updatedAt; }
+          }
+          const template = notificationTemplates[adminStatusMatch[1]]?.[status];
+          if (template && item.userId) {
+            const detail = item.planName || item.vehicleModel || item.reason || item.orderNo || item.id;
+            addNotification(data, item.userId, template[0], template[1], `${detail}：${template[2]}`);
+          }
+          return item;
         });
         return sendJson(response, 200, { data: updated, requestId });
       }

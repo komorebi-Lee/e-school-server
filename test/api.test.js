@@ -810,3 +810,45 @@ test('phone card payments enter real-name activation and support refunds', async
   assert.equal(cancel.body.data.phoneCardOrder.status, 'CANCELLED');
   assert.equal(cancel.body.data.paymentOrder.status, 'CANCELLED');
 });
+
+test('admin after-sale closure refunds paid orders and notifies users', async () => {
+  const session = await loginWeChat('refund_after_sale');
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(created.response.status, 201);
+  await confirmPayment(created.body.paymentOrder.id, session.token);
+  const beforeStock = await api('/api/products/prod_ebike_001');
+
+  const afterSale = await api('/api/after-sales', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ orderId: created.body.data.id, type: 'REFUND', reason: '不想要了' })
+  });
+  assert.equal(afterSale.response.status, 201);
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const closed = await api(`/api/admin/after-sales/${afterSale.body.data.id}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ status: 'CLOSED' })
+  });
+  assert.equal(closed.response.status, 200);
+  assert.equal(closed.body.data.status, 'CLOSED');
+
+  const order = await api(`/api/orders/${created.body.data.id}`, {
+    headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(order.body.data.status, 'CANCELLED');
+  assert.equal(order.body.data.paymentStatus, 'REFUNDED');
+
+  const afterStock = await api('/api/products/prod_ebike_001');
+  assert.equal(afterStock.body.data.stock, beforeStock.body.data.stock + 1);
+
+  const notifications = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.ok(notifications.body.data.some((item) => item.type === 'ORDER' && item.title === '订单已退款'));
+});
