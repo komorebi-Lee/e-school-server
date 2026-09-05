@@ -31,10 +31,35 @@ const seedProducts = [
     name: '校园畅享卡',
     category: 'PHONE_PLAN',
     description: '80GB校园流量 · 100分钟通话 · 学生常选',
+    voice: '100分钟通话',
     priceInCents: 2900,
     stock: 999,
     campusIds: ['campus_demo'],
     imageUrl: 'https://placehold.co/600x400?text=Campus+Card',
+    active: true
+  },
+  {
+    id: 'prod_card_service_002',
+    name: '校园畅联卡',
+    category: 'PHONE_PLAN',
+    description: '120GB校园流量 · 200分钟通话 · 宿舍常用',
+    voice: '200分钟通话',
+    priceInCents: 3900,
+    stock: 999,
+    campusIds: ['campus_demo'],
+    imageUrl: 'https://placehold.co/600x400?text=Campus+Card+Pro',
+    active: true
+  },
+  {
+    id: 'prod_card_service_003',
+    name: '校园畅学卡',
+    category: 'PHONE_PLAN',
+    description: '180GB校园流量 · 300分钟通话 · 实习通勤推荐',
+    voice: '300分钟通话',
+    priceInCents: 5900,
+    stock: 999,
+    campusIds: ['campus_demo'],
+    imageUrl: 'https://placehold.co/600x400?text=Campus+Card+Max',
     active: true
   }
 ];

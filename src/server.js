@@ -4,6 +4,7 @@ const http = require('node:http');
 const { JsonStore } = require('./store');
 const { createMysqlStore } = require('./mysql-store');
 const { createApp } = require('./app');
+const { initialData } = require('./store');
 
 function loadEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -20,6 +21,17 @@ function loadEnvFile(filePath) {
 }
 
 loadEnvFile(path.join(__dirname, '..', '.env'));
+
+function ensureDefaultProducts(store) {
+  const defaultProducts = initialData().products;
+  store.update((data) => {
+    data.products ||= [];
+    const existingIds = new Set(data.products.map((item) => item.id));
+    for (const product of defaultProducts) {
+      if (!existingIds.has(product.id)) data.products.push(product);
+    }
+  });
+}
 
 async function bootstrap() {
   const port = Number(process.env.PORT || 3000);
@@ -46,6 +58,7 @@ async function bootstrap() {
     store = new JsonStore(databasePath);
     console.log(`JSON database: ${databasePath}`);
   }
+  ensureDefaultProducts(store);
   const server = http.createServer(createApp({ store }));
   server.listen(port, '0.0.0.0', () => {
     console.log(`Campus Go API listening on http://localhost:${port}`);

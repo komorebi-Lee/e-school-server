@@ -76,8 +76,9 @@ test('health and product list are available', async () => {
 
   const products = await api('/api/products?campusId=campus_demo');
   assert.equal(products.response.status, 200);
-  assert.equal(products.body.total, 3);
+  assert.equal(products.body.total, 5);
   assert.ok(products.body.data.every((item) => Number.isInteger(item.priceInCents)));
+  assert.equal(products.body.data.filter((item) => item.category === 'PHONE_PLAN').length, 3);
 });
 
 test('active product detail exposes merchant and stock', async () => {
