@@ -480,6 +480,7 @@ test('phone card service record can apply for broadband once', async () => {
     })
   });
   assert.equal(created.response.status, 201);
+  await confirmPayment(created.body.paymentOrder.id, session.token);
   const recordId = created.body.data.id;
 
   const first = await api(`/api/service-records/${recordId}/actions`, {
@@ -752,4 +753,60 @@ test('recharge payments create pending credit orders and notifications', async (
 
   const notifications = await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } });
   assert.ok(notifications.body.data.some((item) => item.type === 'RECHARGE' && item.title.includes('支付成功')));
+});
+
+test('phone card payments enter real-name activation and support refunds', async () => {
+  const session = await loginWeChat('card_payment');
+  const created = await api('/api/phone-card-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'card-payment-001', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ customerName: '卡同学', phone: '15527110088', planName: '校园畅联卡', amountInCents: 3900 })
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.data.status, 'PENDING_PAYMENT');
+  assert.equal(created.body.data.paymentStatus, 'UNPAID');
+  assert.ok(created.body.paymentOrder);
+
+  const repeated = await api('/api/phone-card-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'card-payment-001', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ customerName: '卡同学', phone: '15527110088', planName: '校园畅联卡', amountInCents: 3900 })
+  });
+  assert.equal(repeated.response.status, 200);
+  assert.equal(repeated.body.data.id, created.body.data.id);
+
+  const confirmed = await confirmPayment(created.body.paymentOrder.id, session.token);
+  assert.equal(confirmed.response.status, 200);
+  assert.equal(confirmed.body.data.phoneCardOrder.status, 'PENDING_REALNAME');
+  assert.equal(confirmed.body.data.phoneCardOrder.paymentStatus, 'PAID');
+  assert.equal(confirmed.body.data.paymentOrder.status, 'PAID');
+
+  const records = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.ok(records.body.data.serviceRecords.some((item) => item.type === 'PHONE_PLAN' && item.status === 'PENDING_REALNAME'));
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const refunded = await api(`/api/admin/payment-orders/${created.body.paymentOrder.id}/refund`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ note: 'card refund test' })
+  });
+  assert.equal(refunded.response.status, 200);
+  assert.equal(refunded.body.data.phoneCardOrder.status, 'CANCELLED');
+  assert.equal(refunded.body.data.phoneCardOrder.paymentStatus, 'REFUNDED');
+
+  const notifications = await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.ok(notifications.body.data.some((item) => item.type === 'PHONE_PLAN' && item.title.includes('支付成功')));
+  assert.ok(notifications.body.data.some((item) => item.type === 'PHONE_PLAN' && item.title.includes('退款')));
+
+  const cancelled = await api('/api/phone-card-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ customerName: '卡同学', phone: '15527110088', planName: '校园畅学卡', amountInCents: 2900 })
+  });
+  assert.equal(cancelled.response.status, 201);
+  const cancel = await api(`/api/payment-orders/${cancelled.body.paymentOrder.id}/cancel`, {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(cancel.response.status, 200);
+  assert.equal(cancel.body.data.phoneCardOrder.status, 'CANCELLED');
+  assert.equal(cancel.body.data.paymentOrder.status, 'CANCELLED');
 });
