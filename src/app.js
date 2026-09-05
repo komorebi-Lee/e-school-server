@@ -19,16 +19,17 @@ const allowedLeadStatuses = new Set(['SUBMITTED', 'FOLLOW_UP', 'COMPLETED', 'INV
 const openLeadStatuses = new Set(['SUBMITTED', 'FOLLOW_UP']);
 const allowedMerchantCategories = new Set(['E_BIKE', 'DIGITAL', 'FOOD', 'LIFE_SERVICE']);
 const allowedMerchantStatuses = new Set(['REVIEWING', 'APPROVED', 'REJECTED']);
-const allowedMerchantOrderStatuses = new Set(['PAID', 'FULFILLING', 'COMPLETED', 'CANCELLED']);
+const allowedMerchantOrderStatuses = new Set(['PENDING_PAYMENT', 'PAID', 'FULFILLING', 'COMPLETED', 'CANCELLED']);
 const allowedMerchantTypes = new Set(['INDIVIDUAL', 'ENTERPRISE', 'PERSONAL']);
 const adminOrderStatuses = {
-  orders: new Set(['PAID', 'FULFILLING', 'COMPLETED', 'CANCELLED', 'AFTER_SALE']),
+  orders: new Set(['PENDING_PAYMENT', 'PAID', 'FULFILLING', 'COMPLETED', 'CANCELLED', 'AFTER_SALE']),
   'phone-card-orders': new Set(['PENDING_REALNAME', 'ACTIVATED', 'REJECTED']),
   'recharge-orders': new Set(['PENDING_CREDIT', 'CREDITED', 'REJECTED']),
   'broadband-applications': new Set(['PENDING_VERIFY', 'APPROVED', 'REJECTED']),
   'plate-applications': new Set(['MATERIAL_PENDING', 'REVIEWING', 'COMPLETED', 'REJECTED']),
   'after-sales': new Set(['SUBMITTED', 'REVIEWING', 'CLOSED'])
 };
+const allowedPaymentStatuses = new Set(['PENDING', 'PAID', 'CANCELLED', 'REFUNDED']);
 const identityVerifications = new Map();
 
 function isTlsInterceptionError(error) {
@@ -239,6 +240,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
   }
   const uploadsDirectory = path.join(path.dirname(store.filePath), 'uploads');
   const statusLabels = {
+    PENDING_PAYMENT:'\u5f85\u652f\u4ed8',
     PAID:'已支付，待配送', FULFILLING:'配送中', COMPLETED:'已完成', CANCELLED:'已取消', AFTER_SALE:'售后中',
     PENDING_REALNAME:'待实名激活', ACTIVATED:'已激活', REJECTED:'未通过',
     PENDING_CREDIT:'待到账', CREDITED:'已到账',
@@ -249,6 +251,23 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     if (!Array.isArray(data.auditLogs)) data.auditLogs = [];
     data.auditLogs.unshift({ id: `log_${randomUUID()}`, operator: '运营管理员', action, target, createdAt: new Date().toISOString() });
     data.auditLogs = data.auditLogs.slice(0, 200);
+  }
+
+  function addNotification(data, userId, type, title, content) {
+    if (!userId) return null;
+    if (!Array.isArray(data.notifications)) data.notifications = [];
+    const notification = {
+      id: `ntf_${randomUUID()}`,
+      userId,
+      type,
+      title: String(title).slice(0, 80),
+      content: String(content).slice(0, 300),
+      read: false,
+      createdAt: new Date().toISOString()
+    };
+    data.notifications.unshift(notification);
+    data.notifications = data.notifications.slice(0, 500);
+    return notification;
   }
 
   function requireMerchant(request) {
@@ -796,6 +815,46 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: afterSale, requestId });
       }
 
+      if (request.method === 'GET' && pathname === '/api/admin/payment-orders') {
+        const data = store.read();
+        const items = (data.paymentOrders || []).filter(Boolean);
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/admin/notifications') {
+        const data = store.read();
+        const items = (data.notifications || []).filter(Boolean);
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
+      const adminPaymentRefundMatch = pathname.match(/^\/api\/admin\/payment-orders\/([^/]+)\/refund$/);
+      if (request.method === 'POST' && adminPaymentRefundMatch) {
+        const updated = store.update((data) => {
+          if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
+          const paymentOrder = data.paymentOrders.find((item) => item.id === adminPaymentRefundMatch[1]);
+          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+          if (paymentOrder.status !== 'PAID') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5df2\u652f\u4ed8\u5355\u53ef\u9000\u6b3e');
+          const now = new Date().toISOString();
+          paymentOrder.status = 'REFUNDED';
+          paymentOrder.refundedAt = now;
+          paymentOrder.updatedAt = now;
+          const order = (data.orders || []).find((item) => item.id === paymentOrder.orderId);
+          if (order) {
+            order.status = 'CANCELLED';
+            order.paymentStatus = 'REFUNDED';
+            order.updatedAt = now;
+            for (const orderItem of order.items) {
+              const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
+              if (product) product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
+            }
+          }
+          addAudit(data, '\u7ba1\u7406\u7aef\u9000\u6b3e', paymentOrder.paymentNo);
+          addNotification(data, paymentOrder.userId, 'ORDER', '\u8ba2\u5355\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${paymentOrder.orderNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
+          return { order, paymentOrder };
+        });
+        return sendJson(response, 200, { data: updated, requestId });
+      }
+
       if (request.method === 'GET' && pathname === '/api/admin/overview') {
         const data = store.read();
         const leads = data.leads || [];
@@ -819,6 +878,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             rechargeOrders: data.rechargeOrders,
             broadbandApplications: data.broadbandApplications,
             plateApplications: data.plateApplications,
+            paymentOrders: data.paymentOrders || [],
+            notifications: data.notifications || [],
             afterSales: data.afterSales,
             productReviews: data.productReviews || [],
             settings: data.adminSettings,
@@ -867,6 +928,25 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .filter((item) => item.userId === userId)
           .map((item) => ({ id:item.id, orderId:item.orderId, productId:item.productId, rating:item.rating, createdAt:item.createdAt }));
         return sendJson(response, 200, { data: records, total: records.length, requestId });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/my/notifications') {
+        const { userId } = requireUser(request);
+        const data = store.read();
+        const items = (data.notifications || []).filter((item) => item.userId === userId);
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/my/notifications/read') {
+        const { userId } = requireUser(request);
+        const updated = store.update((data) => {
+          let count = 0;
+          for (const item of data.notifications || []) {
+            if (item.userId === userId && !item.read) { item.read = true; count += 1; }
+          }
+          return { updated: count };
+        });
+        return sendJson(response, 200, { data: updated, requestId });
       }
       if (request.method === 'POST' && pathname === '/api/phone-card-orders') {
         const { userId } = requireUser(request);
@@ -1215,7 +1295,6 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (product.stock < quantity) {
               throw new ApiError(409, 'INSUFFICIENT_STOCK', `Insufficient stock for ${product.name}`);
             }
-            product.stock -= quantity;
             const subtotalInCents = product.priceInCents * quantity;
             totalInCents += subtotalInCents;
             orderItems.push({ productId, merchantId: product.merchantId || '', name: product.name, priceInCents: product.priceInCents, quantity, subtotalInCents });
@@ -1230,8 +1309,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             items: orderItems,
             totalInCents,
             currency: 'CNY',
-            status: 'PAID',
-            paymentStatus: 'MOCK_SUCCESS',
+            status: 'PENDING_PAYMENT',
+            paymentStatus: 'UNPAID',
             fulfillment: body.fulfillment || { type: 'PICKUP' },
             feeSummary: {
               itemsInCents: totalInCents - (isDelivery ? deliveryFeeInCents : 0),
@@ -1243,29 +1322,30 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             collaboration: createCollaboration({ createdAt: now, status:'PAID' }, orderItems[0]?.merchantId || '')
           };
           data.orders.push(order);
-          const bikeItem = order.items.find((item) => (data.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
-          if (bikeItem) {
-            const plateApplication = {
-              id: `plate_${randomUUID()}`,
-              userId,
-              customerName: order.fulfillment?.contactName || '平台购车用户',
-              phone: order.fulfillment?.contactPhone || '',
-              vehicleModel: bikeItem.name,
-              source: 'PLATFORM_ORDER',
-              feeInCents: 0,
-              relatedOrderId: order.id,
-              status: 'MATERIAL_PENDING',
-              relatedIds: { platformOrderIds: [order.id] },
-              createdAt: now,
-              updatedAt: now
-            };
-            (data.plateApplications = data.plateApplications || []).unshift(plateApplication);
-            addAudit(data, '购车订单自动创建免费牌照辅助', order.orderNo);
-          }
           if (compoundKey) data.idempotencyKeys[compoundKey] = order.id;
-          return { order, reused: false };
+          if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
+          const paymentOrder = {
+            id: `pay_${randomUUID()}`,
+            paymentNo: `PAY${Date.now()}${Math.floor(Math.random() * 9000 + 1000)}`,
+            orderId: order.id,
+            orderNo: order.orderNo,
+            userId,
+            amountInCents: totalInCents,
+            currency: 'CNY',
+            status: 'PENDING',
+            idempotencyKey: compoundKey || idempotencyKey || '',
+            channel: 'MOCK',
+            createdAt: now,
+            updatedAt: now,
+            paidAt: '',
+            refundedAt: ''
+          };
+          data.paymentOrders.unshift(paymentOrder);
+          order.paymentOrderId = paymentOrder.id;
+          addAudit(data, '\u521b\u5efa\u5f85\u652f\u4ed8\u5355', order.orderNo);
+          return { order, paymentOrder, reused: false };
         });
-        return sendJson(response, result.reused ? 200 : 201, { data: result.order, idempotencyReused: result.reused, requestId });
+        return sendJson(response, result.reused ? 200 : 201, { data: result.order, paymentOrder: result.paymentOrder, idempotencyReused: result.reused, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/api/orders') {
@@ -1282,6 +1362,129 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const order = store.read().orders.find((item) => item.id === orderMatch[1] && item.userId === userId);
         if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
         return sendJson(response, 200, { data: order, requestId });
+      }
+
+      const userPaymentMatch = pathname.match(/^\/api\/my\/payment-orders\/by-order\/([^/]+)\/confirm$/);
+      if (request.method === 'POST' && userPaymentMatch) {
+        const { userId } = requireUser(request);
+        const data = store.read();
+        const order = (data.orders || []).find((item) => item.id === userPaymentMatch[1] && item.userId === userId);
+        const paymentOrder = order ? (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId) : null;
+        if (!order || !paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        request.url = `/api/payment-orders/${paymentOrder.id}/confirm`;
+        const rerouted = new URL(request.url, 'http://localhost');
+        const match = rerouted.pathname.match(/^\/api\/payment-orders\/([^/]+)\/confirm$/);
+        const result = store.update((innerData) => {
+          const payment = innerData.paymentOrders.find((item) => item.id === match[1] && item.userId === userId);
+          if (!payment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+          const linkedOrder = innerData.orders.find((item) => item.id === payment.orderId && item.userId === userId);
+          if (!linkedOrder) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+          const now = new Date().toISOString();
+          if (payment.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u5355\u53ef\u652f\u4ed8');
+          payment.status = 'PAID';
+          payment.paidAt = now;
+          payment.updatedAt = now;
+          linkedOrder.status = 'PAID';
+          linkedOrder.paymentStatus = 'PAID';
+          linkedOrder.updatedAt = now;
+          for (const orderItem of linkedOrder.items) {
+            const product = (innerData.products || []).find((candidate) => candidate.id === orderItem.productId);
+            if (product) product.stock = Math.max(0, Number(product.stock || 0) - Number(orderItem.quantity || 0));
+          }
+          const bikeItem = linkedOrder.items.find((item) => (innerData.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
+          if (bikeItem) {
+            const plateApplication = {
+              id: `plate_${randomUUID()}`,
+              userId,
+              customerName: linkedOrder.fulfillment?.contactName || '\u5e73\u53f0\u8d2d\u8f66\u7528\u6237',
+              phone: linkedOrder.fulfillment?.contactPhone || '',
+              vehicleModel: bikeItem.name,
+              source: 'PLATFORM_ORDER',
+              feeInCents: 0,
+              relatedOrderId: linkedOrder.id,
+              status: 'MATERIAL_PENDING',
+              relatedIds: { platformOrderIds: [linkedOrder.id] },
+              createdAt: now,
+              updatedAt: now
+            };
+            (innerData.plateApplications = innerData.plateApplications || []).unshift(plateApplication);
+            addAudit(innerData, '\u7528\u6237\u652f\u4ed8\u540e\u521b\u5efa\u514d\u8d39\u724c\u7167\u8f85\u52a9', linkedOrder.orderNo);
+            addNotification(innerData, userId, 'PLATE', '\u514d\u8d39\u724c\u7167\u8f85\u52a9\u5df2\u53d1\u8d77', '\u5e73\u53f0\u8d2d\u8f66\u540e\u53ef\u4eab\u53d7\u514d\u8d39\u6821\u56ed\u724c\u7167\u8f85\u52a9\u3002');
+          }
+          linkedOrder.collaboration ||= createCollaboration(linkedOrder, linkedOrder.items[0]?.merchantId || '');
+          linkedOrder.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'\u652f\u4ed8\u6210\u529f\uff0c\u5f85\u5546\u5bb6\u786e\u8ba4\u5c65\u7ea6\u3002', createdAt:now });
+          addAudit(innerData, '\u7528\u6237\u6a21\u62df\u652f\u4ed8\u6210\u529f', linkedOrder.orderNo);
+          addNotification(innerData, userId, 'ORDER', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${linkedOrder.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
+          return { order: linkedOrder, paymentOrder: payment };
+        });
+        return sendJson(response, 200, { data: result, requestId });
+      }
+
+      const paymentMatch = pathname.match(/^\/api\/payment-orders\/([^/]+)(?:\/(confirm|cancel|refund))?$/);
+      if (request.method === 'POST' && paymentMatch) {
+        const { userId } = requireUser(request);
+        const action = paymentMatch[2];
+        if (!action) throw new ApiError(404, 'NOT_FOUND', 'Payment action is required');
+        const updated = store.update((data) => {
+          if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
+          const paymentOrder = data.paymentOrders.find((item) => item.id === paymentMatch[1] && item.userId === userId);
+          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+          const order = data.orders.find((item) => item.id === paymentOrder.orderId && item.userId === userId);
+          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+          const now = new Date().toISOString();
+          if (action === 'confirm') {
+            if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u5355\u53ef\u64cd\u4f5c');
+            paymentOrder.status = 'PAID';
+            paymentOrder.paidAt = now;
+            paymentOrder.updatedAt = now;
+            order.paymentStatus = 'PAID';
+            order.status = 'PAID';
+            order.updatedAt = now;
+            for (const orderItem of order.items) {
+              const product = data.products.find((candidate) => candidate.id === orderItem.productId);
+              if (!product) continue;
+              product.stock = Math.max(0, Number(product.stock || 0) - Number(orderItem.quantity || 0));
+            }
+            const bikeItem = order.items.find((item) => (data.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
+            if (bikeItem) {
+              const plateApplication = {
+                id: `plate_${randomUUID()}`,
+                userId,
+                customerName: order.fulfillment?.contactName || '\u5e73\u53f0\u8d2d\u8f66\u7528\u6237',
+                phone: order.fulfillment?.contactPhone || '',
+                vehicleModel: bikeItem.name,
+                source: 'PLATFORM_ORDER',
+                feeInCents: 0,
+                relatedOrderId: order.id,
+                status: 'MATERIAL_PENDING',
+                relatedIds: { platformOrderIds: [order.id] },
+                createdAt: now,
+                updatedAt: now
+              };
+              (data.plateApplications = data.plateApplications || []).unshift(plateApplication);
+              addAudit(data, '\u8d2d\u8f66\u652f\u4ed8\u540e\u81ea\u52a8\u521b\u5efa\u514d\u8d39\u724c\u7167\u8f85\u52a9', order.orderNo);
+              addNotification(data, userId, 'PLATE', '\u514d\u8d39\u724c\u7167\u8f85\u52a9\u5df2\u53d1\u8d77', '\u6211\u4eec\u5df2\u4e3a\u60a8\u521b\u5efa\u6821\u56ed\u724c\u7167\u8f85\u52a9\u5de5\u5355\uff0c\u8bf7\u51c6\u5907\u8f66\u8f86\u4e0e\u8eab\u4efd\u6750\u6599\u3002');
+            }
+            order.collaboration ||= createCollaboration(order, order.items[0]?.merchantId || '');
+            order.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'\u652f\u4ed8\u6210\u529f\uff0c\u5f85\u5546\u5bb6\u786e\u8ba4\u5c65\u7ea6\u3002', createdAt:now });
+            addAudit(data, '\u6a21\u62df\u652f\u4ed8\u56de\u8c03\u6210\u529f', order.orderNo);
+            addNotification(data, userId, 'ORDER', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${order.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
+            return { order, paymentOrder };
+          }
+          if (action === 'cancel') {
+            if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u5355\u53ef\u64cd\u4f5c');
+            paymentOrder.status = 'CANCELLED';
+            paymentOrder.updatedAt = now;
+            order.status = 'CANCELLED';
+            order.paymentStatus = 'CANCELLED';
+            order.updatedAt = now;
+            addAudit(data, '\u7528\u6237\u53d6\u6d88\u5f85\u652f\u4ed8', order.orderNo);
+            addNotification(data, userId, 'ORDER', '\u8ba2\u5355\u5df2\u53d6\u6d88', `\u8ba2\u5355 ${order.orderNo} \u5df2\u53d6\u6d88\uff0c\u82e5\u9700\u8981\u53ef\u91cd\u65b0\u4e0b\u5355\u3002`);
+            return { order, paymentOrder };
+          }
+          throw new ApiError(403, 'FORBIDDEN', '\u4ec5\u7ba1\u7406\u7aef\u53ef\u9000\u6b3e');
+        });
+        return sendJson(response, 200, { data: { order: updated.order, paymentOrder: updated.paymentOrder }, requestId });
       }
 
       if (request.method === 'PATCH' && orderMatch) {
@@ -1307,6 +1510,29 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             }
           }
           order.updatedAt = new Date().toISOString();
+          return order;
+        });
+        return sendJson(response, 200, { data: updated, requestId });
+      }
+
+      const orderCancelMatch = pathname.match(/^\/api\/orders\/([^/]+)\/cancel$/);
+      if (request.method === 'POST' && orderCancelMatch) {
+        const { userId } = requireUser(request);
+        const updated = store.update((data) => {
+          const order = data.orders.find((item) => item.id === orderCancelMatch[1] && item.userId === userId);
+          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+          if (order.status !== 'PENDING_PAYMENT') throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u8ba2\u5355\u53ef\u53d6\u6d88');
+          const now = new Date().toISOString();
+          order.status = 'CANCELLED';
+          order.paymentStatus = 'CANCELLED';
+          order.updatedAt = now;
+          const paymentOrder = (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId);
+          if (paymentOrder && paymentOrder.status === 'PENDING') {
+            paymentOrder.status = 'CANCELLED';
+            paymentOrder.updatedAt = now;
+          }
+          addAudit(data, '\u7528\u6237\u53d6\u6d88\u8ba2\u5355', order.orderNo);
+          addNotification(data, userId, 'ORDER', '\u8ba2\u5355\u5df2\u53d6\u6d88', `\u8ba2\u5355 ${order.orderNo} \u5df2\u53d6\u6d88\u3002`);
           return order;
         });
         return sendJson(response, 200, { data: updated, requestId });

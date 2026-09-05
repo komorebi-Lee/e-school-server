@@ -44,6 +44,12 @@ async function loginWeChat(code) {
   return result.body.data;
 }
 
+async function confirmPayment(paymentId, token) {
+  return api(`/api/payment-orders/${paymentId}/confirm`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}` }
+  });
+}
+
 test('lead follow-up result rejects unsupported status', async () => {
   const session = await loginWeChat('lead_user');
   const created = await api('/api/leads', {
@@ -205,6 +211,9 @@ test('order total is server-calculated and idempotency prevents duplicate orders
   const created = await api('/api/orders', request);
   assert.equal(created.response.status, 201);
   assert.equal(created.body.data.totalInCents, 639800);
+  assert.equal(created.body.data.status, 'PENDING_PAYMENT');
+  assert.equal(created.body.data.paymentStatus, 'UNPAID');
+  assert.ok(created.body.paymentOrder);
 
   const repeated = await api('/api/orders', request);
   assert.equal(repeated.response.status, 200);
@@ -217,14 +226,23 @@ test('order total is server-calculated and idempotency prevents duplicate orders
   const linked = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
   assert.equal(linked.response.status, 200);
   assert.equal(linked.body.data.ebikeOrders.length, 1);
-  assert.ok(linked.body.data.ebikeOrders[0].plateApplicationId);
-  assert.ok(linked.body.data.serviceRecords.some((item) => item.type === 'PLATE' && item.amountInCents === 0));
+  assert.equal(linked.body.data.ebikeOrders[0].plateApplicationId, '');
+
+  const confirmed = await confirmPayment(created.body.paymentOrder.id, session.token);
+  assert.equal(confirmed.response.status, 200);
+  assert.equal(confirmed.body.data.order.status, 'PAID');
+  assert.equal(confirmed.body.data.paymentOrder.status, 'PAID');
+  const confirmedLinked = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.ok(confirmedLinked.body.data.ebikeOrders[0].plateApplicationId);
+  assert.ok(confirmedLinked.body.data.serviceRecords.some((item) => item.type === 'PLATE' && item.amountInCents === 0));
 });
 
 test('after-sale request checks order ownership and prevents duplicates', async () => {
   const session = await loginWeChat('u1');
   const orders = await api('/api/orders', { headers: { authorization: `Bearer ${session.token}` } });
   const orderId = orders.body.data[0].id;
+  const orderDetail = await api(`/api/orders/${orderId}`, { headers: { authorization: `Bearer ${session.token}` } });
+  await confirmPayment(orderDetail.body.data.paymentOrderId, session.token);
   const other = await loginWeChat('other_user');
   const forbidden = await api('/api/after-sales', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${other.token}` },
@@ -348,6 +366,7 @@ test('merchant can be approved and manage its own products and orders', async ()
     body: JSON.stringify({ userId: 'buyer_test', items: [{ productId: product.body.data.id, quantity: 1 }] })
   });
   assert.equal(created.response.status, 201);
+  await confirmPayment(created.body.paymentOrder.id, merchantSession.token);
 
   const overview = await api('/api/merchant/overview', { headers: merchantAuth });
   assert.equal(overview.response.status, 200);
@@ -486,6 +505,7 @@ test('order collaboration is shared by user merchant and platform', async () => 
   });
   const orderId = created.body.data.id;
   assert.ok(created.body.data.collaboration);
+  await confirmPayment(created.body.paymentOrder.id, userSession.token);
 
   const merchantLogin = await api('/api/merchant/login', {
     method:'POST', headers:{ 'content-type':'application/json', authorization:`Bearer ${merchantSession.token}` },
@@ -542,6 +562,7 @@ test('completed order owner can submit one verified product review', async () =>
     body: JSON.stringify({ items: [{ productId: product.body.data.id, quantity: 1 }] })
   });
   const orderId = created.body.data.id;
+  await confirmPayment(created.body.paymentOrder.id, userSession.token);
 
   const pendingReview = await api('/api/product-reviews', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
@@ -631,4 +652,60 @@ test('admin order status update rejects unsupported status', async () => {
   });
   assert.equal(response.response.status, 400);
   assert.equal(response.body.error.code, 'VALIDATION_ERROR');
+});
+
+test('payment lifecycle creates notifications and supports cancel or refund', async () => {
+  const session = await loginWeChat('payment_lifecycle');
+
+  const cancelledOrder = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(cancelledOrder.response.status, 201);
+  const cancel = await api(`/api/orders/${cancelledOrder.body.data.id}/cancel`, {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(cancel.response.status, 200);
+  assert.equal(cancel.body.data.status, 'CANCELLED');
+  assert.equal(cancel.body.data.paymentStatus, 'CANCELLED');
+
+  const paidOrder = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_001', quantity: 1 }] })
+  });
+  assert.equal(paidOrder.response.status, 201);
+  const confirmed = await confirmPayment(paidOrder.body.paymentOrder.id, session.token);
+  assert.equal(confirmed.response.status, 200);
+  assert.equal(confirmed.body.data.order.status, 'PAID');
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const payments = await api('/api/admin/payment-orders', {
+    headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
+  });
+  assert.equal(payments.response.status, 200);
+  assert.ok(payments.body.data.some((item) => item.id === paidOrder.body.paymentOrder.id));
+
+  const refund = await api(`/api/admin/payment-orders/${paidOrder.body.paymentOrder.id}/refund`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ note: 'test refund' })
+  });
+  assert.equal(refund.response.status, 200);
+  assert.equal(refund.body.data.paymentOrder.status, 'REFUNDED');
+  assert.equal(refund.body.data.order.status, 'CANCELLED');
+
+  const notifications = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(notifications.response.status, 200);
+  assert.ok(notifications.body.data.some((item) => item.type === 'ORDER' && item.title.includes('取消')));
+  assert.ok(notifications.body.data.some((item) => item.type === 'ORDER' && item.title.includes('退款')));
+
+  const marked = await api('/api/my/notifications/read', {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(marked.response.status, 200);
+  assert.ok(marked.body.data.updated > 0);
 });
