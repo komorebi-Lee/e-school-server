@@ -709,6 +709,44 @@ test('order collaboration is shared by user merchant and platform', async () => 
   assert.ok(completed.body.data.collaboration.handoffs.some((event)=>event.note === '商家已核验交付码，订单已完成'));
 });
 
+test('merchant products use platform-uploaded images', async () => {
+  const session = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+
+  const upload = await api('/api/uploads', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify(makeImage())
+  });
+  assert.equal(upload.response.status, 201);
+
+  const created = await api('/api/merchant/products', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({
+      name: '带图测试车', category: 'E_BIKE_NEW', description: '商品图完整闭环',
+      priceInCents: 120000, stock: 4, imageUrl: upload.body.data.url
+    })
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.data.imageUrl, upload.body.data.url);
+
+  const rejected = await api(`/api/merchant/products/${created.body.data.id}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ imageUrl: 'https://example.com/bike.jpg' })
+  });
+  assert.equal(rejected.response.status, 400);
+
+  const removed = await api(`/api/merchant/products/${created.body.data.id}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ imageUrl: '' })
+  });
+  assert.equal(removed.response.status, 200);
+  assert.equal(removed.body.data.imageUrl, '');
+});
+
 test('completed order owner can submit one verified product review', async () => {
   const userSession = await loginWeChat('review_owner');
   const merchantSession = await loginWeChat('review_merchant');

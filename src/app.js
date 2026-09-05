@@ -936,6 +936,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号不可用');
           const priceInCents = requirePositiveInteger(body.priceInCents, 'priceInCents');
           const stock = requirePositiveInteger(body.stock, 'stock', { max: 999999 });
+          const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : '';
+          if (imageUrl && !imageUrl.startsWith('/api/uploads/')) throw new ApiError(400, 'VALIDATION_ERROR', '商品图片必须来自平台上传目录');
           const item = {
             id: `prod_${randomUUID()}`,
             name: requireString(body.name, 'name', { maxLength: 80 }),
@@ -944,7 +946,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             priceInCents,
             stock,
             campusIds: ['campus_demo'],
-            imageUrl: '',
+            imageUrl,
             merchantId: merchant.id,
             active: body.active !== false
           };
@@ -963,6 +965,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!item) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
           if (body.name !== undefined) item.name = requireString(body.name, 'name', { maxLength: 80 });
           if (body.description !== undefined) item.description = requireString(body.description, 'description', { maxLength: 300 });
+          if (body.imageUrl !== undefined) {
+            const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : '';
+            if (imageUrl && !imageUrl.startsWith('/api/uploads/')) throw new ApiError(400, 'VALIDATION_ERROR', '商品图片必须来自平台上传目录');
+            item.imageUrl = imageUrl;
+          }
           if (body.priceInCents !== undefined) item.priceInCents = requirePositiveInteger(body.priceInCents, 'priceInCents');
           if (body.stock !== undefined) item.stock = requirePositiveInteger(body.stock, 'stock', { max: 999999 });
           if (body.active !== undefined) item.active = Boolean(body.active);
@@ -1654,7 +1661,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const product = store.update((data) => {
           const priceInCents = Number(body.priceInCents); const stock = Number(body.stock);
           if (!Number.isInteger(priceInCents) || priceInCents < 0 || !Number.isInteger(stock) || stock < 0) throw new ApiError(400, 'VALIDATION_ERROR', '价格和库存格式不正确');
-          const item = { id: `prod_${randomUUID()}`, name: requireString(body.name, 'name', { maxLength: 80 }), category: requireString(body.category, 'category', { maxLength: 50 }), description: requireString(body.description, 'description', { maxLength: 300 }), priceInCents, stock, campusIds: ['campus_hzau'], imageUrl: '', active: body.active !== false };
+          const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : '';
+          if (imageUrl && !imageUrl.startsWith('/api/uploads/')) throw new ApiError(400, 'VALIDATION_ERROR', '商品图片必须来自平台上传目录');
+          const item = { id: `prod_${randomUUID()}`, name: requireString(body.name, 'name', { maxLength: 80 }), category: requireString(body.category, 'category', { maxLength: 50 }), description: requireString(body.description, 'description', { maxLength: 300 }), priceInCents, stock, campusIds: ['campus_hzau'], imageUrl, active: body.active !== false };
           data.products.unshift(item); addAudit(data, '新增商品', item.name); return item;
         });
         return sendJson(response, 201, { data: product, requestId });
