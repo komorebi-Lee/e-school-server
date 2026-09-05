@@ -84,6 +84,9 @@ const seedMerchants = [
     serviceArea: '华中农业大学狮山校区',
     reviewNote: '',
     status: 'APPROVED',
+    settlementAccountName: '狮山校园车行',
+    settlementAccount: '6222 0000 0000 0000',
+    settlementBank: '校园演示银行',
     createdAt: '2026-08-28T06:00:00.000Z',
     updatedAt: '2026-08-28T06:00:00.000Z'
   },

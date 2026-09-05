@@ -315,6 +315,21 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     }
   }
 
+  function settleMerchant(data, merchantId, now, reference) {
+    if (!Array.isArray(data.settlements)) throw new ApiError(404, 'SETTLEMENT_NOT_FOUND', 'Settlement record not found');
+    const settlements = data.settlements.filter((item) => item.merchantId === merchantId && item.settlementStatus === 'PENDING_SETTLE');
+    if (!settlements.length) throw new ApiError(404, 'PENDING_SETTLEMENT_NOT_FOUND', 'No pending settlement');
+    let totalInCents = 0;
+    for (const settlement of settlements) {
+      settlement.settlementStatus = 'SETTLED';
+      settlement.settledAt = now;
+      settlement.settlementReference = reference;
+      settlement.updatedAt = now;
+      totalInCents += settlement.payableAmountInCents || 0;
+    }
+    return totalInCents;
+  }
+
   function applyOrderRefund(data, order, now) {
     const paymentOrder = (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId);
     if (paymentOrder && paymentOrder.status === 'PAID') {
@@ -773,6 +788,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const settlements = (data.settlements || []).filter((item) => item.merchantId === merchant.id);
         const settlementMetrics = {
           payableInCents: settlements.filter((item) => item.settlementStatus === 'PENDING_SETTLE').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0),
+          settledInCents: settlements.filter((item) => item.settlementStatus === 'SETTLED').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0),
           refundedInCents: settlements.filter((item) => item.settlementStatus === 'REFUNDED').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0)
         };
         const revenueInCents = orders.reduce((sum, order) => sum + order.totalInCents, 0);
@@ -795,6 +811,21 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           },
           requestId
         });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/merchant/settlement') {
+        const body = await readJson(request);
+        const settlementReference = requireString(body.reference || '平台线下打款', 'reference', { maxLength: 120 });
+        const result = store.update((data) => {
+          const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
+          if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号不可用');
+          const totalInCents = settleMerchant(data, merchant.id, new Date().toISOString(), settlementReference);
+          const settlementCount = (data.settlements || []).filter((item) => item.merchantId === merchant.id && item.settlementStatus === 'SETTLED').length;
+          addAudit(data, '商家结算打款确认', `${merchant.name} ${settlementReference}`);
+          addNotification(data, merchant.userId, 'SETTLEMENT', '结算已完成', `平台已确认结算 ${settlementCount} 笔，合计 ¥${(totalInCents / 100).toFixed(2)}。`);
+          return { merchantId: merchant.id, totalInCents, settlementCount, settlementReference };
+        });
+        return sendJson(response, 200, { data: result, requestId });
       }
 
       if (request.method === 'POST' && pathname === '/api/merchant/products') {
@@ -984,6 +1015,22 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             ,leads
           }, requestId
         });
+      }
+
+      const adminSettlementMatch = pathname.match(/^\/api\/admin\/merchants\/([^/]+)\/settle$/);
+      if (request.method === 'POST' && adminSettlementMatch) {
+        const body = await readJson(request);
+        const settlementReference = requireString(body.reference || '平台线下打款', 'reference', { maxLength: 120 });
+        const result = store.update((data) => {
+          const merchant = data.merchants.find((item) => item.id === adminSettlementMatch[1]);
+          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          const totalInCents = settleMerchant(data, merchant.id, new Date().toISOString(), settlementReference);
+          const settlementCount = (data.settlements || []).filter((item) => item.merchantId === merchant.id && item.settlementStatus === 'SETTLED').length;
+          addAudit(data, '平台确认商家结算', `${merchant.name} ${settlementReference}`);
+          addNotification(data, merchant.userId, 'SETTLEMENT', '结算已完成', `平台已确认结算 ${settlementCount} 笔，合计 ¥${(totalInCents / 100).toFixed(2)}。`);
+          return { merchantId: merchant.id, merchantName: merchant.name, totalInCents, settlementCount, settlementReference };
+        });
+        return sendJson(response, 200, { data: result, requestId });
       }
 
       if (request.method === 'POST' && pathname === '/api/leads') {

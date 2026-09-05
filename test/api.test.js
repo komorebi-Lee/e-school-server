@@ -377,6 +377,23 @@ test('merchant can be approved and manage its own products and orders', async ()
   assert.equal(overview.body.data.settlements[0].payableAmountInCents, 2450);
   assert.equal(overview.body.data.metrics.settlementMetrics.payableInCents, 2450);
 
+  const settled = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ reference: 'TEST-PAYOUT-001' })
+  });
+  assert.equal(settled.response.status, 200);
+  assert.equal(settled.body.data.totalInCents, 2450);
+  assert.equal(settled.body.data.settlementCount, 1);
+  assert.equal(settled.body.data.settlementReference, 'TEST-PAYOUT-001');
+  const settledOverview = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(settledOverview.body.data.metrics.settlementMetrics.payableInCents, 0);
+  assert.equal(settledOverview.body.data.metrics.settlementMetrics.settledInCents, 2450);
+  const repeatSettle = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ reference: 'TEST-PAYOUT-002' })
+  });
+  assert.equal(repeatSettle.response.status, 404);
+
   const fulfilled = await api(`/api/merchant/orders/${created.body.data.id}/status`, {
     method: 'POST', headers: merchantAuth,
     body: JSON.stringify({ status: 'COMPLETED' })
