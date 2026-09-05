@@ -269,6 +269,28 @@ test('after-sale request checks order ownership and prevents duplicates', async 
 
 test('delivery orders require valid campus fulfillment details', async () => {
   const session = await loginWeChat('delivery_user');
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const dayAfterTomorrow = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const pastDate = await api('/api/orders', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      items: [{ productId: 'prod_ebike_001', quantity: 1 }],
+      fulfillment: { type: 'DELIVERY', contactName: '李同学', contactPhone: '15527111396', address: '荟园学生社区', date: '2000-01-01', timeSlot: '今天 12:00-14:00' }
+    })
+  });
+  assert.equal(pastDate.response.status, 400);
+
+  const invalidSlot = await api('/api/orders', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      items: [{ productId: 'prod_ebike_001', quantity: 1 }],
+      fulfillment: { type: 'DELIVERY', contactName: '李同学', contactPhone: '15527111396', address: '荟园学生社区', date: tomorrow, timeSlot: '凌晨三点' }
+    })
+  });
+  assert.equal(invalidSlot.response.status, 400);
+
   const invalid = await api('/api/orders', {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
@@ -287,7 +309,7 @@ test('delivery orders require valid campus fulfillment details', async () => {
       items: [{ productId: 'prod_ebike_001', quantity: 1 }],
       fulfillment: {
         type: 'DELIVERY', contactName: '李同学', contactPhone: '15527111396',
-        address: '荟园学生社区', date: '2026-09-06'
+        address: '荟园学生社区', date: tomorrow, timeSlot: '今天 12:00-14:00'
       }
     })
   });
@@ -305,11 +327,12 @@ test('delivery orders require valid campus fulfillment details', async () => {
   const updated = await api(`/api/orders/${orderId}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
-    body: JSON.stringify({ fulfillment: { address: '荟园学生社区 7 栋', date: '2026-09-07' } })
+      body: JSON.stringify({ fulfillment: { address: '荟园学生社区 7 栋', date: dayAfterTomorrow, timeSlot: '今天 16:00-18:00' } })
   });
   assert.equal(updated.response.status, 200);
   assert.equal(updated.body.data.fulfillment.address, '荟园学生社区 7 栋');
   assert.equal(updated.body.data.fulfillment.contactName, '李同学');
+  assert.ok(updated.body.data.collaboration.handoffs.some((event) => event.action === 'RESCHEDULE' && event.note.includes('用户已改约')));
 });
 
 test('stock validation rejects excessive quantities', async () => {

@@ -58,6 +58,20 @@ function normalizeTimeSlot(value) {
   return String(value || '').trim().slice(0, 40);
 }
 
+function normalizeDateValue(value) {
+  return String(value || '').trim().slice(0, 10);
+}
+
+function validateDeliverySchedule(fulfillment, settings) {
+  if (fulfillment.type !== 'DELIVERY') return;
+  const date = normalizeDateValue(fulfillment.date);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new ApiError(400, 'VALIDATION_ERROR', '请选择配送日期');
+  if (date < new Date().toISOString().slice(0, 10)) throw new ApiError(400, 'VALIDATION_ERROR', '配送日期不能早于今天');
+  const slot = requireString(fulfillment.timeSlot, 'fulfillment.timeSlot', { maxLength: 40 });
+  const configuredSlots = Array.isArray(settings?.deliveryTimeSlots) ? settings.deliveryTimeSlots.map(normalizeTimeSlot) : [];
+  if (!configuredSlots.includes(slot)) throw new ApiError(400, 'VALIDATION_ERROR', '请选择平台提供的配送时段');
+}
+
 function wechatOpenApiRequest(pathname, rejectUnauthorized) {
   return new Promise((resolve, reject) => {
     const request = https.get(`https://api.weixin.qq.com${pathname}`, { rejectUnauthorized }, (response) => {
@@ -1617,6 +1631,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             orderItems.push({ productId, merchantId: product.merchantId || '', name: product.name, priceInCents: product.priceInCents, quantity, subtotalInCents });
           }
           const isDelivery = body.fulfillment?.type === 'DELIVERY';
+          if (isDelivery) validateDeliverySchedule(body.fulfillment, settings);
           if (isDelivery) totalInCents += deliveryFeeInCents;
           const now = new Date().toISOString();
           const order = {
@@ -1860,6 +1875,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
           if (['COMPLETED', 'CANCELLED', 'AFTER_SALE'].includes(order.status)) throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', 'Current order cannot be edited');
           if (body.fulfillment && typeof body.fulfillment === 'object') {
+            const previousSchedule = order.fulfillment?.type === 'DELIVERY' ? `${order.fulfillment.date || '尽快'} ${order.fulfillment.timeSlot || ''}`.trim() : '';
             if (order.fulfillment?.type === 'DELIVERY') {
               if (body.fulfillment.type && body.fulfillment.type !== 'DELIVERY') throw new ApiError(400, 'VALIDATION_ERROR', '当前订单不支持切换为自提');
               const mergedFulfillment = { ...order.fulfillment, ...body.fulfillment, type: 'DELIVERY' };
@@ -1868,8 +1884,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               const address = requireString(mergedFulfillment.address, 'fulfillment.address', { maxLength: 120 });
               if (!/^1\d{10}$/.test(contactPhone)) throw new ApiError(400, 'VALIDATION_ERROR', '请输入正确的联系手机号');
               if (!contactName || !address) throw new ApiError(400, 'VALIDATION_ERROR', '请填写联系人和校内配送地址');
-              if (body.fulfillment.timeSlot !== undefined) requireString(body.fulfillment.timeSlot, 'fulfillment.timeSlot', { maxLength: 40 });
+              validateDeliverySchedule(mergedFulfillment, data.adminSettings);
               order.fulfillment = mergedFulfillment;
+              const nextSchedule = `${order.fulfillment.date || '尽快'} ${order.fulfillment.timeSlot || ''}`.trim();
+              if (previousSchedule !== nextSchedule) {
+                appendCollaborationEvent(order, 'USER', 'RESCHEDULE', `用户已改约：${previousSchedule || '未安排'} → ${nextSchedule}`);
+                addNotification(data, userId, 'ORDER', '配送时间已更新', `订单 ${order.orderNo} 的新配送安排：${nextSchedule}。`);
+              }
             } else if (body.fulfillment.type === 'DELIVERY') {
               throw new ApiError(400, 'VALIDATION_ERROR', '当前订单不支持切换为校内配送');
             }
