@@ -1192,6 +1192,53 @@ test('admin after-sale closure refunds paid orders and notifies users', async ()
   assert.ok(notifications.body.data.some((item) => item.type === 'ORDER' && item.title === '订单已退款'));
 });
 
+test('merchant workspace receives operational notifications and metrics', async () => {
+  const userSession = await loginWeChat('merchant_notify_user');
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantHeaders = { authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const before = await api('/api/merchant/notifications', { headers: merchantHeaders });
+  assert.equal(before.response.status, 200);
+
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(created.response.status, 201);
+  await confirmPayment(created.body.paymentOrder.id, userSession.token);
+
+  const afterSale = await api('/api/after-sales', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ orderId: created.body.data.id, type: 'REPAIR', reason: '刹车需要调试' })
+  });
+  assert.equal(afterSale.response.status, 201);
+
+  const userMessage = await api('/api/order-collab', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ role: 'USER', orderId: created.body.data.id, action: 'NOTE', note: '请尽量晚上七点后配送' })
+  });
+  assert.equal(userMessage.response.status, 200);
+
+  const notifications = await api('/api/merchant/notifications', { headers: merchantHeaders });
+  assert.ok(notifications.body.data.some((item) => item.title === '新订单已支付'));
+  assert.ok(notifications.body.data.some((item) => item.title === '收到新的售后申请'));
+  assert.ok(notifications.body.data.some((item) => item.content === '请尽量晚上七点后配送'));
+  assert.ok(notifications.body.unreadCount > before.body.unreadCount);
+
+  const overview = await api('/api/merchant/overview', { headers: merchantHeaders });
+  assert.equal(overview.body.data.metrics.afterSaleCount > 0, true);
+  assert.ok(overview.body.data.orders.some((order) => order.id === created.body.data.id && order.status === 'AFTER_SALE'));
+
+  await api('/api/merchant/notifications/read', { method: 'POST', headers: merchantHeaders });
+  const readNotifications = await api('/api/merchant/notifications', { headers: merchantHeaders });
+  assert.equal(readNotifications.body.unreadCount, 0);
+});
+
 test('external plate applications require paid service fee and support refunds', async () => {
   const session = await loginWeChat('external_plate_user');
   const created = await api('/api/plate-applications', {

@@ -300,6 +300,16 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     return notification;
   }
 
+  function notifyMerchant(data, merchantId, type, title, content) {
+    const merchant = (data.merchants || []).find((item) => item.id === merchantId);
+    return addNotification(data, merchant?.userId, type, title, content);
+  }
+
+  function notifyOrderMerchant(data, order, type, title, content) {
+    const product = (data.products || []).find((item) => item.id === order.items?.[0]?.productId);
+    return notifyMerchant(data, order.collaboration?.merchantId || order.items?.[0]?.merchantId || product?.merchantId || '', type, title, content);
+  }
+
   function addFinanceEvent(data, eventType, referenceId, amountInCents, meta = {}, now = new Date().toISOString()) {
     if (!Array.isArray(data.financeEvents)) data.financeEvents = [];
     const key = `${eventType}:${referenceId}`;
@@ -730,6 +740,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             }
             else if (!['CONTACT','NOTE'].includes(action)) throw new ApiError(409,'ACTION_NOT_ALLOWED','当前状态不支持该商家动作');
           }
+          if (role === 'USER' && item.collaboration.merchantId) {
+            notifyOrderMerchant(data, item, 'ORDER', `订单 ${item.orderNo} 有新用户留言`, note);
+          } else if (role === 'MERCHANT' && item.userId) {
+            addNotification(data, item.userId, 'ORDER', `订单 ${item.orderNo} 有新商家留言`, note);
+          } else if (role === 'PLATFORM') {
+            notifyOrderMerchant(data, item, 'ORDER', `平台已介入订单 ${item.orderNo}`, note);
+            addNotification(data, item.userId, 'ORDER', `平台已处理订单 ${item.orderNo}`, note);
+          }
           if (role === 'PLATFORM' && action === 'INTERVENE') item.collaboration.intervention = { status:'REQUESTED', note, updatedAt:new Date().toISOString() };
           if (role === 'PLATFORM' && action === 'RESOLVE') item.collaboration.intervention = { status:'RESOLVED', note, updatedAt:new Date().toISOString() };
           if (role === 'USER' && action === 'APPEAL') item.collaboration.intervention = { status:'REQUESTED', note, updatedAt:new Date().toISOString() };
@@ -885,15 +903,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           settledInCents: settlements.filter((item) => item.settlementStatus === 'SETTLED').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0),
           refundedInCents: settlements.filter((item) => item.settlementStatus === 'REFUNDED').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0)
         };
-        const revenueInCents = orders.reduce((sum, order) => sum + order.totalInCents, 0);
         const afterSales = (data.afterSales || []).filter((record) => orders.some((order) => order.id === record.orderId));
+        const revenueInCents = orders.filter((order) => ['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(order.status))
+          .reduce((sum, order) => sum + (order.totalInCents || 0), 0);
         return sendJson(response, 200, {
           data: {
             merchant: merchantPublic(merchant),
             metrics: {
               revenueInCents,
               orderCount: orders.length,
-              pendingCount: orders.filter((order) => !['COMPLETED', 'CANCELLED', 'AFTER_SALE'].includes(order.status)).length,
+              pendingCount: orders.filter((order) => ['PAID', 'FULFILLING'].includes(order.status)).length,
+              afterSaleCount: afterSales.filter((record) => record.status !== 'CLOSED').length,
               productCount: products.length,
               lowStockCount: products.filter((product) => product.stock < 10).length,
               reviewCount: reviews.length,
@@ -908,6 +928,32 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           },
           requestId
         });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/merchant/notifications') {
+        const data = store.read();
+        const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
+        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        const items = (data.notifications || [])
+          .filter((item) => item.userId === merchant.userId)
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+        return sendJson(response, 200, { data: items, total: items.length, unreadCount: items.filter((item) => !item.read).length, requestId });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/merchant/notifications/read') {
+        const updated = store.update((data) => {
+          const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
+          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          let count = 0;
+          for (const item of data.notifications || []) {
+            if (item.userId === merchant.userId && !item.read) {
+              item.read = true;
+              count += 1;
+            }
+          }
+          return { updated: count };
+        });
+        return sendJson(response, 200, { data: updated, requestId });
       }
 
       if (request.method === 'POST' && pathname === '/api/merchant/settlement') {
@@ -1910,6 +1956,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           linkedOrder.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'\u652f\u4ed8\u6210\u529f\uff0c\u5f85\u5546\u5bb6\u786e\u8ba4\u5c65\u7ea6\u3002', createdAt:now });
           addAudit(innerData, '\u7528\u6237\u6a21\u62df\u652f\u4ed8\u6210\u529f', linkedOrder.orderNo);
           addNotification(innerData, userId, 'ORDER', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${linkedOrder.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
+          notifyOrderMerchant(innerData, linkedOrder, 'ORDER', '新订单已支付', `订单 ${linkedOrder.orderNo} 已支付，请尽快确认履约。`);
           return { order: linkedOrder, paymentOrder: payment };
         });
         return sendJson(response, 200, { data: result, requestId });
@@ -2005,6 +2052,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             order.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'\u652f\u4ed8\u6210\u529f\uff0c\u5f85\u5546\u5bb6\u786e\u8ba4\u5c65\u7ea6\u3002', createdAt:now });
             addAudit(data, '\u6a21\u62df\u652f\u4ed8\u56de\u8c03\u6210\u529f', order.orderNo);
             addNotification(data, userId, 'ORDER', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${order.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
+            notifyOrderMerchant(data, order, 'ORDER', '新订单已支付', `订单 ${order.orderNo} 已支付，请尽快确认履约。`);
             return { order, paymentOrder };
           }
           if (action === 'cancel') {
@@ -2138,6 +2186,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           data.afterSales.push(record);
           order.status = 'AFTER_SALE';
           order.updatedAt = now;
+          notifyOrderMerchant(data, order, 'AFTER_SALE', '收到新的售后申请', `订单 ${order.orderNo}：${record.typeLabel}，${reason}`);
+          addAudit(data, '用户提交售后申请', order.orderNo);
           return record;
         });
         return sendJson(response, 201, { data: afterSale, requestId });
