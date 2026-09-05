@@ -284,6 +284,31 @@ test('merchant can be approved and manage its own products and orders', async ()
   });
   assert.equal(fulfilled.response.status, 200);
   assert.equal(fulfilled.body.data.status, 'COMPLETED');
+
+  const afterSale = await api('/api/after-sales', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ orderId: created.body.data.id, type: 'REPAIR', reason: '商品需要维修检测' })
+  });
+  assert.equal(afterSale.response.status, 201);
+
+  const handled = await api(`/api/merchant/after-sales/${afterSale.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'REVIEWING' })
+  });
+  assert.equal(handled.response.status, 200);
+  assert.equal(handled.body.data.status, 'REVIEWING');
+
+  const closed = await api(`/api/merchant/after-sales/${afterSale.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'CLOSED' })
+  });
+  assert.equal(closed.response.status, 200);
+  assert.equal(closed.body.data.status, 'CLOSED');
+
+  const refreshed = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(refreshed.response.status, 200);
+  assert.equal(refreshed.body.data.afterSales.length, 1);
+  assert.equal(refreshed.body.data.orders[0].status, 'COMPLETED');
 });
 
 test('merchant application requires agreements and complete business qualification', async () => {

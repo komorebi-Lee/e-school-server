@@ -590,6 +590,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           collaboration: order.collaboration || createCollaboration(order, merchant.id)
         }));
         const revenueInCents = orders.reduce((sum, order) => sum + order.totalInCents, 0);
+        const afterSales = (data.afterSales || []).filter((record) => orders.some((order) => order.id === record.orderId));
         return sendJson(response, 200, {
           data: {
             merchant: merchantPublic(merchant),
@@ -601,7 +602,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               lowStockCount: products.filter((product) => product.stock < 10).length
             },
             products,
-            orders: enrichedOrders
+            orders: enrichedOrders,
+            afterSales
           },
           requestId
         });
@@ -670,6 +672,32 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           return item;
         });
         return sendJson(response, 200, { data: order, requestId });
+      }
+
+      const merchantAfterSaleMatch = pathname.match(/^\/api\/merchant\/after-sales\/([^/]+)\/status$/);
+      if (request.method === 'POST' && merchantAfterSaleMatch) {
+        const body = await readJson(request);
+        const status = requireString(body.status, 'status', { maxLength: 30 });
+        if (!['SUBMITTED', 'REVIEWING', 'CLOSED'].includes(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant after-sale status');
+        const afterSale = store.update((data) => {
+          const item = (data.afterSales || []).find((record) => record.id === merchantAfterSaleMatch[1]);
+          if (!item) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', 'After-sale record not found');
+          const order = data.orders.find((row) => row.id === item.orderId && row.items.some((orderItem) => {
+            const product = data.products.find((candidate) => candidate.id === orderItem.productId);
+            return product?.merchantId === merchantSession.merchantId;
+          }));
+          if (!order) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', 'After-sale record not found');
+          item.status = status;
+          item.updatedAt = new Date().toISOString();
+          if (status === 'CLOSED') {
+            order.status = 'COMPLETED';
+            order.updatedAt = item.updatedAt;
+            appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', '售后处理完成，订单继续履约');
+          }
+          addAudit(data, '商家更新售后状态', item.id);
+          return item;
+        });
+        return sendJson(response, 200, { data: afterSale, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/api/admin/overview') {
