@@ -71,6 +71,29 @@ const seedMerchants = [
   }
 ];
 
+const seedProductReviews = [
+  {
+    id: 'review_1001',
+    productId: 'prod_ebike_001',
+    rating: 5,
+    content: '中午下单，下午送到宿舍楼下，师傅还讲了校园上牌需要准备的材料，很省心。',
+    customerName: '陈同学',
+    college: '园艺林学学院',
+    purchaseVerified: true,
+    createdAt: '2026-09-01T10:20:00.000Z'
+  },
+  {
+    id: 'review_1002',
+    productId: 'prod_ebike_001',
+    rating: 4,
+    content: '车况不错，通勤去教学楼很方便。要是能多几个颜色选择就更好了。',
+    customerName: '刘同学',
+    college: '经济管理学院',
+    purchaseVerified: true,
+    createdAt: '2026-09-03T15:05:00.000Z'
+  }
+];
+
 function initialData() {
   return {
     schemaVersion: 1,
@@ -79,6 +102,7 @@ function initialData() {
     campusCardApplications: [],
     orders: [],
     afterSales: [],
+    productReviews: seedProductReviews,
     leads: [],
     phoneCardOrders: [
       { id: 'tel_1001', customerName: '张同学', phone: '138****3201', planName: '校园畅享卡', amountInCents: 2900, status: 'PENDING_REALNAME', createdAt: '2026-08-28T08:20:00.000Z' },
@@ -119,7 +143,7 @@ class JsonStore {
       if (!data || !Array.isArray(data.products)) throw new Error('invalid database');
       const defaults = initialData();
       let changed = false;
-      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'leads', 'auditLogs', 'merchants']) {
+      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'leads', 'auditLogs', 'merchants']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) { data.adminSettings = defaults.adminSettings; changed = true; }

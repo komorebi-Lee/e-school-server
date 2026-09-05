@@ -86,6 +86,10 @@ test('active product detail exposes merchant and stock', async () => {
   assert.equal(result.body.data.id, 'prod_ebike_001');
   assert.equal(result.body.data.merchantName, '狮山校园车行');
   assert.equal(typeof result.body.data.stock, 'number');
+  assert.equal(result.body.data.ratingSummary.average, 4.5);
+  assert.equal(result.body.data.ratingSummary.purchaseVerifiedCount, 2);
+  assert.equal(result.body.data.reviews.length, 2);
+  assert.ok(result.body.data.reviews.every((review) => review.purchaseVerified));
 
   const missing = await api('/api/products/not_exists');
   assert.equal(missing.response.status, 404);

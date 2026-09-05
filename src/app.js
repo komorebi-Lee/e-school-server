@@ -158,6 +158,20 @@ function withMerchantName(product, merchants) {
   return { ...product, merchantName: merchants.find((merchant) => merchant.id === product.merchantId)?.name || '平台自营' };
 }
 
+function withProductReviewSummary(product, reviews = []) {
+  const matched = reviews.filter((review) => review.productId === product.id && review.purchaseVerified);
+  if (!matched.length) return { ...product, ratingSummary: { average: 0, count: 0, purchaseVerifiedCount: 0 } };
+  const average = matched.reduce((sum, review) => sum + (Number(review.rating) || 0), 0) / matched.length;
+  return {
+    ...product,
+    ratingSummary: {
+      average: Math.round(average * 10) / 10,
+      count: matched.length,
+      purchaseVerifiedCount: matched.length
+    }
+  };
+}
+
 function createCollaboration(order, merchantId) {
   return {
     merchantId,
@@ -391,7 +405,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/products') {
-        const { products } = store.read();
+        const data = store.read();
+        const products = data.products;
         const category = url.searchParams.get('category');
         const campusId = url.searchParams.get('campusId');
         const query = (url.searchParams.get('q') || '').trim().toLowerCase();
@@ -399,14 +414,33 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .filter((product) => !category || product.category === category)
           .filter((product) => !campusId || product.campusIds.includes(campusId))
           .filter((product) => !query || `${product.name} ${product.description}`.toLowerCase().includes(query));
-        return sendJson(response, 200, { data: items.map((product) => withMerchantName(product, store.read().merchants || [])), total: items.length, requestId });
+        return sendJson(response, 200, { data: items.map((product) => withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])), total: items.length, requestId });
       }
 
       const productMatch = pathname.match(/^\/api\/products\/([^/]+)$/);
       if (request.method === 'GET' && productMatch) {
-        const product = store.read().products.find((item) => item.id === productMatch[1] && item.active);
+        const data = store.read();
+        const product = data.products.find((item) => item.id === productMatch[1] && item.active);
         if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
-        return sendJson(response, 200, { data: withMerchantName(product, store.read().merchants || []), requestId });
+        return sendJson(response, 200, {
+          data: {
+            ...withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || []),
+            reviews: (data.productReviews || [])
+              .filter((review) => review.productId === product.id)
+              .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+              .slice(0, 5)
+              .map((review) => ({
+                id: review.id,
+                rating: Number(review.rating) || 0,
+                content: review.content,
+                customerName: review.customerName,
+                college: review.college,
+                purchaseVerified: review.purchaseVerified !== false,
+                createdAt: review.createdAt
+              }))
+          },
+          requestId
+        });
       }
 
       if (request.method === 'POST' && pathname === '/api/order-collab') {
