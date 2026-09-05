@@ -80,6 +80,18 @@ test('health and product list are available', async () => {
   assert.ok(products.body.data.every((item) => Number.isInteger(item.priceInCents)));
 });
 
+test('active product detail exposes merchant and stock', async () => {
+  const result = await api('/api/products/prod_ebike_001');
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.data.id, 'prod_ebike_001');
+  assert.equal(result.body.data.merchantName, '狮山校园车行');
+  assert.equal(typeof result.body.data.stock, 'number');
+
+  const missing = await api('/api/products/not_exists');
+  assert.equal(missing.response.status, 404);
+  assert.equal(missing.body.error.code, 'PRODUCT_NOT_FOUND');
+});
+
 test('campus card application requires consent and masks private fields', async () => {
   const session = await loginWeChat('card_user');
   const invalid = await api('/api/campus-card-applications', {

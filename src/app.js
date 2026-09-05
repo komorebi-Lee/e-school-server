@@ -394,6 +394,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: items.map((product) => withMerchantName(product, store.read().merchants || [])), total: items.length, requestId });
       }
 
+      const productMatch = pathname.match(/^\/api\/products\/([^/]+)$/);
+      if (request.method === 'GET' && productMatch) {
+        const product = store.read().products.find((item) => item.id === productMatch[1] && item.active);
+        if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+        return sendJson(response, 200, { data: withMerchantName(product, store.read().merchants || []), requestId });
+      }
+
       if (request.method === 'POST' && pathname === '/api/order-collab') {
         const body = await readJson(request);
         const role = body.role || 'USER';
@@ -888,13 +895,6 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           data.adminSettings = current; addAudit(data, '更新系统设置', '运营配置'); return current;
         });
         return sendJson(response, 200, { data: settings, requestId });
-      }
-
-      const productMatch = pathname.match(/^\/api\/products\/([^/]+)$/);
-      if (request.method === 'GET' && productMatch) {
-        const product = store.read().products.find((item) => item.id === productMatch[1] && item.active);
-        if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
-        return sendJson(response, 200, { data: product, requestId });
       }
 
       if (request.method === 'POST' && pathname === '/api/campus-card-applications') {
