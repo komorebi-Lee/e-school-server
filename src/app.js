@@ -849,8 +849,27 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const data = store.read();
             const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
             if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
-            const products = data.products.filter((item) => item.merchantId === merchant.id);
-            const merchantProductIds = new Set(products.map((product) => product.id));
+        const products = data.products.filter((item) => item.merchantId === merchant.id);
+        const merchantProductIds = new Set(products.map((product) => product.id));
+        const reviews = (data.productReviews || [])
+          .filter((review) => merchantProductIds.has(review.productId))
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+          .slice(0, 50)
+          .map((review) => ({
+            id: review.id,
+            orderId: review.orderId,
+            productId: review.productId,
+            productName: products.find((product) => product.id === review.productId)?.name || review.productId,
+            rating: review.rating,
+            content: review.content,
+            customerName: review.customerName,
+            college: review.college,
+            purchaseVerified: review.purchaseVerified !== false,
+            visibility: review.visibility || 'PUBLISHED',
+            images: Array.isArray(review.images) ? review.images.slice(0, 3) : [],
+            reply: review.reply || null,
+            createdAt: review.createdAt
+          }));
             const orders = data.orders
               .filter((order) => order.items.some((item) => merchantProductIds.has(item.productId) || item.merchantId === merchant.id))
               .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -877,11 +896,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               pendingCount: orders.filter((order) => !['COMPLETED', 'CANCELLED', 'AFTER_SALE'].includes(order.status)).length,
               productCount: products.length,
               lowStockCount: products.filter((product) => product.stock < 10).length,
+              reviewCount: reviews.length,
+              pendingReplyCount: reviews.filter((review) => !review.reply).length,
               settlementMetrics
             },
             products,
             orders: enrichedOrders,
             afterSales,
+            reviews,
             settlements
           },
           requestId
@@ -1380,6 +1402,27 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/admin/leads/export') { const leads=store.read().leads||[]; return sendJson(response,200,{data:leads,requestId}); }
 
       const adminReviewVisibilityMatch = pathname.match(/^\/api\/admin\/product-reviews\/([^/]+)\/visibility$/);
+      const merchantReviewReplyMatch = pathname.match(/^\/api\/merchant\/product-reviews\/([^/]+)\/reply$/);
+      if (request.method === 'POST' && merchantReviewReplyMatch) {
+        const body = await readJson(request);
+        const content = requireString(body.content, 'content', { maxLength: 300 });
+        const review = store.update((data) => {
+          const item = (data.productReviews || []).find((record) => record.id === merchantReviewReplyMatch[1]);
+          if (!item) throw new ApiError(404, 'REVIEW_NOT_FOUND', 'Review not found');
+          const ownsProduct = data.products.some((product) => product.id === item.productId && product.merchantId === merchantSession.merchantId);
+          if (!ownsProduct) throw new ApiError(403, 'REVIEW_FORBIDDEN', '只能回复自己店铺的商品评价');
+          item.reply = {
+            merchantName: data.merchants.find((merchant) => merchant.id === merchantSession.merchantId)?.name || '商家回复',
+            content,
+            repliedAt: new Date().toISOString()
+          };
+          item.updatedAt = item.reply.repliedAt;
+          addAudit(data, '商家回复商品评价', item.productId);
+          return item;
+        });
+        return sendJson(response, 200, { data: review, requestId });
+      }
+
       if (request.method === 'POST' && adminReviewVisibilityMatch) {
         const body = await readJson(request);
         const visibility = requireString(body.visibility, 'visibility', { maxLength: 20 });

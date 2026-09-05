@@ -777,6 +777,31 @@ test('completed order owner can submit one verified product review', async () =>
   const restoredDetail = await api(`/api/products/${product.body.data.id}`);
   assert.equal(restoredDetail.body.data.ratingSummary.purchaseVerifiedCount, 1);
   assert.equal(restoredDetail.body.data.reviews[0].id, review.body.data.id);
+
+  const merchantOverview = await api('/api/merchant/overview', { headers: merchantLogin.body.data.token ? { authorization: `Bearer ${merchantLogin.body.data.token}` } : {} });
+  assert.equal(merchantOverview.response.status, 200);
+  const merchantReview = merchantOverview.body.data.reviews.find((item) => item.id === review.body.data.id);
+  assert.ok(merchantReview);
+  assert.equal(merchantOverview.body.data.metrics.pendingReplyCount, 1);
+
+  const otherMerchantReply = await api(`/api/merchant/product-reviews/${review.body.data.id}/reply`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ content: '' })
+  });
+  assert.equal(otherMerchantReply.response.status, 400);
+
+  const merchantReply = await api(`/api/merchant/product-reviews/${review.body.data.id}/reply`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ content: '感谢反馈，我们会持续检查车辆与配送服务。' })
+  });
+  assert.equal(merchantReply.response.status, 200);
+  assert.equal(merchantReply.body.data.reply.merchantName, '评价测试车行');
+  assert.equal(merchantReply.body.data.reply.content, '感谢反馈，我们会持续检查车辆与配送服务。');
+
+  const repliedOverview = await api('/api/merchant/overview', { headers: { authorization: `Bearer ${merchantLogin.body.data.token}` } });
+  assert.equal(repliedOverview.body.data.metrics.pendingReplyCount, 0);
+  const repliedDetail = await api(`/api/products/${product.body.data.id}`);
+  assert.equal(repliedDetail.body.data.reviews[0].reply.content, '感谢反馈，我们会持续检查车辆与配送服务。');
 });
 
 test('admin order status update rejects unsupported status', async () => {
