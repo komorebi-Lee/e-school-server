@@ -1095,8 +1095,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             userId,
             orderId,
             type,
+            typeLabel: { REFUND: '申请退款', RETURN: '退货', REPAIR: '维修' }[type] || type,
             reason,
             status: 'SUBMITTED',
+            responseDueAt: new Date(new Date(now).getTime() + 24 * 60 * 60 * 1000).toISOString(),
+            resolutionDueAt: new Date(new Date(now).getTime() + 72 * 60 * 60 * 1000).toISOString(),
             createdAt: now,
             updatedAt: now
           };

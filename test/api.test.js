@@ -158,6 +158,9 @@ test('after-sale request checks order ownership and prevents duplicates', async 
   });
   assert.equal(created.response.status, 201);
   assert.equal(created.body.data.status, 'SUBMITTED');
+  assert.equal(created.body.data.typeLabel, '申请退款');
+  assert.ok(created.body.data.responseDueAt);
+  assert.ok(created.body.data.resolutionDueAt);
 
   const duplicate = await api('/api/after-sales', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
