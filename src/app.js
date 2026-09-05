@@ -940,6 +940,16 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }
         const idempotencyKey = (request.headers['idempotency-key'] || '').trim();
         if (idempotencyKey.length > 128) throw new ApiError(400, 'VALIDATION_ERROR', 'Idempotency-Key is too long');
+        if (body.fulfillment !== undefined) {
+          if (!body.fulfillment || typeof body.fulfillment !== 'object') throw new ApiError(400, 'VALIDATION_ERROR', 'fulfillment 格式不正确');
+          if (body.fulfillment.type === 'DELIVERY') {
+            const contactName = requireString(body.fulfillment.contactName, 'fulfillment.contactName', { maxLength: 50 });
+            const contactPhone = requireString(body.fulfillment.contactPhone, 'fulfillment.contactPhone', { maxLength: 30 });
+            const address = requireString(body.fulfillment.address, 'fulfillment.address', { maxLength: 120 });
+            if (!/^1\d{10}$/.test(contactPhone)) throw new ApiError(400, 'VALIDATION_ERROR', '请输入正确的联系手机号');
+            if (!contactName || !address) throw new ApiError(400, 'VALIDATION_ERROR', '请填写联系人和校内配送地址');
+          }
+        }
 
         const result = store.update((data) => {
           const compoundKey = idempotencyKey ? `${userId}:${idempotencyKey}` : '';
@@ -1033,7 +1043,20 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const order = data.orders.find((item) => item.id === orderMatch[1] && item.userId === userId);
           if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
           if (['COMPLETED', 'CANCELLED', 'AFTER_SALE'].includes(order.status)) throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', 'Current order cannot be edited');
-          if (body.fulfillment && typeof body.fulfillment === 'object') order.fulfillment = { ...order.fulfillment, ...body.fulfillment };
+          if (body.fulfillment && typeof body.fulfillment === 'object') {
+            if (order.fulfillment?.type === 'DELIVERY') {
+              if (body.fulfillment.type && body.fulfillment.type !== 'DELIVERY') throw new ApiError(400, 'VALIDATION_ERROR', '当前订单不支持切换为自提');
+              const mergedFulfillment = { ...order.fulfillment, ...body.fulfillment, type: 'DELIVERY' };
+              const contactName = requireString(mergedFulfillment.contactName, 'fulfillment.contactName', { maxLength: 50 });
+              const contactPhone = requireString(mergedFulfillment.contactPhone, 'fulfillment.contactPhone', { maxLength: 30 });
+              const address = requireString(mergedFulfillment.address, 'fulfillment.address', { maxLength: 120 });
+              if (!/^1\d{10}$/.test(contactPhone)) throw new ApiError(400, 'VALIDATION_ERROR', '请输入正确的联系手机号');
+              if (!contactName || !address) throw new ApiError(400, 'VALIDATION_ERROR', '请填写联系人和校内配送地址');
+              order.fulfillment = mergedFulfillment;
+            } else if (body.fulfillment.type === 'DELIVERY') {
+              throw new ApiError(400, 'VALIDATION_ERROR', '当前订单不支持切换为校内配送');
+            }
+          }
           order.updatedAt = new Date().toISOString();
           return order;
         });

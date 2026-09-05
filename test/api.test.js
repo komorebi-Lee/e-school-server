@@ -166,6 +166,51 @@ test('after-sale request checks order ownership and prevents duplicates', async 
   assert.equal(duplicate.response.status, 409);
 });
 
+test('delivery orders require valid campus fulfillment details', async () => {
+  const session = await loginWeChat('delivery_user');
+  const invalid = await api('/api/orders', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      items: [{ productId: 'prod_ebike_001', quantity: 1 }],
+      fulfillment: { type: 'DELIVERY', contactName: '李同学', contactPhone: '123', address: '' }
+    })
+  });
+  assert.equal(invalid.response.status, 400);
+  assert.equal(invalid.body.error.code, 'VALIDATION_ERROR');
+
+  const created = await api('/api/orders', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      items: [{ productId: 'prod_ebike_001', quantity: 1 }],
+      fulfillment: {
+        type: 'DELIVERY', contactName: '李同学', contactPhone: '15527111396',
+        address: '荟园学生社区', date: '2026-09-06'
+      }
+    })
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.data.fulfillment.address, '荟园学生社区');
+
+  const orderId = created.body.data.id;
+  const cannotSwitch = await api(`/api/orders/${orderId}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ fulfillment: { type: 'PICKUP' } })
+  });
+  assert.equal(cannotSwitch.response.status, 400);
+
+  const updated = await api(`/api/orders/${orderId}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ fulfillment: { address: '荟园学生社区 7 栋', date: '2026-09-07' } })
+  });
+  assert.equal(updated.response.status, 200);
+  assert.equal(updated.body.data.fulfillment.address, '荟园学生社区 7 栋');
+  assert.equal(updated.body.data.fulfillment.contactName, '李同学');
+});
+
 test('stock validation rejects excessive quantities', async () => {
   const session = await loginWeChat('u3');
   const result = await api('/api/orders', {
