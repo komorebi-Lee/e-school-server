@@ -149,6 +149,8 @@ function initialData() {
     payoutRequests: [],
     financeEvents: [],
     notifications: [],
+    slaAlerts: [],
+    patrolState: { lastRunAt: '', runCount: 0, lastCreated: 0, lastResolved: 0, lastOpen: 0 },
     afterSales: [],
     productReviews: seedProductReviews,
     rechargePromos: seedRechargePromos,
@@ -180,6 +182,12 @@ function initialData() {
       plateResponseHours: 48,
       afterSaleResponseHours: 24,
       afterSaleResolutionHours: 72,
+      phoneCardActivationHours: 24,
+      rechargeCreditHours: 12,
+      broadbandVerifyHours: 48,
+      payoutReviewHours: 48,
+      leadResponseHours: 24,
+      patrolIntervalMinutes: 10,
       paymentTimeoutMinutes: 30,
       settlementPeriodDays: 7,
       payoutMinimumInCents: 10000,
@@ -210,10 +218,11 @@ class JsonStore {
       if (!data || !Array.isArray(data.products)) throw new Error('invalid database');
       const defaults = initialData();
       let changed = false;
-      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'notifications']) {
+      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'notifications', 'slaAlerts']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) { data.adminSettings = defaults.adminSettings; changed = true; }
+      if (!data.patrolState || typeof data.patrolState !== 'object') { data.patrolState = defaults.patrolState; changed = true; }
       if (changed) this.write(data);
     } catch (error) {
       throw new Error(`Cannot load JSON database at ${this.filePath}: ${error.message}`);

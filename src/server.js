@@ -54,6 +54,14 @@ function ensureDefaultSettings(store) {
   });
 }
 
+function ensureCollections(store) {
+  const defaults = initialData();
+  store.update((data) => {
+    if (!Array.isArray(data.slaAlerts)) data.slaAlerts = defaults.slaAlerts;
+    if (!data.patrolState || typeof data.patrolState !== 'object') data.patrolState = defaults.patrolState;
+  });
+}
+
 async function bootstrap() {
   const port = Number(process.env.PORT || 3000);
   const databasePath = process.env.DB_FILE || path.join(__dirname, '..', 'data', 'db.json');
@@ -82,12 +90,24 @@ async function bootstrap() {
   ensureDefaultProducts(store);
   ensureDefaultRechargePromos(store);
   ensureDefaultSettings(store);
-  const server = http.createServer(createApp({ store }));
+  ensureCollections(store);
+  const app = createApp({ store });
+  const server = http.createServer(app);
+  // 运营巡检定时任务：不再依赖有人打开管理端才发现超时。
+  const patrol = app.startOperationsPatrol({
+    onRun: (result) => {
+      if (result.created.length || result.escalated.length || result.resolved.length) {
+        console.log(`[patrol] +${result.created.length} 新增 · ${result.escalated.length} 升级 · -${result.resolved.length} 关闭 · ${result.open} 待处理`);
+      }
+    }
+  });
+  console.log(`Operations patrol every ${patrol.intervalMinutes} minute(s)`);
   server.listen(port, '0.0.0.0', () => {
     console.log(`Campus Go API listening on http://localhost:${port}`);
   });
 
   function shutdown() {
+    patrol.stop();
     server.close(() => process.exit(0));
   }
   process.on('SIGINT', shutdown);

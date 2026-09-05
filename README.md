@@ -198,6 +198,52 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 平台在「商家结算」页直接打款（`/api/admin/merchants/:id/settle`）也会补记一条 `initiatedBy: "PLATFORM"` 的已结算提现单，保证台账口径一致。
 - 订单进入售后或退款时，关联的待审核提现单会自动置为 `CANCELLED`，未受影响的金额退回 `PENDING_SETTLE`；商家与平台都会收到通知。
 
+### 运营巡检与超时预警
+
+服务启动后会常驻一个巡检定时任务，把「谁该在什么时候处理完」变成可查、可提醒、可复盘的预警工单，不再依赖有人打开管理端才发现逾期。
+
+巡检覆盖 8 条规则，每条规则各自对应一个时限配置：
+
+| 规则 | 触发条件 | 时限配置（默认） | 责任方 |
+| --- | --- | --- | --- |
+| `ORDER_DELIVERY` | 订单处于 `PAID` / `FULFILLING` | `deliveryResponseHours`（24h，从支付时间起算） | 商家 |
+| `PHONE_ACTIVATION` | 电话卡订单 `PENDING_REALNAME` | `phoneCardActivationHours`（24h） | 平台 |
+| `RECHARGE_CREDIT` | 话费权益 `PENDING_CREDIT` | `rechargeCreditHours`（12h） | 平台 |
+| `BROADBAND_VERIFY` | 宽带资格 `PENDING_VERIFY` | `broadbandVerifyHours`（48h） | 平台 |
+| `PLATE_PROGRESS` | 牌照工单 `MATERIAL_PENDING` / `REVIEWING` | `plateResponseHours`（48h） | 平台 |
+| `AFTER_SALE_RESPONSE` | 售后工单 `SUBMITTED` | 工单上的 `responseDueAt`（`afterSaleResponseHours`，24h） | 商家 |
+| `AFTER_SALE_RESOLUTION` | 售后工单未关闭 | 工单上的 `resolutionDueAt`（`afterSaleResolutionHours`，72h） | 商家 |
+| `PAYOUT_REVIEW` | 提现单 `PENDING_REVIEW` | `payoutReviewHours`（48h） | 平台 |
+| `LEAD_FOLLOW_UP` | 线索 `SUBMITTED` / `FOLLOW_UP` | 线索上的 `slaDueAt`（`leadResponseHours`，24h） | 平台 |
+
+预警工单状态机：
+
+```
+进入预警窗口 → WARNING 即将超时
+超过承诺时限 → OVERDUE 已超时（记录 overdueMinutes）
+平台认领     → ACKNOWLEDGED 已认领（保留 level 与 acknowledgeNote）
+业务推进到下一环节 → RESOLVED 自动关闭（记录 resolvedAt / resolvedReason）
+```
+
+- 预警提前量取巡检间隔的 12 倍，最少 1 小时、最多 6 小时；`patrolIntervalMinutes` 控制巡检间隔（1–1440 分钟，默认 10）。
+- 同一条业务在同一规则下只会有一张未关闭的预警，重复巡检不会重复开单。
+- 从 `WARNING` 升级为 `OVERDUE` 时会再提醒一次，同一等级只提醒一次（记录在 `notifiedLevels`）。
+- 责任方是商家的预警会写一条 `SLA` 类型站内通知给该商家；责任方是平台但涉及某商家的预警，会给商家一条「平台正在处理中」的知会。
+- 巡检不改变任何业务状态，只维护预警工单，因此重复运行是安全的。
+
+`GET /api/admin/sla-alerts`（可选 `?status=OPEN|ACKNOWLEDGED|RESOLVED`）返回预警列表、`summary` 汇总与 `patrolState`。
+
+`POST /api/admin/patrol/run` 立即执行一轮巡检，返回本轮 `created` / `escalated` / `resolved` / `open`，用于处理完一批工单后马上刷新。
+
+`POST /api/admin/sla-alerts/:id/acknowledge`，body `{ "note": "已电话联系商家" }`
+
+- `note` 必填，否则 400；已自动关闭的预警再认领返回 409 `SLA_ALERT_RESOLVED`。
+- 认领后会把处理说明同步给责任商家。
+
+管理端「超时预警」页展示已超时 / 即将超时 / 待商家处理 / 待平台处理四张指标卡、上次巡检时间与「立即巡检」按钮，明细表可按状态或等级筛选、认领处理并跳转到对应业务列表。经营概览新增「履约超时预警」指标卡与「超时预警认领」「商家提现审核」两个待办入口。
+
+小程序商家工作台顶部会出现「履约提醒」卡片，只展示该商家自己负责的预警，带倒计时（剩余 / 已超时）与平台跟进说明。
+
 ## 当前边界
 
 - `userId` 是模拟身份参数，生产环境应从微信登录后的服务端会话中取得，不能信任客户端传值。
@@ -206,4 +252,6 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 未接入真实微信支付、实名服务、校方校园卡系统、物流或消息通知。
 - 库存已实现“预占 → 支付扣减 → 取消/超时释放 → 退款回补”闭环，但仍是单进程 JSON/MySQL 快照方案，高并发场景需要数据库行级锁或独立库存服务。
 - 超时关单依赖读接口触发的惰性清扫（商品、订单、概览接口），没有独立定时任务；长时间无人访问时订单会在下一次访问时统一关闭。
-- 分账账期到期同样依赖读接口惰性清扫，没有独立定时任务；提现审核与打款仍是人工在管理端确认的模拟动作，未接入真实企业付款/企业转账接口，也没有银行回单附件上传与批量打款。
+- 分账账期到期依赖读接口惰性清扫；运营巡检已有独立定时任务（`patrolIntervalMinutes`），但仍是单进程内的 `setInterval`，多实例部署时会重复执行，需要改为分布式任务或选主。
+- 提现审核与打款仍是人工在管理端确认的模拟动作，未接入真实企业付款/企业转账接口，也没有银行回单附件上传与批量打款。
+- 超时预警只做站内通知，未接入微信订阅消息、短信或企业微信告警；也没有把履约超时率沉淀成店铺评分。

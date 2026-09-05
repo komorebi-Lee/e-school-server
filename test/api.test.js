@@ -1912,3 +1912,122 @@ test('after-sale closes a pending payout request and returns the money to the ba
   });
   assert.equal(restored.response.status, 200);
 });
+
+test('operations patrol raises overdue alerts and closes them when work moves on', async () => {
+  const adminHeaders = await loginAdmin();
+  const configured = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ deliveryResponseHours: 2, phoneCardActivationHours: 2, patrolIntervalMinutes: 1 })
+  });
+  assert.equal(configured.response.status, 200);
+
+  const buyer = await loginWeChat('patrol_buyer');
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(order.response.status, 201);
+  await confirmPayment(order.body.paymentOrder.id, buyer.token);
+
+  const card = await api('/api/phone-card-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ productId: 'prod_card_service_001', customerName: '巡检同学', phone: '15527112233' })
+  });
+  assert.equal(card.response.status, 201);
+  await confirmPayment(card.body.paymentOrder.id, buyer.token);
+
+  // 把两笔业务的时间往前拨，模拟真实世界里已经拖过承诺时限的单子。
+  const staleAt = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+  store.update((data) => {
+    const paidOrder = data.orders.find((item) => item.id === order.body.data.id);
+    paidOrder.paidAt = staleAt;
+    paidOrder.updatedAt = staleAt;
+    const phoneCard = data.phoneCardOrders.find((item) => item.id === card.body.data.id);
+    phoneCard.updatedAt = staleAt;
+    data.patrolState = { lastRunAt: '', runCount: 0, lastCreated: 0, lastResolved: 0, lastOpen: 0 };
+  });
+
+  const firstRun = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(firstRun.response.status, 200);
+  assert.ok(firstRun.body.data.created >= 2);
+  assert.ok(firstRun.body.data.patrolState.lastRunAt);
+
+  const alerts = await api('/api/admin/sla-alerts', { headers: adminHeaders });
+  assert.equal(alerts.response.status, 200);
+  const deliveryAlert = alerts.body.data.find((item) => item.ruleKey === 'ORDER_DELIVERY' && item.businessId === order.body.data.id);
+  assert.ok(deliveryAlert, '应生成电瓶车履约超时预警');
+  assert.equal(deliveryAlert.level, 'OVERDUE');
+  assert.equal(deliveryAlert.ownerRole, 'MERCHANT');
+  assert.equal(deliveryAlert.merchantId, 'merchant_001');
+  assert.ok(deliveryAlert.overdueMinutes >= 60);
+  const cardAlert = alerts.body.data.find((item) => item.ruleKey === 'PHONE_ACTIVATION' && item.businessId === card.body.data.id);
+  assert.ok(cardAlert, '应生成电话卡激活超时预警');
+  assert.equal(cardAlert.ownerRole, 'PLATFORM');
+  assert.ok(alerts.body.summary.overdueCount >= 2);
+
+  // 责任商家应在自己的工作台看到属于自己的预警，且看不到平台内部事项。
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const merchantHeaders = { authorization: `Bearer ${merchantLogin.body.data.token}` };
+  const merchantOverview = await api('/api/merchant/overview', { headers: merchantHeaders });
+  assert.ok(merchantOverview.body.data.slaAlerts.some((item) => item.businessId === order.body.data.id));
+  assert.ok(merchantOverview.body.data.slaAlerts.every((item) => item.ownerRole === 'MERCHANT'));
+  assert.ok(merchantOverview.body.data.metrics.slaOverdueCount >= 1);
+  const merchantNotifications = await api('/api/merchant/notifications', { headers: merchantHeaders });
+  assert.ok(merchantNotifications.body.data.some((item) => item.type === 'SLA' && item.title === '履约已超时'));
+
+  // 重复巡检不应重复开单。
+  const secondRun = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(secondRun.body.data.created, 0);
+
+  const acknowledged = await api(`/api/admin/sla-alerts/${deliveryAlert.id}/acknowledge`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ note: '已电话联系商家，今晚完成配送' })
+  });
+  assert.equal(acknowledged.response.status, 200);
+  assert.equal(acknowledged.body.data.status, 'ACKNOWLEDGED');
+  assert.equal(acknowledged.body.data.acknowledgeNote, '已电话联系商家，今晚完成配送');
+
+  const emptyNote = await api(`/api/admin/sla-alerts/${cardAlert.id}/acknowledge`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ note: '' })
+  });
+  assert.equal(emptyNote.response.status, 400);
+
+  // 业务推进到下一环节后，预警应自动关闭。
+  const detail = await api(`/api/orders/${order.body.data.id}`, { headers: { authorization: `Bearer ${buyer.token}` } });
+  await api(`/api/merchant/orders/${order.body.data.id}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', ...merchantHeaders },
+    body: JSON.stringify({ status: 'COMPLETED', deliveryCode: detail.body.data.deliveryCode })
+  });
+  await api(`/api/admin/phone-card-orders/${card.body.data.id}/status`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ status: 'ACTIVATED' })
+  });
+  const thirdRun = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.ok(thirdRun.body.data.resolved >= 2);
+
+  const afterResolve = await api('/api/admin/sla-alerts', { headers: adminHeaders });
+  const closedDelivery = afterResolve.body.data.find((item) => item.id === deliveryAlert.id);
+  assert.equal(closedDelivery.status, 'RESOLVED');
+  assert.ok(closedDelivery.resolvedAt);
+  assert.ok(closedDelivery.resolvedReason.length > 0);
+
+  const resolvedOnly = await api('/api/admin/sla-alerts?status=RESOLVED', { headers: adminHeaders });
+  assert.ok(resolvedOnly.body.data.every((item) => item.status === 'RESOLVED'));
+
+  const overview = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.equal(typeof overview.body.data.slaSummary.openCount, 'number');
+  assert.ok(overview.body.data.patrolState.runCount >= 3);
+
+  const invalidInterval = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ patrolIntervalMinutes: 0 })
+  });
+  assert.equal(invalidInterval.response.status, 400);
+
+  const restored = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ deliveryResponseHours: 24, phoneCardActivationHours: 24, patrolIntervalMinutes: 10 })
+  });
+  assert.equal(restored.response.status, 200);
+});

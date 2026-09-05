@@ -804,6 +804,324 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     return store.update((data) => expirePendingOrders(data, new Date().toISOString()));
   }
 
+  // ---------------------------------------------------------------------------
+  // 运营巡检：把「谁该在什么时候处理完」变成可查、可提醒、可复盘的超时预警工单。
+  // ---------------------------------------------------------------------------
+  function slaHours(data, field, fallback) {
+    const value = Number(data?.adminSettings?.[field]);
+    return Number.isInteger(value) && value >= 1 && value <= 168 ? value : fallback;
+  }
+
+  function addHours(baseIso, hours) {
+    const base = new Date(baseIso || Date.now()).getTime();
+    return new Date(base + hours * 60 * 60 * 1000).toISOString();
+  }
+
+  // 每条规则回答三个问题：哪些单在等人处理、最晚什么时候要处理完、逾期该找谁。
+  function collectSlaTargets(data) {
+    const targets = [];
+    const merchantName = (merchantId) => (data.merchants || []).find((item) => item.id === merchantId)?.name || '';
+    const orderMerchantId = (order) => order.collaboration?.merchantId
+      || order.items?.[0]?.merchantId
+      || (data.products || []).find((product) => product.id === order.items?.[0]?.productId)?.merchantId
+      || '';
+
+    for (const order of data.orders || []) {
+      if (!['PAID', 'FULFILLING'].includes(order.status)) continue;
+      const merchantId = orderMerchantId(order);
+      targets.push({
+        ruleKey: 'ORDER_DELIVERY',
+        ruleLabel: '电瓶车订单履约',
+        businessType: 'ORDER',
+        businessId: order.id,
+        businessNo: order.orderNo || order.id,
+        ownerRole: 'MERCHANT',
+        merchantId,
+        merchantName: merchantName(merchantId),
+        userId: order.userId || '',
+        dueAt: addHours(order.paidAt || order.updatedAt || order.createdAt, slaHours(data, 'deliveryResponseHours', 24)),
+        detail: `${order.status === 'PAID' ? '已支付待接单' : '配送中待交付核验'} · ${(order.items || []).map((item) => item.name).join('、') || '订单商品'}`
+      });
+    }
+
+    for (const record of data.phoneCardOrders || []) {
+      if (record.status !== 'PENDING_REALNAME') continue;
+      targets.push({
+        ruleKey: 'PHONE_ACTIVATION',
+        ruleLabel: '电话卡实名激活',
+        businessType: 'PHONE_PLAN',
+        businessId: record.id,
+        businessNo: record.id,
+        ownerRole: 'PLATFORM',
+        merchantId: '',
+        merchantName: '',
+        userId: record.userId || '',
+        dueAt: addHours(record.updatedAt || record.createdAt, slaHours(data, 'phoneCardActivationHours', 24)),
+        detail: `${record.planName || '校园电话卡'} · ${record.customerName || ''} ${record.phone || ''}`.trim()
+      });
+    }
+
+    for (const record of data.rechargeOrders || []) {
+      if (record.status !== 'PENDING_CREDIT') continue;
+      targets.push({
+        ruleKey: 'RECHARGE_CREDIT',
+        ruleLabel: '话费权益到账',
+        businessType: 'RECHARGE',
+        businessId: record.id,
+        businessNo: record.id,
+        ownerRole: 'PLATFORM',
+        merchantId: '',
+        merchantName: '',
+        userId: record.userId || '',
+        dueAt: addHours(record.updatedAt || record.createdAt, slaHours(data, 'rechargeCreditHours', 12)),
+        detail: `充 ${Math.round((record.paidInCents || 0) / 100)} 送 ${Math.round(((record.receiveInCents || 0) - (record.paidInCents || 0)) / 100)} · ${record.phone || ''}`
+      });
+    }
+
+    for (const record of data.broadbandApplications || []) {
+      if (record.status !== 'PENDING_VERIFY') continue;
+      targets.push({
+        ruleKey: 'BROADBAND_VERIFY',
+        ruleLabel: '双人宽带资格核验',
+        businessType: 'BROADBAND',
+        businessId: record.id,
+        businessNo: record.id,
+        ownerRole: 'PLATFORM',
+        merchantId: '',
+        merchantName: '',
+        userId: record.userId || '',
+        dueAt: addHours(record.updatedAt || record.createdAt, slaHours(data, 'broadbandVerifyHours', 48)),
+        detail: `${record.ownerPhone || ''} + ${record.companionPhone || ''}`
+      });
+    }
+
+    for (const record of data.plateApplications || []) {
+      if (!['MATERIAL_PENDING', 'REVIEWING'].includes(record.status)) continue;
+      targets.push({
+        ruleKey: 'PLATE_PROGRESS',
+        ruleLabel: '校园牌照辅助跟进',
+        businessType: 'PLATE',
+        businessId: record.id,
+        businessNo: record.id,
+        ownerRole: 'PLATFORM',
+        merchantId: '',
+        merchantName: '',
+        userId: record.userId || '',
+        dueAt: addHours(record.updatedAt || record.createdAt, slaHours(data, 'plateResponseHours', 48)),
+        detail: `${record.vehicleModel || '车辆'} · ${record.status === 'MATERIAL_PENDING' ? '等待材料核对' : '审核中'}`
+      });
+    }
+
+    for (const record of data.afterSales || []) {
+      if (record.status === 'CLOSED') continue;
+      const order = (data.orders || []).find((item) => item.id === record.orderId);
+      const merchantId = order ? orderMerchantId(order) : '';
+      const shared = {
+        businessType: 'AFTER_SALE',
+        businessId: record.id,
+        businessNo: record.id,
+        ownerRole: 'MERCHANT',
+        merchantId,
+        merchantName: merchantName(merchantId),
+        userId: record.userId || '',
+        detail: `${record.typeLabel || record.type} · ${record.reason || ''}`.slice(0, 120)
+      };
+      if (record.status === 'SUBMITTED') {
+        targets.push({
+          ...shared,
+          ruleKey: 'AFTER_SALE_RESPONSE',
+          ruleLabel: '售后首次响应',
+          dueAt: record.responseDueAt || addHours(record.createdAt, slaHours(data, 'afterSaleResponseHours', 24))
+        });
+      }
+      targets.push({
+        ...shared,
+        ruleKey: 'AFTER_SALE_RESOLUTION',
+        ruleLabel: '售后处理完成',
+        dueAt: record.resolutionDueAt || addHours(record.createdAt, slaHours(data, 'afterSaleResolutionHours', 72))
+      });
+    }
+
+    for (const record of data.payoutRequests || []) {
+      if (record.status !== 'PENDING_REVIEW') continue;
+      targets.push({
+        ruleKey: 'PAYOUT_REVIEW',
+        ruleLabel: '商家提现审核',
+        businessType: 'PAYOUT',
+        businessId: record.id,
+        businessNo: record.requestNo || record.id,
+        ownerRole: 'PLATFORM',
+        merchantId: record.merchantId || '',
+        merchantName: record.merchantName || '',
+        userId: '',
+        dueAt: addHours(record.createdAt, slaHours(data, 'payoutReviewHours', 48)),
+        detail: `${record.merchantName || record.merchantId} 申请 ¥${((record.amountInCents || 0) / 100).toFixed(2)}`
+      });
+    }
+
+    for (const record of data.leads || []) {
+      if (!openLeadStatuses.has(record.status)) continue;
+      targets.push({
+        ruleKey: 'LEAD_FOLLOW_UP',
+        ruleLabel: '咨询线索跟进',
+        businessType: 'LEAD',
+        businessId: record.id,
+        businessNo: record.leadNo || record.id,
+        ownerRole: 'PLATFORM',
+        merchantId: '',
+        merchantName: '',
+        userId: record.userId || '',
+        dueAt: record.slaDueAt || addHours(record.createdAt, slaHours(data, 'leadResponseHours', 24)),
+        detail: `${record.businessType || '咨询'} · ${record.name || ''} ${record.phone || ''}`.trim()
+      });
+    }
+
+    return targets;
+  }
+
+  function patrolWarningWindowMs(data) {
+    // 预警提前量：取巡检间隔的 12 倍，最少 1 小时、最多 6 小时，保证运营有反应时间。
+    const interval = Number(data?.adminSettings?.patrolIntervalMinutes);
+    const minutes = Number.isInteger(interval) && interval >= 1 && interval <= 1440 ? interval : 10;
+    return Math.min(Math.max(minutes * 12, 60), 360) * 60 * 1000;
+  }
+
+  // 巡检一轮：新增/升级超时预警、关闭已完成事项的预警，并把结果写进 patrolState。
+  function runOperationsPatrol(data, now = new Date().toISOString()) {
+    if (!Array.isArray(data.slaAlerts)) data.slaAlerts = [];
+    const nowMs = new Date(now).getTime();
+    const warningWindowMs = patrolWarningWindowMs(data);
+    const targets = collectSlaTargets(data);
+    const openAlerts = data.slaAlerts.filter((alert) => alert.status !== 'RESOLVED');
+    const seen = new Set();
+    const created = [];
+    const escalated = [];
+
+    for (const target of targets) {
+      const dueMs = new Date(target.dueAt).getTime();
+      if (!Number.isFinite(dueMs)) continue;
+      const key = `${target.ruleKey}:${target.businessId}`;
+      const level = dueMs <= nowMs ? 'OVERDUE' : (dueMs - nowMs <= warningWindowMs ? 'WARNING' : '');
+      if (!level) continue;
+      seen.add(key);
+      const overdueMinutes = level === 'OVERDUE' ? Math.floor((nowMs - dueMs) / 60000) : 0;
+      const existing = openAlerts.find((alert) => `${alert.ruleKey}:${alert.businessId}` === key);
+      if (existing) {
+        const wasLevel = existing.level;
+        Object.assign(existing, {
+          level,
+          overdueMinutes,
+          dueAt: target.dueAt,
+          detail: target.detail,
+          merchantId: target.merchantId,
+          merchantName: target.merchantName,
+          updatedAt: now
+        });
+        if (wasLevel !== level) {
+          escalated.push(existing);
+          // 从预警升级为超时时重新提醒一次，但不会重复刷同一等级。
+          if (!existing.notifiedLevels.includes(level)) {
+            existing.notifiedLevels.push(level);
+            notifySlaAlert(data, existing);
+          }
+        }
+        continue;
+      }
+      const alert = {
+        id: `sla_${randomUUID()}`,
+        alertNo: `SLA${Date.now().toString().slice(-8)}${Math.floor(Math.random() * 90 + 10)}`,
+        ruleKey: target.ruleKey,
+        ruleLabel: target.ruleLabel,
+        businessType: target.businessType,
+        businessId: target.businessId,
+        businessNo: target.businessNo,
+        ownerRole: target.ownerRole,
+        merchantId: target.merchantId,
+        merchantName: target.merchantName,
+        userId: target.userId,
+        detail: target.detail,
+        dueAt: target.dueAt,
+        level,
+        overdueMinutes,
+        status: 'OPEN',
+        notifiedLevels: [level],
+        acknowledgedAt: '',
+        acknowledgeNote: '',
+        resolvedAt: '',
+        resolvedReason: '',
+        createdAt: now,
+        updatedAt: now
+      };
+      data.slaAlerts.unshift(alert);
+      created.push(alert);
+      notifySlaAlert(data, alert);
+    }
+
+    const resolved = [];
+    for (const alert of openAlerts) {
+      if (seen.has(`${alert.ruleKey}:${alert.businessId}`)) continue;
+      alert.status = 'RESOLVED';
+      alert.resolvedAt = now;
+      alert.resolvedReason = alert.resolvedReason || '业务已推进到下一环节，预警自动关闭';
+      alert.updatedAt = now;
+      resolved.push(alert);
+    }
+
+    data.slaAlerts = data.slaAlerts.slice(0, 1000);
+    const stillOpen = data.slaAlerts.filter((alert) => alert.status !== 'RESOLVED');
+    data.patrolState = {
+      lastRunAt: now,
+      runCount: Number(data.patrolState?.runCount || 0) + 1,
+      lastCreated: created.length,
+      lastResolved: resolved.length,
+      lastOpen: stillOpen.length
+    };
+    if (created.length || resolved.length || escalated.length) {
+      addAudit(data, '运营巡检执行', `新增 ${created.length} · 升级 ${escalated.length} · 关闭 ${resolved.length}`);
+    }
+    return { created, escalated, resolved, open: stillOpen.length };
+  }
+
+  function notifySlaAlert(data, alert) {
+    const overdueText = alert.level === 'OVERDUE'
+      ? `已超时 ${alert.overdueMinutes >= 60 ? `${Math.floor(alert.overdueMinutes / 60)} 小时` : `${alert.overdueMinutes} 分钟`}`
+      : '即将超时';
+    const content = `${alert.ruleLabel}：${alert.businessNo} ${overdueText}，请尽快处理。${alert.detail ? `（${alert.detail}）` : ''}`.slice(0, 300);
+    if (alert.ownerRole === 'MERCHANT' && alert.merchantId) {
+      notifyMerchant(data, alert.merchantId, 'SLA', alert.level === 'OVERDUE' ? '履约已超时' : '履约即将超时', content);
+    }
+    if (alert.ownerRole === 'PLATFORM' && alert.merchantId) {
+      notifyMerchant(data, alert.merchantId, 'SLA', '平台正在处理中', `${alert.ruleLabel}：${alert.businessNo} ${overdueText}，平台已收到提醒。`);
+    }
+  }
+
+  function patrolOnce() {
+    return store.update((data) => runOperationsPatrol(data, new Date().toISOString()));
+  }
+
+  // 读接口顺带触发巡检，但按巡检间隔节流，避免每次请求都全量扫描。
+  function sweepOperationsPatrol() {
+    const snapshot = store.read();
+    const interval = Number(snapshot.adminSettings?.patrolIntervalMinutes);
+    const minutes = Number.isInteger(interval) && interval >= 1 && interval <= 1440 ? interval : 10;
+    const lastRunAt = snapshot.patrolState?.lastRunAt;
+    if (lastRunAt && Date.now() - new Date(lastRunAt).getTime() < minutes * 60 * 1000) return null;
+    return patrolOnce();
+  }
+
+  function slaSummary(alerts) {
+    const open = alerts.filter((alert) => alert.status !== 'RESOLVED');
+    return {
+      openCount: open.length,
+      overdueCount: open.filter((alert) => alert.level === 'OVERDUE').length,
+      warningCount: open.filter((alert) => alert.level === 'WARNING').length,
+      acknowledgedCount: open.filter((alert) => alert.status === 'ACKNOWLEDGED').length,
+      merchantOwnedCount: open.filter((alert) => alert.ownerRole === 'MERCHANT').length,
+      platformOwnedCount: open.filter((alert) => alert.ownerRole === 'PLATFORM').length,
+      resolvedCount: alerts.length - open.length
+    };
+  }
+
 function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
     const number = Number(value);
     if (!Number.isInteger(number) || number < 0 || number > max) throw new ApiError(400, 'VALIDATION_ERROR', `${field} 格式不正确`);
@@ -822,7 +1140,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
     for (let index = 0; index < 17; index += 1) sum += Number(value[index]) * weights[index];
     return checksums[sum % 11] === value[17].toUpperCase();
   }
-  return async function app(request, response) {
+  const handler = async function app(request, response) {
     const requestId = randomUUID();
     try {
       if (request.method === 'OPTIONS') return sendJson(response, 204, {});
@@ -1245,6 +1563,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/merchant/overview') {
         sweepExpiredOrders();
         sweepMaturedSettlements();
+        sweepOperationsPatrol();
         const data = store.read();
             const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
             if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
@@ -1289,6 +1608,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           ...settlementSummary(settlements)
         };
         const afterSales = (data.afterSales || []).filter((record) => orders.some((order) => order.id === record.orderId));
+        // 商家只看得到需要自己处理的超时预警，平台内部事项不下发。
+        const slaAlerts = (data.slaAlerts || [])
+          .filter((alert) => alert.status !== 'RESOLVED' && alert.ownerRole === 'MERCHANT' && alert.merchantId === merchant.id)
+          .sort((a, b) => String(a.dueAt).localeCompare(String(b.dueAt)));
         const revenueInCents = orders.filter((order) => ['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(order.status))
           .reduce((sum, order) => sum + (order.totalInCents || 0), 0);
         return sendJson(response, 200, {
@@ -1304,6 +1627,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               afterSaleOverdueCount: afterSales.filter((record) => record.status !== 'CLOSED' && record.responseDueAt && record.responseDueAt < new Date().toISOString()).length,
               reviewCount: reviews.length,
               pendingReplyCount: reviews.filter((review) => !review.reply).length,
+              slaOpenCount: slaAlerts.length,
+              slaOverdueCount: slaAlerts.filter((alert) => alert.level === 'OVERDUE').length,
               settlementMetrics
             },
             products: products.map(withAvailableStock),
@@ -1311,7 +1636,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             afterSales,
             reviews,
             settlements,
-            payoutRequests
+            payoutRequests,
+            slaAlerts
           },
           requestId
         });
@@ -1496,6 +1822,59 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
+      // 运营巡检：手动立即跑一轮，用于处理完一批工单后马上刷新预警。
+      if (request.method === 'POST' && pathname === '/api/admin/patrol/run') {
+        const result = patrolOnce();
+        const data = store.read();
+        return sendJson(response, 200, {
+          data: {
+            created: result.created.length,
+            escalated: result.escalated.length,
+            resolved: result.resolved.length,
+            open: result.open,
+            patrolState: data.patrolState || {},
+            slaSummary: slaSummary(data.slaAlerts || [])
+          },
+          requestId
+        });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/admin/sla-alerts') {
+        sweepOperationsPatrol();
+        const data = store.read();
+        const status = url.searchParams.get('status') || '';
+        const items = (data.slaAlerts || []).filter((alert) => !status || alert.status === status);
+        return sendJson(response, 200, {
+          data: items,
+          total: items.length,
+          summary: slaSummary(data.slaAlerts || []),
+          patrolState: data.patrolState || {},
+          requestId
+        });
+      }
+
+      const slaAckMatch = pathname.match(/^\/api\/admin\/sla-alerts\/([^/]+)\/acknowledge$/);
+      if (request.method === 'POST' && slaAckMatch) {
+        const body = await readJson(request);
+        const note = requireString(body.note, 'note', { maxLength: 200 });
+        const alert = store.update((data) => {
+          const item = (data.slaAlerts || []).find((row) => row.id === slaAckMatch[1]);
+          if (!item) throw new ApiError(404, 'SLA_ALERT_NOT_FOUND', '预警记录不存在');
+          if (item.status === 'RESOLVED') throw new ApiError(409, 'SLA_ALERT_RESOLVED', '该预警已自动关闭，无需处理');
+          const now = new Date().toISOString();
+          item.status = 'ACKNOWLEDGED';
+          item.acknowledgedAt = now;
+          item.acknowledgeNote = note;
+          item.updatedAt = now;
+          addAudit(data, '认领超时预警', `${item.ruleLabel} ${item.businessNo}`);
+          if (item.ownerRole === 'MERCHANT' && item.merchantId) {
+            notifyMerchant(data, item.merchantId, 'SLA', '平台已跟进超时事项', `${item.ruleLabel}：${item.businessNo} 平台处理意见：${note}`);
+          }
+          return item;
+        });
+        return sendJson(response, 200, { data: alert, requestId });
+      }
+
       const adminPaymentRefundMatch = pathname.match(/^\/api\/admin\/payment-orders\/([^/]+)\/refund$/);
       if (request.method === 'POST' && adminPaymentRefundMatch) {
         const updated = store.update((data) => {
@@ -1555,6 +1934,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/admin/overview') {
         sweepExpiredOrders();
         sweepMaturedSettlements();
+        sweepOperationsPatrol();
         const data = store.read();
         const leads = data.leads || [];
         const revenueInCents = data.orders.filter((item) => item.status !== 'PENDING_PAYMENT' && item.status !== 'CANCELLED').reduce((sum, order) => sum + (order.totalInCents || 0), 0)
@@ -1597,6 +1977,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             payoutRequests: data.payoutRequests || [],
             financeEvents: data.financeEvents || [],
             financeSummary,
+            slaAlerts: data.slaAlerts || [],
+            slaSummary: slaSummary(data.slaAlerts || []),
+            patrolState: data.patrolState || {},
             settings: data.adminSettings,
             auditLogs: data.auditLogs
             ,leads
@@ -2176,12 +2559,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isInteger(rate) || rate < 0 || rate > 50) throw new ApiError(400, 'VALIDATION_ERROR', '平台佣金比例需为 0-50 的整数');
             current.commissionRatePercent = rate;
           }
-          for (const field of ['deliveryResponseHours', 'plateResponseHours', 'afterSaleResponseHours', 'afterSaleResolutionHours']) {
+          for (const field of ['deliveryResponseHours', 'plateResponseHours', 'afterSaleResponseHours', 'afterSaleResolutionHours', 'phoneCardActivationHours', 'rechargeCreditHours', 'broadbandVerifyHours', 'payoutReviewHours', 'leadResponseHours']) {
             if (body[field] !== undefined) {
               const hours = Number(body[field]);
               if (!Number.isInteger(hours) || hours < 1 || hours > 168) throw new ApiError(400, 'VALIDATION_ERROR', `${field} 需为 1-168 小时`);
               current[field] = hours;
             }
+          }
+          if (body.patrolIntervalMinutes !== undefined) {
+            const minutes = Number(body.patrolIntervalMinutes);
+            if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) throw new ApiError(400, 'VALIDATION_ERROR', '巡检间隔需为 1-1440 分钟');
+            current.patrolIntervalMinutes = minutes;
           }
           if (body.paymentTimeoutMinutes !== undefined) {
             const minutes = Number(body.paymentTimeoutMinutes);
@@ -2480,6 +2868,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             order.paymentStatus = 'PAID';
             order.status = 'PAID';
             order.updatedAt = now;
+            order.paidAt = order.paidAt || now;
             issueDeliveryCode(order, now);
             consumeOrderStock(data, order);
             const bikeItem = order.items.find((item) => (data.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
@@ -2703,6 +3092,26 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       });
     }
   };
+  // 定时巡检：由 server.js 启动，让超时预警不依赖有人访问接口。
+  handler.startOperationsPatrol = function startOperationsPatrol({ onRun } = {}) {
+    const settings = store.read().adminSettings || {};
+    const configured = Number(settings.patrolIntervalMinutes);
+    const minutes = Number.isInteger(configured) && configured >= 1 && configured <= 1440 ? configured : 10;
+    const tick = () => {
+      try {
+        const result = patrolOnce();
+        if (typeof onRun === 'function') onRun(result);
+      } catch (error) {
+        console.error('[patrol] run failed:', error.message);
+      }
+    };
+    tick();
+    const timer = setInterval(tick, minutes * 60 * 1000);
+    timer.unref?.();
+    return { intervalMinutes: minutes, stop: () => clearInterval(timer) };
+  };
+  handler.runOperationsPatrolOnce = patrolOnce;
+  return handler;
 }
 
 module.exports = { createApp, ApiError };
