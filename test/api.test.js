@@ -1108,3 +1108,45 @@ test('admin after-sale closure refunds paid orders and notifies users', async ()
   });
   assert.ok(notifications.body.data.some((item) => item.type === 'ORDER' && item.title === '订单已退款'));
 });
+
+test('external plate applications require paid service fee and support refunds', async () => {
+  const session = await loginWeChat('external_plate_user');
+  const created = await api('/api/plate-applications', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ customerName: '外部车上牌同学', customerPhone: '15527111396', vehicleModel: '自有通勤车' })
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.data.status, 'PENDING_PAYMENT');
+  assert.equal(created.body.data.paymentStatus, 'UNPAID');
+  assert.equal(created.body.paymentOrder.businessType, 'PLATE');
+  assert.equal(created.body.paymentOrder.status, 'PENDING');
+
+  const payment = await confirmPayment(created.body.paymentOrder.id, session.token);
+  assert.equal(payment.response.status, 200);
+  assert.equal(payment.body.data.plateApplication.status, 'MATERIAL_PENDING');
+  assert.equal(payment.body.data.plateApplication.paymentStatus, 'PAID');
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(adminLogin.response.status, 200);
+  const overviewBeforeRefund = await api('/api/admin/overview', {
+    method: 'GET', headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
+  });
+  assert.ok(overviewBeforeRefund.body.data.financeEvents.find((event) => event.referenceId === `PAYMENT_${created.body.paymentOrder.id}`));
+
+  const refunded = await api(`/api/admin/payment-orders/${created.body.paymentOrder.id}/refund`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ note: 'plate refund test' })
+  });
+  assert.equal(refunded.response.status, 200);
+  assert.equal(refunded.body.data.plateApplication.status, 'REJECTED');
+  assert.equal(refunded.body.data.plateApplication.paymentStatus, 'REFUNDED');
+  const overviewAfterRefund = await api('/api/admin/overview', {
+    method: 'GET', headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
+  });
+  assert.ok(overviewAfterRefund.body.data.financeEvents.find((event) => event.referenceId === `REFUND_${created.body.paymentOrder.id}`));
+});
