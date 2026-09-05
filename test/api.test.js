@@ -526,7 +526,37 @@ test('completed order owner can submit one verified product review', async () =>
 
   const detail = await api(`/api/products/${product.body.data.id}`);
   assert.equal(detail.body.data.ratingSummary.purchaseVerifiedCount, 1);
+  assert.equal(detail.body.data.reviews[0].id, review.body.data.id);
   assert.equal(detail.body.data.reviews[0].content, '配送很快，上牌指引也很清楚。');
+
+  const invalidVisibility = await api(`/api/admin/product-reviews/${review.body.data.id}/visibility`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ visibility: 'DELETED' })
+  });
+  assert.equal(invalidVisibility.response.status, 400);
+  assert.equal(invalidVisibility.body.error.code, 'VALIDATION_ERROR');
+
+  const hidden = await api(`/api/admin/product-reviews/${review.body.data.id}/visibility`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ visibility: 'HIDDEN' })
+  });
+  assert.equal(hidden.response.status, 200);
+  assert.equal(hidden.body.data.visibility, 'HIDDEN');
+
+  const hiddenDetail = await api(`/api/products/${product.body.data.id}`);
+  assert.equal(hiddenDetail.body.data.ratingSummary.purchaseVerifiedCount, 0);
+  assert.equal(hiddenDetail.body.data.reviews.length, 0);
+
+  const restored = await api(`/api/admin/product-reviews/${review.body.data.id}/visibility`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ visibility: 'PUBLISHED' })
+  });
+  assert.equal(restored.response.status, 200);
+  assert.equal(restored.body.data.visibility, 'PUBLISHED');
+
+  const restoredDetail = await api(`/api/products/${product.body.data.id}`);
+  assert.equal(restoredDetail.body.data.ratingSummary.purchaseVerifiedCount, 1);
+  assert.equal(restoredDetail.body.data.reviews[0].id, review.body.data.id);
 });
 
 test('admin order status update rejects unsupported status', async () => {

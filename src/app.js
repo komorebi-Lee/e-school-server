@@ -159,7 +159,7 @@ function withMerchantName(product, merchants) {
 }
 
 function withProductReviewSummary(product, reviews = []) {
-  const matched = reviews.filter((review) => review.productId === product.id && review.purchaseVerified);
+  const matched = reviews.filter((review) => review.productId === product.id && review.purchaseVerified && review.visibility !== 'HIDDEN');
   if (!matched.length) return { ...product, ratingSummary: { average: 0, count: 0, purchaseVerifiedCount: 0 } };
   const average = matched.reduce((sum, review) => sum + (Number(review.rating) || 0), 0) / matched.length;
   return {
@@ -431,7 +431,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           data: {
             ...withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || []),
             reviews: (data.productReviews || [])
-              .filter((review) => review.productId === product.id)
+              .filter((review) => review.productId === product.id && review.visibility !== 'HIDDEN')
               .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
               .slice(0, 5)
               .map((review) => ({
@@ -476,6 +476,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             customerName: '校园同学',
             college: '华中农业大学',
             purchaseVerified: true,
+            visibility: 'PUBLISHED',
             createdAt: now
           };
           records.unshift(record);
@@ -490,6 +491,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             rating: review.rating,
             content: review.content,
             purchaseVerified: review.purchaseVerified,
+            visibility: review.visibility,
             createdAt: review.createdAt
           },
           requestId
@@ -777,6 +779,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             broadbandApplications: data.broadbandApplications,
             plateApplications: data.plateApplications,
             afterSales: data.afterSales,
+            productReviews: data.productReviews || [],
             settings: data.adminSettings,
             auditLogs: data.auditLogs
             ,leads
@@ -953,6 +956,22 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       const followMatch = pathname.match(/^\/api\/admin\/leads\/([^/]+)\/follow-ups$/);
       if (request.method === 'POST' && followMatch) { const body=await readJson(request); if (body.status !== undefined && !allowedLeadStatuses.has(body.status)) throw new ApiError(400,'VALIDATION_ERROR','Unsupported lead status. Use SUBMITTED, FOLLOW_UP, COMPLETED or INVALID.'); const updated=store.update(data=>{const item=(data.leads||[]).find(x=>x.id===followMatch[1]); if(!item) throw new ApiError(404,'LEAD_NOT_FOUND','Lead not found'); const text=requireString(body.content,'content',{maxLength:500}); item.followUps=item.followUps||[]; item.followUps.unshift({id:`fu_${randomUUID()}`,content:text,operator:body.operator||'运营管理员',createdAt:new Date().toISOString()}); if (body.status !== undefined) item.status=body.status; item.updatedAt=new Date().toISOString(); return item;}); return sendJson(response,200,{data:updated,requestId}); }
       if (request.method === 'GET' && pathname === '/api/admin/leads/export') { const leads=store.read().leads||[]; return sendJson(response,200,{data:leads,requestId}); }
+
+      const adminReviewVisibilityMatch = pathname.match(/^\/api\/admin\/product-reviews\/([^/]+)\/visibility$/);
+      if (request.method === 'POST' && adminReviewVisibilityMatch) {
+        const body = await readJson(request);
+        const visibility = requireString(body.visibility, 'visibility', { maxLength: 20 });
+        if (!['PUBLISHED', 'HIDDEN'].includes(visibility)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported review visibility');
+        const review = store.update((data) => {
+          const item = (data.productReviews || []).find((record) => record.id === adminReviewVisibilityMatch[1]);
+          if (!item) throw new ApiError(404, 'REVIEW_NOT_FOUND', 'Review not found');
+          item.visibility = visibility;
+          item.updatedAt = new Date().toISOString();
+          addAudit(data, visibility === 'HIDDEN' ? '隐藏商品评价' : '恢复商品评价', item.productId);
+          return item;
+        });
+        return sendJson(response, 200, { data: review, requestId });
+      }
 
       const adminStatusMatch = pathname.match(/^\/api\/admin\/(orders|phone-card-orders|recharge-orders|broadband-applications|plate-applications|after-sales)\/([^/]+)\/status$/);
       if (request.method === 'POST' && adminStatusMatch) {
