@@ -462,6 +462,73 @@ test('order collaboration is shared by user merchant and platform', async () => 
   assert.ok(appealed.body.data.collaboration.messages.some((message)=>message.role==='USER'));
 });
 
+test('completed order owner can submit one verified product review', async () => {
+  const userSession = await loginWeChat('review_owner');
+  const merchantSession = await loginWeChat('review_merchant');
+  const applied = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({
+      userId: 'review_merchant', merchantType: 'INDIVIDUAL', name: '评价测试车行', ownerName: '店长',
+      phone: '15527110003', licenseNo: '92420111MAKMT4534R', category: 'E_BIKE',
+      serviceArea: '狮山校区', description: '校内配送', licenseUrl: '/api/uploads/test-license.jpg',
+      agreeAgreement: true, agreePrivacy: true
+    })
+  });
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  await api(`/api/admin/merchants/${applied.body.data.id}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ status: 'APPROVED' })
+  });
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: applied.body.data.id })
+  });
+  const product = await api('/api/merchant/products', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ name: '评价测试车', category: 'E_BIKE_NEW', description: '适合校园通勤', priceInCents: 100000, stock: 3 })
+  });
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ items: [{ productId: product.body.data.id, quantity: 1 }] })
+  });
+  const orderId = created.body.data.id;
+
+  const pendingReview = await api('/api/product-reviews', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ orderId, productId: product.body.data.id, rating: 5, content: '配送很快' })
+  });
+  assert.equal(pendingReview.response.status, 409);
+
+  await api(`/api/merchant/orders/${orderId}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ status: 'FULFILLING' })
+  });
+  await api(`/api/merchant/orders/${orderId}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ status: 'COMPLETED' })
+  });
+
+  const review = await api('/api/product-reviews', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ orderId, productId: product.body.data.id, rating: 5, content: '配送很快，上牌指引也很清楚。' })
+  });
+  assert.equal(review.response.status, 201);
+  assert.equal(review.body.data.purchaseVerified, true);
+
+  const repeated = await api('/api/product-reviews', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ orderId, productId: product.body.data.id, rating: 4, content: '重复评价' })
+  });
+  assert.equal(repeated.response.status, 409);
+
+  const detail = await api(`/api/products/${product.body.data.id}`);
+  assert.equal(detail.body.data.ratingSummary.purchaseVerifiedCount, 1);
+  assert.equal(detail.body.data.reviews[0].content, '配送很快，上牌指引也很清楚。');
+});
+
 test('admin order status update rejects unsupported status', async () => {
   const adminLogin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },

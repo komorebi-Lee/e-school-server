@@ -448,6 +448,54 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         });
       }
 
+      if (request.method === 'POST' && pathname === '/api/product-reviews') {
+        const { userId } = requireUser(request);
+        const body = await readJson(request);
+        const orderId = requireString(body.orderId, 'orderId', { maxLength: 100 });
+        const productId = requireString(body.productId, 'productId', { maxLength: 100 });
+        const rating = Number(body.rating);
+        const content = requireString(body.content, 'content', { maxLength: 500 });
+        if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new ApiError(400, 'VALIDATION_ERROR', 'rating must be an integer between 1 and 5');
+        const review = store.update((data) => {
+          const order = data.orders.find((item) => item.id === orderId && item.userId === userId);
+          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+          if (order.status !== 'COMPLETED') throw new ApiError(409, 'ORDER_NOT_COMPLETED', 'Only completed orders can be reviewed');
+          if (!order.items.some((item) => item.productId === productId)) throw new ApiError(404, 'PRODUCT_NOT_IN_ORDER', 'Product not found in order');
+          const records = data.productReviews = data.productReviews || [];
+          if (records.some((item) => item.orderId === orderId && item.productId === productId)) {
+            throw new ApiError(409, 'REVIEW_ALREADY_EXISTS', 'This order product has already been reviewed');
+          }
+          const now = new Date().toISOString();
+          const record = {
+            id: `review_${randomUUID()}`,
+            orderId,
+            productId,
+            userId,
+            rating,
+            content,
+            customerName: '校园同学',
+            college: '华中农业大学',
+            purchaseVerified: true,
+            createdAt: now
+          };
+          records.unshift(record);
+          addAudit(data, '新增已购商品评价', productId);
+          return record;
+        });
+        return sendJson(response, 201, {
+          data: {
+            id: review.id,
+            orderId: review.orderId,
+            productId: review.productId,
+            rating: review.rating,
+            content: review.content,
+            purchaseVerified: review.purchaseVerified,
+            createdAt: review.createdAt
+          },
+          requestId
+        });
+      }
+
       if (request.method === 'POST' && pathname === '/api/order-collab') {
         const body = await readJson(request);
         const role = body.role || 'USER';
@@ -767,6 +815,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           return [...phoneCardOrders,...rechargeOrders,...broadbandApplications,...plateApplications];
         })();
         return sendJson(response,200,{data:{ebikeOrders,serviceRecords},requestId});
+      }
+
+      if (request.method === 'GET' && pathname === '/api/my/product-reviews') {
+        const { userId } = requireUser(request);
+        const records = (store.read().productReviews || [])
+          .filter((item) => item.userId === userId)
+          .map((item) => ({ id:item.id, orderId:item.orderId, productId:item.productId, rating:item.rating, createdAt:item.createdAt }));
+        return sendJson(response, 200, { data: records, total: records.length, requestId });
       }
       if (request.method === 'POST' && pathname === '/api/phone-card-orders') {
         const { userId } = requireUser(request);
