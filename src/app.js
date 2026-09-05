@@ -21,6 +21,14 @@ const allowedMerchantCategories = new Set(['E_BIKE', 'DIGITAL', 'FOOD', 'LIFE_SE
 const allowedMerchantStatuses = new Set(['REVIEWING', 'APPROVED', 'REJECTED']);
 const allowedMerchantOrderStatuses = new Set(['PAID', 'FULFILLING', 'COMPLETED', 'CANCELLED']);
 const allowedMerchantTypes = new Set(['INDIVIDUAL', 'ENTERPRISE', 'PERSONAL']);
+const adminOrderStatuses = {
+  orders: new Set(['PAID', 'FULFILLING', 'COMPLETED', 'CANCELLED', 'AFTER_SALE']),
+  'phone-card-orders': new Set(['PENDING_REALNAME', 'ACTIVATED', 'REJECTED']),
+  'recharge-orders': new Set(['PENDING_CREDIT', 'CREDITED', 'REJECTED']),
+  'broadband-applications': new Set(['PENDING_VERIFY', 'APPROVED', 'REJECTED']),
+  'plate-applications': new Set(['MATERIAL_PENDING', 'REVIEWING', 'COMPLETED', 'REJECTED']),
+  'after-sales': new Set(['SUBMITTED', 'REVIEWING', 'CLOSED'])
+};
 const identityVerifications = new Map();
 
 function isTlsInterceptionError(error) {
@@ -827,6 +835,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const status = requireString(body.status, 'status', { maxLength: 50 });
         const collectionMap = { orders: 'orders', 'phone-card-orders': 'phoneCardOrders', 'recharge-orders': 'rechargeOrders', 'broadband-applications': 'broadbandApplications', 'plate-applications': 'plateApplications', 'after-sales': 'afterSales' };
+        if (!adminOrderStatuses[adminStatusMatch[1]].has(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported status');
         const updated = store.update((data) => {
           const item = data[collectionMap[adminStatusMatch[1]]].find((record) => record.id === adminStatusMatch[2]);
           if (!item) throw new ApiError(404, 'ADMIN_RECORD_NOT_FOUND', 'Record not found');

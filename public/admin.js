@@ -42,7 +42,16 @@ bindView=function(){originalBindView();bindCollab()};
 async function saveStatus(button){const select=document.querySelector(`select[data-view="${button.dataset.view}"][data-id="${button.dataset.id}"]`);await api(`/api/admin/${endpointTypes[button.dataset.view]}/${button.dataset.id}/status`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({status:select.value})});showToast('业务状态已更新');await load()}
 function goView(view){state.view=view;state.query='';state.status='ALL';document.querySelectorAll('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.view===view));render()}
 function detailItem(labelText,value){return value===undefined||value===null||value===''?'':`<div class="detail-item"><small>${esc(labelText)}</small><strong>${esc(value)}</strong></div>`}
-function detailItem(labelText,value){return value===undefined||value===null||value===""?"":`<div class="detail-item"><small>${esc(labelText)}</small><strong>${esc(value)}</strong></div>`}
+function renderCollabTimeline(collab){
+  const events=(collab?.handoffs||[]).slice(0,8);
+  if(!events.length)return '<p class="muted-empty">暂无履约轨迹</p>';
+  const roleLabels={USER:'用户',MERCHANT:'商家',PLATFORM:'平台'};
+  return `<div class="timeline">${events.map(event=>`<div class="timeline-item"><strong>${esc(roleLabels[event.role]||'平台')} · ${esc(event.note||event.action||'状态更新')}</strong><span>${fmtDate(event.createdAt)}</span></div>`).join('')}</div>`;
+}
+function orderDeliveryRows(order){
+  if(order.fulfillment?.type!=='DELIVERY')return '';
+  return `<div class="detail-section"><h3>配送资料</h3><div class="detail-grid">${detailItem('联系人',order.fulfillment.contactName||'未填写')}${detailItem('联系电话',order.fulfillment.contactPhone||'未填写')}${detailItem('期望时间',order.fulfillment.date||'尽快配送')}${detailItem('校内地址',order.fulfillment.address||'未填写')}</div></div>`;
+}
 function openDetail(view,id){const key=view==="products"?"products":collections[view];const item=view==="merchants"?(state.data.merchants||[]).find(x=>x.id===id):state.data[key]?.find(x=>x.id===id);if(!item)return;const labels={application:"入驻申请",merchantName:"商家名称",applicationNo:"申请编号",type:"主体类型",category:"经营类目",contact:"联系人",phone:"联系电话",area:"服务区域",intro:"店铺简介",qualification:"资质材料",licenseNo:"营业执照编号",personalNoLicense:"个人身份入驻无需执照",licenseImage:"执照图片",identity:"实名核验",status:"核验状态",verified:"已通过模拟实名核验",unverified:"未完成实名核验",owner:"申请人姓名",id:"身份证号",time:"核验时间",conclusion:"核验结论",verifiedNote:"身份证号格式与校验码有效，且与申请人姓名匹配",unverifiedNote:"未取得有效实名凭证，不能通过审核",review:"审核信息",currentStatus:"当前状态",reviewNote:"审核备注",timeline:"处理记录",created:"记录创建",baseInfo:"基础信息",openLicense:"打开执照材料"};document.querySelector("#drawerTitle").textContent=view==="products"?item.name:view==="merchants"?(item.applicationNo||item.id):(item.orderNo||item.id);let body="";if(view==="merchants"){const identity=item.identityVerification;const identityVerified=identity?.status==="VERIFIED";const licenseLink=item.licenseUrl?`<a class="license-link" href="${esc(item.licenseUrl)}" target="_blank">${esc(labels.openLicense)}</a>`:"";body=`<div class="detail-section"><h3>${esc(labels.application)}</h3><div class="detail-grid">${detailItem(labels.merchantName,item.name)}${detailItem(labels.applicationNo,item.applicationNo)}${detailItem(labels.type,merchantTypeLabels[item.merchantType]||item.merchantType)}${detailItem(labels.category,merchantCategoryLabels[item.category]||item.category)}${detailItem(labels.contact,item.ownerName)}${detailItem(labels.phone,item.phone)}${detailItem(labels.area,item.serviceArea)}${detailItem(labels.intro,item.description)}</div></div><div class="detail-section"><h3>${esc(labels.qualification)}</h3><div class="detail-grid">${detailItem(labels.licenseNo,item.licenseNo||labels.personalNoLicense)}${item.licenseUrl?`<div class="detail-item"><small>${esc(labels.licenseImage)}</small><strong>${licenseLink}</strong></div>`:""}</div></div><div class="detail-section"><h3>${esc(labels.identity)}</h3><div class="detail-grid"><div class="detail-item"><small>${esc(labels.status)}</small><strong class="${identityVerified?"green":""}">${esc(identityVerified?labels.verified:labels.unverified)}</strong></div>${detailItem(labels.owner,identity?.ownerNameMasked)}${detailItem(labels.id,identity?.idNumberMasked)}${detailItem(labels.time,identity?.verifiedAt?fmtDate(identity.verifiedAt):"")}<div class="detail-item"><small>${esc(labels.conclusion)}</small><strong>${esc(identityVerified?labels.verifiedNote:labels.unverifiedNote)}</strong></div></div></div>`;}else{body=`<div class="detail-section"><h3>${esc(labels.baseInfo)}</h3><div class="detail-grid">${Object.entries(item).filter(([,v])=>typeof v!=="object").slice(0,10).map(([k,v])=>`<div class="detail-item"><small>${esc(k)}</small><strong>${esc(k.toLowerCase().includes("cents")?money(v):k.toLowerCase().includes("at")?fmtDate(v):label(v))}</strong></div>`).join("")}</div></div>`;}const review=`<div class="detail-section"><h3>${esc(labels.review)}</h3><div class="detail-grid">${detailItem(labels.currentStatus,label(item.status))}${detailItem(labels.reviewNote,item.reviewNote||"")}</div></div>`;const timeline=(item.timeline||[]).length?`<div class="detail-section"><h3>${esc(labels.timeline)}</h3><div class="timeline">${item.timeline.map(entry=>`<div class="timeline-item"><strong>${esc(label(entry.status))} / ${esc(entry.note)}</strong><span>${fmtDate(entry.createdAt)}</span></div>`).join("")}</div></div>`:`<div class="detail-section"><h3>${esc(labels.timeline)}</h3><div class="timeline"><div class="timeline-item"><strong>${esc(labels.created)}</strong><span>${fmtDate(item.createdAt)}</span></div><div class="timeline-item"><strong>${esc(labels.currentStatus)}\uFF1A${esc(label(item.status))}</strong><span>${fmtDate(item.updatedAt||item.createdAt)}</span></div></div></div>`;document.querySelector("#drawerBody").innerHTML=body+review+timeline;toggleDrawer(true)}
 function toggleDrawer(show){document.querySelector('#drawer').classList.toggle('hidden',!show);document.querySelector('#drawerBackdrop').classList.toggle('hidden',!show)}
 function openProduct(product){document.querySelector('#modalTitle').textContent=product?'编辑商品':'新增商品';document.querySelector('#productId').value=product?.id||'';document.querySelector('#productName').value=product?.name||'';document.querySelector('#productCategory').value=product?.category||'E_BIKE_NEW';document.querySelector('#productPrice').value=product?product.priceInCents/100:'';document.querySelector('#productStock').value=product?.stock??'';document.querySelector('#productDescription').value=product?.description||'';document.querySelector('#productActive').checked=product?.active!==false;toggleModal(true)}
@@ -133,4 +142,35 @@ const leadRenderBeforeActionPanel = render;
 render = function(){
   leadRenderBeforeActionPanel();
   document.querySelectorAll('.lead-open').forEach(btn => btn.addEventListener('click', () => openLeadPanel(btn.dataset.id)));
+};
+
+const baseOpenDetail = openDetail;
+openDetail = function(view, id){
+  if(view !== 'orders') return baseOpenDetail(view, id);
+  const item = (state.data.orders || []).find(x => x.id === id);
+  if(!item) return;
+  const merchant = (state.data.merchants || []).find(x => x.id === item.collaboration?.merchantId)?.name || '平台自营';
+  const orderItems = (item.items || []).map(orderItem => `${esc(orderItem.name)} × ${orderItem.quantity}`).join('、');
+  document.querySelector('#drawerTitle').textContent = item.orderNo || item.id;
+  const body = `<div class="detail-section"><h3>订单信息</h3><div class="detail-grid">
+    ${detailItem('订单编号', item.orderNo)}
+    ${detailItem('商品', orderItems)}
+    ${detailItem('商家', merchant)}
+    ${detailItem('实付金额', money(item.totalInCents))}
+    ${detailItem('支付状态', item.paymentStatus === 'MOCK_SUCCESS' ? '模拟支付成功' : '未支付')}
+    ${detailItem('创建时间', fmtDate(item.createdAt))}
+  </div></div>${orderDeliveryRows(item)}
+  <div class="detail-section"><h3>履约轨迹</h3>${renderCollabTimeline(item.collaboration)}</div>`;
+  const review = `<div class="detail-section"><h3>审核信息</h3><div class="detail-grid">
+    ${detailItem('当前状态', label(item.status))}
+    ${detailItem('审核备注', item.reviewNote || '')}
+  </div></div>`;
+  const timeline = (item.timeline || []).length ? `<div class="detail-section"><h3>处理记录</h3><div class="timeline">
+    ${item.timeline.map(entry => `<div class="timeline-item"><strong>${esc(label(entry.status))} / ${esc(entry.note)}</strong><span>${fmtDate(entry.createdAt)}</span></div>`).join('')}
+  </div></div>` : `<div class="detail-section"><h3>处理记录</h3><div class="timeline">
+    <div class="timeline-item"><strong>记录创建</strong><span>${fmtDate(item.createdAt)}</span></div>
+    <div class="timeline-item"><strong>当前状态：${esc(label(item.status))}</strong><span>${fmtDate(item.updatedAt || item.createdAt)}</span></div>
+  </div></div>`;
+  document.querySelector('#drawerBody').innerHTML = body + review + timeline;
+  toggleDrawer(true);
 };

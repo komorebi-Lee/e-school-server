@@ -400,3 +400,16 @@ test('order collaboration is shared by user merchant and platform', async () => 
   assert.equal(appealed.body.data.collaboration.intervention.status, 'REQUESTED');
   assert.ok(appealed.body.data.collaboration.messages.some((message)=>message.role==='USER'));
 });
+
+test('admin order status update rejects unsupported status', async () => {
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const response = await api('/api/admin/phone-card-orders/not-exists/status', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ status: 'BOGUS' })
+  });
+  assert.equal(response.response.status, 400);
+  assert.equal(response.body.error.code, 'VALIDATION_ERROR');
+});
