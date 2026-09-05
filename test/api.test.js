@@ -403,6 +403,11 @@ test('merchant can be approved and manage its own products and orders', async ()
   const settledOverview = await api('/api/merchant/overview', { headers: merchantAuth });
   assert.equal(settledOverview.body.data.metrics.settlementMetrics.payableInCents, 0);
   assert.equal(settledOverview.body.data.metrics.settlementMetrics.settledInCents, 2300);
+  const payoutOverview = await api('/api/admin/overview', { headers: { authorization: `Bearer ${adminLogin.body.data.token}` } });
+  const payoutFinanceEvent = payoutOverview.body.data.financeEvents.find((event) => event.eventType === 'PAYOUT' && event.settlementReference === 'TEST-PAYOUT-001');
+  assert.ok(payoutFinanceEvent);
+  assert.equal(payoutFinanceEvent.amountInCents, -2300);
+  assert.equal(payoutFinanceEvent.merchantId, applied.body.data.id);
   const resetRate = await api('/api/admin/settings', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
     body: JSON.stringify({ commissionRatePercent: 2 })
@@ -754,6 +759,10 @@ test('payment lifecycle creates notifications and supports cancel or refund', as
   assert.equal(linkedSettlement.settlementStatus, 'PENDING_SETTLE');
   assert.equal(linkedSettlement.commissionRatePercent, 2);
   assert.equal(linkedSettlement.payableAmountInCents, linkedSettlement.amountInCents - linkedSettlement.platformFeeInCents);
+  const paidFinanceEvent = adminOverviewBeforeRefund.body.data.financeEvents.find((event) => event.referenceId === `PAYMENT_${paidOrder.body.paymentOrder.id}`);
+  assert.ok(paidFinanceEvent);
+  assert.equal(paidFinanceEvent.amountInCents, paidOrder.body.paymentOrder.amountInCents);
+  assert.equal(linkedSettlement.payableAmountInCents, linkedSettlement.amountInCents - linkedSettlement.platformFeeInCents);
 
   const refund = await api(`/api/admin/payment-orders/${paidOrder.body.paymentOrder.id}/refund`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
@@ -768,6 +777,11 @@ test('payment lifecycle creates notifications and supports cancel or refund', as
   const refundedSettlement = adminOverviewAfterRefund.body.data.settlements.find((item) => item.paymentId === paidOrder.body.paymentOrder.id);
   assert.equal(refundedSettlement.settlementStatus, 'REFUNDED');
   assert.ok(refundedSettlement.refundedAt);
+  const refundFinanceEvent = adminOverviewAfterRefund.body.data.financeEvents.find((event) => event.referenceId === `REFUND_${paidOrder.body.paymentOrder.id}`);
+  assert.ok(refundFinanceEvent);
+  assert.equal(refundFinanceEvent.amountInCents, -paidOrder.body.paymentOrder.amountInCents);
+  assert.ok(adminOverviewAfterRefund.body.data.financeSummary.paymentInCents > 0);
+  assert.ok(adminOverviewAfterRefund.body.data.financeSummary.refundOutCents < 0);
 
   const notifications = await api('/api/my/notifications', {
     headers: { authorization: `Bearer ${session.token}` }

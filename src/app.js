@@ -273,6 +273,29 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     return notification;
   }
 
+  function addFinanceEvent(data, eventType, referenceId, amountInCents, meta = {}, now = new Date().toISOString()) {
+    if (!Array.isArray(data.financeEvents)) data.financeEvents = [];
+    const key = `${eventType}:${referenceId}`;
+    if (data.financeEvents.some((event) => `${event.eventType}:${event.referenceId}` === key)) return null;
+    const event = {
+      id: `fin_${randomUUID()}`,
+      eventType,
+      referenceId,
+      amountInCents: Number(amountInCents) || 0,
+      userId: meta.userId || '',
+      paymentNo: meta.paymentNo || '',
+      orderNo: meta.orderNo || '',
+      merchantId: meta.merchantId || '',
+      merchantName: meta.merchantName || '',
+      settlementReference: meta.settlementReference || '',
+      businessType: meta.businessType || '',
+      createdAt: now
+    };
+    data.financeEvents.unshift(event);
+    data.financeEvents = data.financeEvents.slice(0, 5000);
+    return event;
+  }
+
   function createSettlements(data, order, now) {
     if (!Array.isArray(data.settlements)) data.settlements = [];
     if (!order?.id || data.settlements.some((item) => item.orderId === order.id)) return [];
@@ -351,6 +374,11 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
       if (product) product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
     }
     markSettlementsRefunded(data, order.id, now);
+    if (paymentOrder) {
+      addFinanceEvent(data, 'REFUND', `REFUND_${paymentOrder.id}`, -(paymentOrder.amountInCents || 0), {
+        userId: order.userId, paymentNo: paymentOrder.paymentNo, orderNo: order.orderNo, businessType: 'ORDER'
+      }, now);
+    }
     addAudit(data, '\u552e\u540e\u9000\u6b3e\u5b8c\u6210', order.orderNo);
     addNotification(data, order.userId, 'ORDER', '\u8ba2\u5355\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${order.orderNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
     return paymentOrder;
@@ -833,7 +861,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const result = store.update((data) => {
           const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
           if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号不可用');
-          const totalInCents = settleMerchant(data, merchant.id, new Date().toISOString(), settlementReference);
+          const now = new Date().toISOString();
+          const totalInCents = settleMerchant(data, merchant.id, now, settlementReference);
+          addFinanceEvent(data, 'PAYOUT', `PAYOUT_${merchant.id}_${now}`, -totalInCents, {
+            merchantId: merchant.id, merchantName: merchant.name, settlementReference
+          }, now);
           const settlementCount = (data.settlements || []).filter((item) => item.merchantId === merchant.id && item.settlementStatus === 'SETTLED').length;
           addAudit(data, '商家结算打款确认', `${merchant.name} ${settlementReference}`);
           addNotification(data, merchant.userId, 'SETTLEMENT', '结算已完成', `平台已确认结算 ${settlementCount} 笔，合计 ¥${(totalInCents / 100).toFixed(2)}。`);
@@ -983,6 +1015,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             }
           }
           markSettlementsRefunded(data, order?.id || '', now);
+          addFinanceEvent(data, 'REFUND', `REFUND_${paymentOrder.id}`, -(paymentOrder.amountInCents || 0), {
+            userId: paymentOrder.userId, paymentNo: paymentOrder.paymentNo, orderNo: order?.orderNo || '',
+            businessType: phoneCardOrder ? 'PHONE_PLAN' : rechargeOrder ? 'RECHARGE' : 'ORDER'
+          }, now);
           addAudit(data, '\u7ba1\u7406\u7aef\u9000\u6b3e', paymentOrder.paymentNo);
           if (rechargeOrder) {
             addNotification(data, paymentOrder.userId, 'RECHARGE', '\u8bdd\u8d39\u6743\u76ca\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${paymentOrder.paymentNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
@@ -1008,6 +1044,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           + data.rechargeOrders.filter((item) => item.status !== 'CREDITED').length
           + data.broadbandApplications.filter((item) => item.status !== 'APPROVED').length
           + data.plateApplications.filter((item) => item.status !== 'COMPLETED').length;
+        const financeEvents = data.financeEvents || [];
+        const financeSummary = {
+          paymentInCents: financeEvents.filter((event) => event.eventType === 'PAYMENT').reduce((sum, event) => sum + event.amountInCents, 0),
+          refundOutCents: financeEvents.filter((event) => event.eventType === 'REFUND').reduce((sum, event) => sum + event.amountInCents, 0),
+          payoutOutCents: financeEvents.filter((event) => event.eventType === 'PAYOUT').reduce((sum, event) => sum + event.amountInCents, 0),
+          netInCents: financeEvents.reduce((sum, event) => sum + event.amountInCents, 0)
+        };
         return sendJson(response, 200, {
           data: {
             metrics: { revenueInCents, paidOrders: data.orders.length + data.phoneCardOrders.length + data.rechargeOrders.length, pending, lowStock: data.products.filter((item) => item.stock < 10).length, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length },
@@ -1024,6 +1067,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             afterSales: data.afterSales,
             productReviews: data.productReviews || [],
             settlements: data.settlements || [],
+            financeEvents: data.financeEvents || [],
+            financeSummary,
             settings: data.adminSettings,
             auditLogs: data.auditLogs
             ,leads
@@ -1041,7 +1086,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!merchant.settlementAccountName || !merchant.settlementBank || !merchant.settlementAccount) {
             throw new ApiError(409, 'SETTLEMENT_ACCOUNT_INCOMPLETE', '商家收款账户资料不完整，暂不能结算');
           }
-          const totalInCents = settleMerchant(data, merchant.id, new Date().toISOString(), settlementReference);
+          const now = new Date().toISOString();
+          const totalInCents = settleMerchant(data, merchant.id, now, settlementReference);
+          addFinanceEvent(data, 'PAYOUT', `PAYOUT_${merchant.id}_${now}`, -totalInCents, {
+            merchantId: merchant.id, merchantName: merchant.name, settlementReference
+          }, now);
           const settlementCount = (data.settlements || []).filter((item) => item.merchantId === merchant.id && item.settlementStatus === 'SETTLED').length;
           addAudit(data, '平台确认商家结算', `${merchant.name} ${settlementReference}`);
           addNotification(data, merchant.userId, 'SETTLEMENT', '结算已完成', `平台已确认结算 ${settlementCount} 笔，合计 ¥${(totalInCents / 100).toFixed(2)}。`);
@@ -1681,6 +1730,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           linkedOrder.collaboration ||= createCollaboration(linkedOrder, linkedOrder.items[0]?.merchantId || '');
           createSettlements(innerData, linkedOrder, now);
+          addFinanceEvent(innerData, 'PAYMENT', `PAYMENT_${payment.id}`, payment.amountInCents, {
+            userId, paymentNo: payment.paymentNo, orderNo: linkedOrder.orderNo, businessType: 'ORDER'
+          }, now);
           linkedOrder.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'\u652f\u4ed8\u6210\u529f\uff0c\u5f85\u5546\u5bb6\u786e\u8ba4\u5c65\u7ea6\u3002', createdAt:now });
           addAudit(innerData, '\u7528\u6237\u6a21\u62df\u652f\u4ed8\u6210\u529f', linkedOrder.orderNo);
           addNotification(innerData, userId, 'ORDER', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${linkedOrder.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
@@ -1712,6 +1764,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               rechargeOrder.status = 'PENDING_CREDIT';
               rechargeOrder.paymentStatus = 'PAID';
               rechargeOrder.updatedAt = now;
+              addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
+                userId, paymentNo: paymentOrder.paymentNo, businessType: 'RECHARGE'
+              }, now);
               addAudit(data, '\u8bdd\u8d39\u6743\u76ca\u652f\u4ed8\u6210\u529f', rechargeOrder.id);
               addNotification(data, userId, 'RECHARGE', '\u8bdd\u8d39\u6743\u76ca\u652f\u4ed8\u6210\u529f', `\u5145 ${Math.round(rechargeOrder.paidInCents/100)} \u9001 ${Math.round((rechargeOrder.receiveInCents-rechargeOrder.paidInCents)/100)} \u5df2\u652f\u4ed8\uff0c\u7b49\u5f85\u8fd0\u8425\u786e\u8ba4\u5230\u8d26\u3002`);
               return { rechargeOrder, paymentOrder };
@@ -1720,6 +1775,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               phoneCardOrder.status = 'PENDING_REALNAME';
               phoneCardOrder.paymentStatus = 'PAID';
               phoneCardOrder.updatedAt = now;
+              addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
+                userId, paymentNo: paymentOrder.paymentNo, businessType: 'PHONE_PLAN'
+              }, now);
               addAudit(data, '电话卡支付成功', phoneCardOrder.id);
               addNotification(data, userId, 'PHONE_PLAN', '电话卡支付成功', `${phoneCardOrder.planName} 已支付，运营将在 24 小时内联系实名激活。`);
               return { phoneCardOrder, paymentOrder };
@@ -1754,6 +1812,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             }
             order.collaboration ||= createCollaboration(order, order.items[0]?.merchantId || '');
             createSettlements(data, order, now);
+            addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
+              userId, paymentNo: paymentOrder.paymentNo, orderNo: order.orderNo, businessType: 'ORDER'
+            }, now);
             order.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'\u652f\u4ed8\u6210\u529f\uff0c\u5f85\u5546\u5bb6\u786e\u8ba4\u5c65\u7ea6\u3002', createdAt:now });
             addAudit(data, '\u6a21\u62df\u652f\u4ed8\u56de\u8c03\u6210\u529f', order.orderNo);
             addNotification(data, userId, 'ORDER', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${order.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
