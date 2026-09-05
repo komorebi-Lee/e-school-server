@@ -36,6 +36,26 @@ function isTlsInterceptionError(error) {
   return tlsCodes.has(error.code) || /self-signed/i.test(error.message);
 }
 
+function publicSettings(settings = {}) {
+  return {
+    brandName: settings.brandName || '狮山智生活',
+    schoolName: settings.schoolName || '华中农业大学',
+    campusName: settings.campusName || '狮山校区',
+    servicePhone: settings.servicePhone || '',
+    serviceWechat: settings.serviceWechat || '',
+    deliveryFeeInCents: settings.deliveryFeeInCents || 0,
+    deliveryResponseHours: settings.deliveryResponseHours || 24,
+    plateResponseHours: settings.plateResponseHours || 48,
+    afterSaleResponseHours: settings.afterSaleResponseHours || 24,
+    deliveryTimeSlots: Array.isArray(settings.deliveryTimeSlots) && settings.deliveryTimeSlots.length ? settings.deliveryTimeSlots : ['尽快配送'],
+    platformNotice: settings.platformNotice || '服务范围和办理结果以学校及合作方最终确认为准。'
+  };
+}
+
+function normalizeTimeSlot(value) {
+  return String(value || '').trim().slice(0, 40);
+}
+
 function wechatOpenApiRequest(pathname, rejectUnauthorized) {
   return new Promise((resolve, reject) => {
     const request = https.get(`https://api.weixin.qq.com${pathname}`, { rejectUnauthorized }, (response) => {
@@ -422,11 +442,16 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
+      if (request.method === 'GET' && pathname === '/api/business-config') {
+        return sendJson(response, 200, { data: publicSettings(store.read().adminSettings), requestId });
+      }
+
       const productMatch = pathname.match(/^\/api\/products\/([^/]+)$/);
       if (request.method === 'GET' && productMatch) {
         const data = store.read();
         const product = data.products.find((item) => item.id === productMatch[1] && item.active);
         if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+        const settings = publicSettings(data.adminSettings);
         const relatedProducts = data.products
           .filter((item) => item.active && item.id !== product.id && item.category === product.category)
           .slice(0, 3)
@@ -451,6 +476,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               }))
             ,
             relatedProducts
+            ,
+            settings
           },
           requestId
         });
@@ -1088,6 +1115,21 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const current = data.adminSettings || {};
           for (const field of ['brandName', 'schoolName', 'campusName', 'servicePhone', 'serviceWechat']) if (body[field] !== undefined) current[field] = requireString(body[field], field, { maxLength: 80 });
           if (body.externalPlateFeeInCents !== undefined) { const fee = Number(body.externalPlateFeeInCents); if (!Number.isInteger(fee) || fee < 0) throw new ApiError(400, 'VALIDATION_ERROR', '服务费格式不正确'); current.externalPlateFeeInCents = fee; }
+          if (body.deliveryFeeInCents !== undefined) { const fee = Number(body.deliveryFeeInCents); if (!Number.isInteger(fee) || fee < 0 || fee > 10000000) throw new ApiError(400, 'VALIDATION_ERROR', '配送费格式不正确'); current.deliveryFeeInCents = fee; }
+          for (const field of ['deliveryResponseHours', 'plateResponseHours', 'afterSaleResponseHours']) {
+            if (body[field] !== undefined) {
+              const hours = Number(body[field]);
+              if (!Number.isInteger(hours) || hours < 1 || hours > 168) throw new ApiError(400, 'VALIDATION_ERROR', `${field} 需为 1-168 小时`);
+              current[field] = hours;
+            }
+          }
+          if (body.deliveryTimeSlots !== undefined) {
+            if (!Array.isArray(body.deliveryTimeSlots) || body.deliveryTimeSlots.length < 1 || body.deliveryTimeSlots.length > 8) throw new ApiError(400, 'VALIDATION_ERROR', '配送时段需为 1-8 个');
+            const slots = body.deliveryTimeSlots.map(normalizeTimeSlot).filter(Boolean);
+            if (slots.length !== body.deliveryTimeSlots.length) throw new ApiError(400, 'VALIDATION_ERROR', '配送时段不能为空');
+            current.deliveryTimeSlots = slots;
+          }
+          if (body.platformNotice !== undefined) current.platformNotice = requireString(body.platformNotice, 'platformNotice', { maxLength: 200 });
           data.adminSettings = current; addAudit(data, '更新系统设置', '运营配置'); return current;
         });
         return sendJson(response, 200, { data: settings, requestId });
@@ -1144,6 +1186,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const address = requireString(body.fulfillment.address, 'fulfillment.address', { maxLength: 120 });
             if (!/^1\d{10}$/.test(contactPhone)) throw new ApiError(400, 'VALIDATION_ERROR', '请输入正确的联系手机号');
             if (!contactName || !address) throw new ApiError(400, 'VALIDATION_ERROR', '请填写联系人和校内配送地址');
+            if (body.fulfillment.timeSlot !== undefined) requireString(body.fulfillment.timeSlot, 'fulfillment.timeSlot', { maxLength: 40 });
           }
         }
 
@@ -1164,6 +1207,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           const orderItems = [];
           let totalInCents = 0;
+          const settings = data.adminSettings || {};
+          const deliveryFeeInCents = Number(settings.deliveryFeeInCents || 0);
           for (const [productId, quantity] of mergedQuantities) {
             const product = data.products.find((item) => item.id === productId && item.active);
             if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', `Product ${productId} not found`);
@@ -1175,6 +1220,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             totalInCents += subtotalInCents;
             orderItems.push({ productId, merchantId: product.merchantId || '', name: product.name, priceInCents: product.priceInCents, quantity, subtotalInCents });
           }
+          const isDelivery = body.fulfillment?.type === 'DELIVERY';
+          if (isDelivery) totalInCents += deliveryFeeInCents;
           const now = new Date().toISOString();
           const order = {
             id: `ord_${randomUUID()}`,
@@ -1186,6 +1233,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             status: 'PAID',
             paymentStatus: 'MOCK_SUCCESS',
             fulfillment: body.fulfillment || { type: 'PICKUP' },
+            feeSummary: {
+              itemsInCents: totalInCents - (isDelivery ? deliveryFeeInCents : 0),
+              deliveryFeeInCents: isDelivery ? deliveryFeeInCents : 0,
+              totalInCents
+            },
             createdAt: now,
             updatedAt: now,
             collaboration: createCollaboration({ createdAt: now, status:'PAID' }, orderItems[0]?.merchantId || '')
@@ -1248,6 +1300,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               const address = requireString(mergedFulfillment.address, 'fulfillment.address', { maxLength: 120 });
               if (!/^1\d{10}$/.test(contactPhone)) throw new ApiError(400, 'VALIDATION_ERROR', '请输入正确的联系手机号');
               if (!contactName || !address) throw new ApiError(400, 'VALIDATION_ERROR', '请填写联系人和校内配送地址');
+              if (body.fulfillment.timeSlot !== undefined) requireString(body.fulfillment.timeSlot, 'fulfillment.timeSlot', { maxLength: 40 });
               order.fulfillment = mergedFulfillment;
             } else if (body.fulfillment.type === 'DELIVERY') {
               throw new ApiError(400, 'VALIDATION_ERROR', '当前订单不支持切换为校内配送');

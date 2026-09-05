@@ -159,7 +159,20 @@ function initialData() {
       { id: 'plate_1001', customerName: '王同学', vehicleModel: '轻风 通勤版', source: 'PLATFORM_ORDER', feeInCents: 0, status: 'MATERIAL_PENDING', createdAt: '2026-08-28T08:45:00.000Z' },
       { id: 'plate_1002', customerName: '周同学', vehicleModel: '自带车辆', source: 'EXTERNAL', feeInCents: 4900, status: 'REVIEWING', createdAt: '2026-08-28T06:40:00.000Z' }
     ],
-    adminSettings: { brandName: '狮山智生活', schoolName: '华中农业大学', campusName: '狮山校区', servicePhone: '15527111396', serviceWechat: '15527111396', externalPlateFeeInCents: 4900 },
+    adminSettings: {
+      brandName: '狮山智生活',
+      schoolName: '华中农业大学',
+      campusName: '狮山校区',
+      servicePhone: '15527111396',
+      serviceWechat: '15527111396',
+      externalPlateFeeInCents: 4900,
+      deliveryFeeInCents: 0,
+      deliveryResponseHours: 24,
+      plateResponseHours: 48,
+      afterSaleResponseHours: 24,
+      deliveryTimeSlots: ['今天 12:00-14:00', '今天 16:00-18:00', '明天 10:00-12:00'],
+      platformNotice: '服务范围和办理结果以学校及合作方最终确认为准。'
+    },
     auditLogs: [
       { id: 'log_seed_1', operator: '系统', action: '初始化管理后台', target: '系统', createdAt: '2026-08-28T06:00:00.000Z' }
     ],

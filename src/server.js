@@ -44,6 +44,16 @@ function ensureDefaultRechargePromos(store) {
   });
 }
 
+function ensureDefaultSettings(store) {
+  const defaultSettings = initialData().adminSettings;
+  store.update((data) => {
+    data.adminSettings ||= {};
+    for (const [key, value] of Object.entries(defaultSettings)) {
+      if (data.adminSettings[key] === undefined) data.adminSettings[key] = value;
+    }
+  });
+}
+
 async function bootstrap() {
   const port = Number(process.env.PORT || 3000);
   const databasePath = process.env.DB_FILE || path.join(__dirname, '..', 'data', 'db.json');
@@ -71,6 +81,7 @@ async function bootstrap() {
   }
   ensureDefaultProducts(store);
   ensureDefaultRechargePromos(store);
+  ensureDefaultSettings(store);
   const server = http.createServer(createApp({ store }));
   server.listen(port, '0.0.0.0', () => {
     console.log(`Campus Go API listening on http://localhost:${port}`);

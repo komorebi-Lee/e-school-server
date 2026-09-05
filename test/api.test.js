@@ -91,10 +91,54 @@ test('active product detail exposes merchant and stock', async () => {
   assert.equal(result.body.data.ratingSummary.purchaseVerifiedCount, 2);
   assert.equal(result.body.data.reviews.length, 2);
   assert.ok(result.body.data.reviews.every((review) => review.purchaseVerified));
+  assert.equal(result.body.data.settings.deliveryResponseHours, 24);
 
   const missing = await api('/api/products/not_exists');
   assert.equal(missing.response.status, 404);
   assert.equal(missing.body.error.code, 'PRODUCT_NOT_FOUND');
+});
+
+test('business rules configure public commitments and delivery fees', async () => {
+  const config = await api('/api/business-config');
+  assert.equal(config.response.status, 200);
+  assert.equal(config.body.data.deliveryFeeInCents, 0);
+  assert.equal(config.body.data.deliveryResponseHours, 24);
+  assert.ok(config.body.data.deliveryTimeSlots.length > 0);
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ deliveryFeeInCents: 500 })
+  });
+  const session = await loginWeChat('fee_user');
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      items: [{ productId: 'prod_ebike_001', quantity: 1 }],
+      fulfillment: { type: 'DELIVERY', contactName: '费同学', contactPhone: '15527111001', address: '荟园1栋', date: '2026-09-06', timeSlot: '今天 12:00-14:00' }
+    })
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.data.feeSummary.itemsInCents, 239900);
+  assert.equal(created.body.data.feeSummary.deliveryFeeInCents, 500);
+  assert.equal(created.body.data.totalInCents, 240400);
+  assert.equal(created.body.data.fulfillment.timeSlot, '今天 12:00-14:00');
+
+  const invalidSlots = await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ deliveryTimeSlots: [] })
+  });
+  assert.equal(invalidSlots.response.status, 400);
+
+  await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ deliveryFeeInCents: 0 })
+  });
+  const restored = await api('/api/business-config');
+  assert.equal(restored.body.data.deliveryFeeInCents, 0);
 });
 
 test('phone plans and recharge promos are centrally configurable', async () => {
