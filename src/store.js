@@ -30,13 +30,18 @@ const seedProducts = [
     id: 'prod_card_service_001',
     name: '校园畅享卡',
     category: 'PHONE_PLAN',
-    description: '模拟29元/月校园电话套餐，正式资费以运营商确认为准。',
+    description: '80GB校园流量 · 100分钟通话 · 学生常选',
     priceInCents: 2900,
     stock: 999,
     campusIds: ['campus_demo'],
     imageUrl: 'https://placehold.co/600x400?text=Campus+Card',
     active: true
   }
+];
+
+const seedRechargePromos = [
+  { id: 'promo_recharge_150', pay: 150, receive: 200, badge: '多得50元', active: true },
+  { id: 'promo_recharge_200', pay: 200, receive: 300, badge: '多得100元', active: true }
 ];
 
 const seedMerchants = [
@@ -103,6 +108,7 @@ function initialData() {
     orders: [],
     afterSales: [],
     productReviews: seedProductReviews,
+    rechargePromos: seedRechargePromos,
     leads: [],
     phoneCardOrders: [
       { id: 'tel_1001', customerName: '张同学', phone: '138****3201', planName: '校园畅享卡', amountInCents: 2900, status: 'PENDING_REALNAME', createdAt: '2026-08-28T08:20:00.000Z' },
@@ -143,7 +149,7 @@ class JsonStore {
       if (!data || !Array.isArray(data.products)) throw new Error('invalid database');
       const defaults = initialData();
       let changed = false;
-      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'leads', 'auditLogs', 'merchants']) {
+      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) { data.adminSettings = defaults.adminSettings; changed = true; }

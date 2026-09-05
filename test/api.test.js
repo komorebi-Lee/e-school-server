@@ -96,6 +96,35 @@ test('active product detail exposes merchant and stock', async () => {
   assert.equal(missing.body.error.code, 'PRODUCT_NOT_FOUND');
 });
 
+test('phone plans and recharge promos are centrally configurable', async () => {
+  const products = await api('/api/products?category=PHONE_PLAN');
+  assert.equal(products.response.status, 200);
+  assert.ok(products.body.data.some((product) => product.name === '校园畅享卡'));
+
+  const promos = await api('/api/recharge-promos');
+  assert.equal(promos.response.status, 200);
+  assert.ok(promos.body.data.some((promo) => promo.pay === 150 && promo.receive === 200));
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const created = await api('/api/admin/recharge-promos', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ payInCents: 30000, receiveInCents: 38000, badge: '多得80元', active: true })
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.data.pay, 300);
+  assert.equal(created.body.data.receive, 380);
+
+  const invalid = await api('/api/admin/recharge-promos', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ payInCents: 30000, receiveInCents: 10000, badge: '无效活动', active: true })
+  });
+  assert.equal(invalid.response.status, 400);
+  assert.equal(invalid.body.error.code, 'VALIDATION_ERROR');
+});
+
 test('campus card application requires consent and masks private fields', async () => {
   const session = await loginWeChat('card_user');
   const invalid = await api('/api/campus-card-applications', {

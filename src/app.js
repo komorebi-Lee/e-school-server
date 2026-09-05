@@ -417,6 +417,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: items.map((product) => withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])), total: items.length, requestId });
       }
 
+      if (request.method === 'GET' && pathname === '/api/recharge-promos') {
+        const items = (store.read().rechargePromos || []).filter((item) => item.active !== false);
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
       const productMatch = pathname.match(/^\/api\/products\/([^/]+)$/);
       if (request.method === 'GET' && productMatch) {
         const data = store.read();
@@ -716,6 +721,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           data: {
             metrics: { revenueInCents, paidOrders: data.orders.length + data.phoneCardOrders.length + data.rechargeOrders.length, pending, lowStock: data.products.filter((item) => item.stock < 10).length, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length },
             products: data.products,
+            rechargePromos: data.rechargePromos || [],
             merchants: data.merchants,
             orders: data.orders,
             phoneCardOrders: data.phoneCardOrders,
@@ -944,6 +950,36 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           return product;
         });
         return sendJson(response, 200, { data: updated, requestId });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/admin/recharge-promos') {
+        const body = await readJson(request);
+        const payInCents = Number(body.payInCents);
+        const receiveInCents = Number(body.receiveInCents);
+        if (!Number.isInteger(payInCents) || payInCents < 1000 || payInCents > 10000000 || !Number.isInteger(receiveInCents) || receiveInCents <= payInCents || receiveInCents > 10000000) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '充值金额和到账金额格式不正确');
+        }
+        const promo = store.update((data) => {
+          const records = data.rechargePromos = data.rechargePromos || [];
+          const badge = typeof body.badge === 'string' && body.badge.trim() ? body.badge.trim().slice(0, 30) : '限时优惠';
+          const active = body.active !== false;
+          if (body.id) {
+            const item = records.find((record) => record.id === body.id);
+            if (!item) throw new ApiError(404, 'PROMO_NOT_FOUND', 'Promo not found');
+            item.pay = Math.round(payInCents / 100);
+            item.receive = Math.round(receiveInCents / 100);
+            item.badge = badge;
+            item.active = active;
+            item.updatedAt = new Date().toISOString();
+            addAudit(data, '更新话费活动', item.id);
+            return item;
+          }
+          const item = { id: `promo_${randomUUID()}`, pay: Math.round(payInCents / 100), receive: Math.round(receiveInCents / 100), badge, active, createdAt: new Date().toISOString() };
+          records.unshift(item);
+          addAudit(data, '新增话费活动', item.id);
+          return item;
+        });
+        return sendJson(response, 201, { data: promo, requestId });
       }
 
       if (request.method === 'POST' && pathname === '/api/admin/products') {
