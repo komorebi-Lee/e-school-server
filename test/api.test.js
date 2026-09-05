@@ -583,7 +583,7 @@ test('phone card service record can apply for broadband once', async () => {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
       userId: 'linked_user', customerName: '联同学', phone: '15527111396',
-      planName: '校园畅享卡', amountInCents: 2900
+      productId: 'prod_card_service_001'
     })
   });
   assert.equal(created.response.status, 201);
@@ -900,7 +900,7 @@ test('recharge payments create pending credit orders and notifications', async (
   const session = await loginWeChat('recharge_payment');
   const created = await api('/api/recharge-orders', {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'recharge-payment-001', authorization: `Bearer ${session.token}` },
-    body: JSON.stringify({ phone: '15527110099', paidInCents: 20000, receiveInCents: 25000 })
+    body: JSON.stringify({ phone: '15527110099', promoId: 'promo_recharge_200' })
   });
   assert.equal(created.response.status, 201);
   assert.equal(created.body.data.status, 'PENDING_PAYMENT');
@@ -908,9 +908,24 @@ test('recharge payments create pending credit orders and notifications', async (
   assert.ok(created.body.paymentOrder);
   assert.equal(created.body.paymentOrder.amountInCents, 20000);
 
+  const tamperedPromo = await api('/api/recharge-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ phone: '15527110099', promoId: 'promo_recharge_200', paidInCents: 1, receiveInCents: 999999999 })
+  });
+  assert.equal(tamperedPromo.response.status, 201);
+  assert.equal(tamperedPromo.body.data.paidInCents, 20000);
+  assert.equal(tamperedPromo.body.data.receiveInCents, 25000);
+
+  const unknownPromo = await api('/api/recharge-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ phone: '15527110099', promoId: 'not_exists' })
+  });
+  assert.equal(unknownPromo.response.status, 404);
+  assert.equal(unknownPromo.body.error.code, 'RECHARGE_PROMO_NOT_FOUND');
+
   const repeated = await api('/api/recharge-orders', {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'recharge-payment-001', authorization: `Bearer ${session.token}` },
-    body: JSON.stringify({ phone: '15527110099', paidInCents: 20000, receiveInCents: 25000 })
+    body: JSON.stringify({ phone: '15527110099', promoId: 'promo_recharge_200' })
   });
   assert.equal(repeated.response.status, 200);
   assert.equal(repeated.body.data.id, created.body.data.id);
@@ -944,16 +959,17 @@ test('phone card payments enter real-name activation and support refunds', async
   const session = await loginWeChat('card_payment');
   const created = await api('/api/phone-card-orders', {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'card-payment-001', authorization: `Bearer ${session.token}` },
-    body: JSON.stringify({ customerName: '卡同学', phone: '15527110088', planName: '校园畅联卡', amountInCents: 3900 })
+    body: JSON.stringify({ customerName: '卡同学', phone: '15527110088', productId: 'prod_card_service_002' })
   });
   assert.equal(created.response.status, 201);
   assert.equal(created.body.data.status, 'PENDING_PAYMENT');
   assert.equal(created.body.data.paymentStatus, 'UNPAID');
   assert.ok(created.body.paymentOrder);
+  assert.equal(created.body.data.amountInCents, 3900);
 
   const repeated = await api('/api/phone-card-orders', {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'card-payment-001', authorization: `Bearer ${session.token}` },
-    body: JSON.stringify({ customerName: '卡同学', phone: '15527110088', planName: '校园畅联卡', amountInCents: 3900 })
+    body: JSON.stringify({ customerName: '卡同学', phone: '15527110088', productId: 'prod_card_service_002' })
   });
   assert.equal(repeated.response.status, 200);
   assert.equal(repeated.body.data.id, created.body.data.id);
@@ -963,6 +979,20 @@ test('phone card payments enter real-name activation and support refunds', async
   assert.equal(confirmed.body.data.phoneCardOrder.status, 'PENDING_REALNAME');
   assert.equal(confirmed.body.data.phoneCardOrder.paymentStatus, 'PAID');
   assert.equal(confirmed.body.data.paymentOrder.status, 'PAID');
+
+  const tamperedPlan = await api('/api/phone-card-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ customerName: '卡同学', phone: '15527110088', productId: 'prod_card_service_002', amountInCents: 1 })
+  });
+  assert.equal(tamperedPlan.response.status, 201);
+  assert.equal(tamperedPlan.body.data.amountInCents, 3900);
+
+  const unknownPlan = await api('/api/phone-card-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ customerName: '卡同学', phone: '15527110088', productId: 'not_exists' })
+  });
+  assert.equal(unknownPlan.response.status, 404);
+  assert.equal(unknownPlan.body.error.code, 'PHONE_PLAN_NOT_FOUND');
 
   const records = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
   assert.ok(records.body.data.serviceRecords.some((item) => item.type === 'PHONE_PLAN' && item.status === 'PENDING_REALNAME'));
@@ -985,7 +1015,7 @@ test('phone card payments enter real-name activation and support refunds', async
 
   const cancelled = await api('/api/phone-card-orders', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
-    body: JSON.stringify({ customerName: '卡同学', phone: '15527110088', planName: '校园畅学卡', amountInCents: 2900 })
+    body: JSON.stringify({ customerName: '卡同学', phone: '15527110088', productId: 'prod_card_service_003' })
   });
   assert.equal(cancelled.response.status, 201);
   const cancel = await api(`/api/payment-orders/${cancelled.body.paymentOrder.id}/cancel`, {

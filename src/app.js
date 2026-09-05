@@ -1223,8 +1223,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && pathname === '/api/phone-card-orders') {
         const { userId } = requireUser(request);
         const body = await readJson(request);
-        const amountInCents = Number(body.amountInCents);
-        if (!Number.isInteger(amountInCents) || amountInCents < 0 || amountInCents > 10000000) throw new ApiError(400,'VALIDATION_ERROR','amountInCents must be between 0 and 10000000');
+        const productId = requireString(body.productId, 'productId', { maxLength: 100 });
+        const planProduct = store.read().products.find((item) => item.id === productId && item.category === 'PHONE_PLAN' && item.active);
+        if (!planProduct) throw new ApiError(404, 'PHONE_PLAN_NOT_FOUND', '套餐不存在或已下架');
+        const amountInCents = Number(planProduct.priceInCents || 0);
         const cardIdempotencyKey = String(request.headers['idempotency-key'] || '');
         if (cardIdempotencyKey) {
           const compoundKey = `card:${userId}:${cardIdempotencyKey}`;
@@ -1235,7 +1237,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
         }
         const now = new Date().toISOString();
-        const record = { id:`tel_${randomUUID()}`, userId, customerName:requireString(body.customerName,'customerName',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), planName:requireString(body.planName,'planName',{maxLength:80}), amountInCents, status:'PENDING_PAYMENT', paymentStatus:'UNPAID', relatedIds:{}, createdAt:now, updatedAt:now };
+        const record = { id:`tel_${randomUUID()}`, userId, customerName:requireString(body.customerName,'customerName',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), productId, planName:planProduct.name, amountInCents, status:'PENDING_PAYMENT', paymentStatus:'UNPAID', relatedIds:{}, createdAt:now, updatedAt:now };
         const result = store.update(data=>{
           (data.phoneCardOrders=data.phoneCardOrders||[]).unshift(record);
           (data.rechargeOrders||[]).forEach(item=>{if(item.userId===userId&&item.phone===record.phone&&!item.relatedIds?.phoneCardOrderId)item.relatedIds={...(item.relatedIds||{}),phoneCardOrderId:record.id};});
@@ -1267,9 +1269,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && pathname === '/api/recharge-orders') {
         const { userId } = requireUser(request);
         const body = await readJson(request);
-        const paidInCents = Number(body.paidInCents);
-        const receiveInCents = Number(body.receiveInCents);
-        if (!Number.isInteger(paidInCents) || paidInCents < 1000 || paidInCents > 10000000 || !Number.isInteger(receiveInCents) || receiveInCents <= paidInCents || receiveInCents > 10000000) throw new ApiError(400,'VALIDATION_ERROR','Invalid recharge amount');
+        const promoId = requireString(body.promoId, 'promoId', { maxLength: 100 });
+        const promo = store.read().rechargePromos?.find((item) => item.id === promoId && item.active !== false);
+        if (!promo) throw new ApiError(404, 'RECHARGE_PROMO_NOT_FOUND', '话费活动不存在或已下架');
+        const paidInCents = Math.round(Number(promo.pay) * 100);
+        const receiveInCents = Math.round(Number(promo.receive) * 100);
         const idempotencyKey = String(request.headers['idempotency-key'] || '');
         if (idempotencyKey) {
           const compoundKey = `recharge:${userId}:${idempotencyKey}`;
@@ -1280,7 +1284,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
         }
         const now = new Date().toISOString();
-        const record = { id:`top_${randomUUID()}`, userId, phone:requireString(body.phone,'phone',{maxLength:30}), paidInCents, receiveInCents, status:'PENDING_PAYMENT', paymentStatus:'UNPAID', relatedIds:{}, createdAt:now, updatedAt:now };
+        const record = { id:`top_${randomUUID()}`, userId, phone:requireString(body.phone,'phone',{maxLength:30}), promoId, paidInCents, receiveInCents, status:'PENDING_PAYMENT', paymentStatus:'UNPAID', relatedIds:{}, createdAt:now, updatedAt:now };
         const result = store.update(data=>{
           const related=(data.phoneCardOrders||[]).find(item=>item.userId===userId&&item.phone===record.phone);
           if(related)record.relatedIds={phoneCardOrderId:related.id};
