@@ -1,8 +1,8 @@
 const state={data:null,view:'dashboard',query:'',status:'ALL',token:localStorage.getItem('shishan_admin_token')||''};
-const titles={dashboard:'经营概览',merchants:'商家入驻',products:'商品中心',promos:'话费活动',reviews:'商品评价',orders:'电瓶车订单',payments:'支付单',phones:'电话卡订单',recharges:'话费权益',finance:'财务流水',broadband:'宽带资格',plates:'牌照辅助',afterSales:'售后工单',notifications:'站内通知',logs:'操作日志',settings:'运营设置',settlements:'商家结算'};
-const statuses={PENDING_PAYMENT:'待支付',PAID:'已支付',FULFILLING:'配送中',COMPLETED:'已完成',CANCELLED:'已取消',PENDING:'待支付',REFUNDED:'已退款',PENDING_REALNAME:'待实名',ACTIVATED:'已激活',PENDING_CREDIT:'待到账',CREDITED:'已到账',PENDING_VERIFY:'待核验',APPROVED:'已通过',REJECTED:'未通过',MATERIAL_PENDING:'待材料',REVIEWING:'处理中',SUBMITTED:'待处理',CLOSED:'已关闭',AFTER_SALE:'售后中',PUBLISHED:'已展示',HIDDEN:'已隐藏',PENDING_SETTLE:'可结算',SETTLED:'已结算',PENDING_DELIVERY:'待交付核验',IN_ACCOUNT_PERIOD:'账期中',FROZEN:'售后冻结'};
+const titles={dashboard:'经营概览',merchants:'商家入驻',products:'商品中心',promos:'话费活动',reviews:'商品评价',orders:'电瓶车订单',payments:'支付单',phones:'电话卡订单',recharges:'话费权益',finance:'财务流水',broadband:'宽带资格',plates:'牌照辅助',afterSales:'售后工单',notifications:'站内通知',logs:'操作日志',settings:'运营设置',settlements:'商家结算',payouts:'商家提现'};
+const statuses={PENDING_PAYMENT:'待支付',PAID:'已支付',FULFILLING:'配送中',COMPLETED:'已完成',CANCELLED:'已取消',PENDING:'待支付',REFUNDED:'已退款',PENDING_REALNAME:'待实名',ACTIVATED:'已激活',PENDING_CREDIT:'待到账',CREDITED:'已到账',PENDING_VERIFY:'待核验',APPROVED:'已通过',REJECTED:'未通过',MATERIAL_PENDING:'待材料',REVIEWING:'处理中',SUBMITTED:'待处理',CLOSED:'已关闭',AFTER_SALE:'售后中',PUBLISHED:'已展示',HIDDEN:'已隐藏',PENDING_SETTLE:'可结算',SETTLED:'已结算',PENDING_DELIVERY:'待交付核验',IN_ACCOUNT_PERIOD:'账期中',FROZEN:'售后冻结',PAYOUT_REQUESTED:'提现待审核',PENDING_REVIEW:'待审核'};
 const endpointTypes={orders:'orders',phones:'phone-card-orders',recharges:'recharge-orders',broadband:'broadband-applications',plates:'plate-applications',afterSales:'after-sales'};
-const collections={orders:'orders',payments:'paymentOrders',phones:'phoneCardOrders',recharges:'rechargeOrders',broadband:'broadbandApplications',plates:'plateApplications',afterSales:'afterSales',finance:'financeEvents',settlements:'settlements'};
+const collections={orders:'orders',payments:'paymentOrders',phones:'phoneCardOrders',recharges:'rechargeOrders',broadband:'broadbandApplications',plates:'plateApplications',afterSales:'afterSales',finance:'financeEvents',settlements:'settlements',payouts:'payoutRequests'};
 const financeTypeLabels={PAYMENT:'支付收入',REFUND:'退款支出',PAYOUT:'商家打款'};
 const merchantCategoryLabels={E_BIKE:'电动车/维修',DIGITAL:'数码配件',FOOD:'食品生鲜',LIFE_SERVICE:'生活服务'};
 const productCategoryLabels={E_BIKE_NEW:'电瓶车',PHONE_PLAN:'电话套餐',RECHARGE_PROMO:'话费权益',SERVICE:'服务'};
@@ -38,10 +38,10 @@ function broadband(){const items=state.data.broadbandApplications.filter(match).
 function plates(){const items=state.data.plateApplications.filter(match).filter(statusMatch);const rows=items.map(x=>{const payStatus={UNPAID:'未支付',PAID:'模拟支付成功',CANCELLED:'支付已取消',REFUNDED:'已退款'}[x.paymentStatus]||'—';return `<tr><td><strong>${esc(x.customerName)}</strong><small>学号 ${esc(x.studentNo||'未填写')} · ${esc(x.id)}</small></td><td>${esc(x.vehicleModel)}<small>材料 ${(x.materials||[]).length}/9</small></td><td>${x.source==='PLATFORM_ORDER'?'平台购车':'自带车辆'}</td><td>${x.feeInCents?money(x.feeInCents):'免费'}<small>${esc(payStatus)}</small></td><td>${statusControl('plates',x)}</td><td><button class="text-button detail-button" data-view="plates" data-id="${x.id}">办理详情</button></td></tr>`});return toolbar(items.length,{statusesList:options.plates})+table(['用户/学号','车辆/材料','来源','服务费/支付','办理进度','详情'],rows,items.length)}
 function afterSales(){const items=state.data.afterSales.filter(match).filter(statusMatch);const rows=items.map(x=>`<tr><td><strong>${esc(x.id)}</strong><small>${esc(x.orderId)}</small></td><td>${esc(x.typeLabel||x.type)}<small>图片 ${(x.images||[]).length}/9</small></td><td>${esc(x.reason)}</td><td>${fmtDate(x.createdAt)}</td><td>${statusControl('afterSales',x)}</td><td><button class="text-button detail-button" data-view="afterSales" data-id="${x.id}">工单详情</button></td></tr>`);return toolbar(items.length,{statusesList:options.afterSales})+table(['售后单','类型','原因','创建时间','处理状态','详情'],rows,items.length)}
 function logs(){const items=state.data.auditLogs.filter(match);const rows=items.map(x=>`<tr><td><strong>${esc(x.action)}</strong><small>${esc(x.id)}</small></td><td>${esc(x.operator)}</td><td>${esc(x.target)}</td><td>${fmtDate(x.createdAt)}</td></tr>`);return toolbar(items.length)+table(['操作','操作人','对象','时间'],rows,items.length)}
-function settings(){const s=state.data.settings;const slots=Array.isArray(s.deliveryTimeSlots)?s.deliveryTimeSlots.join('\n'):'';return`<div class="settings-grid"><form id="settingsForm" class="settings-form"><h2>基础运营配置</h2><div class="form-grid"><label>品牌名称<input id="settingBrand" value="${esc(s.brandName)}"></label><label>学校名称<input id="settingSchool" value="${esc(s.schoolName)}"></label><label>校区名称<input id="settingCampus" value="${esc(s.campusName)}"></label><label>客服电话<input id="settingPhone" value="${esc(s.servicePhone)}"></label><label>客服微信<input id="settingWechat" value="${esc(s.serviceWechat)}"></label><label>平台佣金比例（%）<input id="settingCommission" type="number" min="0" max="50" step="1" value="${s.commissionRatePercent ?? 2}"></label><label>自带车上牌服务费（元）<input id="settingPlateFee" type="number" value="${s.externalPlateFeeInCents/100}"></label><label>校内配送费（元）<input id="settingDeliveryFee" type="number" value="${(s.deliveryFeeInCents || 0)/100}"></label><label>配送响应承诺（小时）<input id="settingDeliveryHours" type="number" value="${s.deliveryResponseHours || 24}"></label><label>上牌响应承诺（小时）<input id="settingPlateHours" type="number" value="${s.plateResponseHours || 48}"></label><label>售后响应承诺（小时）<input id="settingAfterSaleHours" type="number" value="${s.afterSaleResponseHours || 24}"></label><label>售后处理时限（小时）<input id="settingAfterSaleResolutionHours" type="number" value="${s.afterSaleResolutionHours || 72}"></label><label>待支付自动关闭（分钟）<input id="settingPaymentTimeout" type="number" min="5" max="1440" value="${s.paymentTimeoutMinutes || 30}"></label><label>商家结算账期（天）<input id="settingSettlementPeriod" type="number" min="0" max="60" value="${s.settlementPeriodDays ?? 7}"></label></div><label>平台提示语<textarea id="settingNotice" rows="2">${esc(s.platformNotice || '')}</textarea></label><label>配送时段（每行一个）<textarea id="settingSlots" rows="5">${esc(slots)}</textarea></label><div class="settings-actions"><button class="primary" type="submit">保存配置</button></div></form><aside class="settings-help"><h2>上线前配置提醒</h2><p>业务规则保存后立即影响用户端承诺与订单结算。</p><ul><li>佣金比例只影响新支付订单，历史分账费率保持留痕</li><li>微信支付商户与退款权限</li><li>运营商真实套餐和活动期限</li><li>校园车辆登记材料清单</li><li>配送范围、时段和售后SLA</li><li>隐私政策与数据保存期限</li></ul></aside></div>`}
+function settings(){const s=state.data.settings;const slots=Array.isArray(s.deliveryTimeSlots)?s.deliveryTimeSlots.join('\n'):'';return`<div class="settings-grid"><form id="settingsForm" class="settings-form"><h2>基础运营配置</h2><div class="form-grid"><label>品牌名称<input id="settingBrand" value="${esc(s.brandName)}"></label><label>学校名称<input id="settingSchool" value="${esc(s.schoolName)}"></label><label>校区名称<input id="settingCampus" value="${esc(s.campusName)}"></label><label>客服电话<input id="settingPhone" value="${esc(s.servicePhone)}"></label><label>客服微信<input id="settingWechat" value="${esc(s.serviceWechat)}"></label><label>平台佣金比例（%）<input id="settingCommission" type="number" min="0" max="50" step="1" value="${s.commissionRatePercent ?? 2}"></label><label>自带车上牌服务费（元）<input id="settingPlateFee" type="number" value="${s.externalPlateFeeInCents/100}"></label><label>校内配送费（元）<input id="settingDeliveryFee" type="number" value="${(s.deliveryFeeInCents || 0)/100}"></label><label>配送响应承诺（小时）<input id="settingDeliveryHours" type="number" value="${s.deliveryResponseHours || 24}"></label><label>上牌响应承诺（小时）<input id="settingPlateHours" type="number" value="${s.plateResponseHours || 48}"></label><label>售后响应承诺（小时）<input id="settingAfterSaleHours" type="number" value="${s.afterSaleResponseHours || 24}"></label><label>售后处理时限（小时）<input id="settingAfterSaleResolutionHours" type="number" value="${s.afterSaleResolutionHours || 72}"></label><label>待支付自动关闭（分钟）<input id="settingPaymentTimeout" type="number" min="5" max="1440" value="${s.paymentTimeoutMinutes || 30}"></label><label>商家结算账期（天）<input id="settingSettlementPeriod" type="number" min="0" max="60" value="${s.settlementPeriodDays ?? 7}"></label><label>商家起提金额（元）<input id="settingPayoutMinimum" type="number" min="0" max="10000" step="1" value="${((s.payoutMinimumInCents ?? 10000)/100)}"></label></div><label>平台提示语<textarea id="settingNotice" rows="2">${esc(s.platformNotice || '')}</textarea></label><label>配送时段（每行一个）<textarea id="settingSlots" rows="5">${esc(slots)}</textarea></label><div class="settings-actions"><button class="primary" type="submit">保存配置</button></div></form><aside class="settings-help"><h2>上线前配置提醒</h2><p>业务规则保存后立即影响用户端承诺与订单结算。</p><ul><li>佣金比例只影响新支付订单，历史分账费率保持留痕</li><li>微信支付商户与退款权限</li><li>运营商真实套餐和活动期限</li><li>校园车辆登记材料清单</li><li>配送范围、时段和售后SLA</li><li>隐私政策与数据保存期限</li></ul></aside></div>`}
 
 function merchants(){const q=state.query.toLowerCase();const items=(state.data.merchants||[]).filter(x=>!q||`${x.name} ${x.ownerName} ${x.phone}`.toLowerCase().includes(q));const rows=items.map(x=>`<tr><td><strong>${esc(x.name)}</strong><small>${fmtDate(x.createdAt)}</small></td><td>${esc(x.ownerName)}<small>${esc(x.phone)}</small></td><td>${esc(merchantTypeLabels[x.merchantType]||'个体工商户')}</td><td>${esc(merchantCategoryLabels[x.category]||x.category)}<small>${esc(x.serviceArea||'')}</small></td><td><span class="badge ${badgeClass(x.status)}">${label(x.status)}</span><small>${x.settlementAccountMasked?'收款账户已登记':'收款账户缺失'}</small>${x.licenseUrl?`<a class="license-link" href="${esc(x.licenseUrl)}" target="_blank">查看执照</a>`:''}</td><td><div class="row-actions"><button class="text-button detail-button" data-view="merchants" data-id="${x.id}">审核详情</button><button class="text-button" data-merchant="${x.id}" data-status="APPROVED" ${x.status==='APPROVED'?'disabled':''}>通过</button><button class="text-button danger" data-merchant="${x.id}" data-status="REJECTED" ${x.status==='REJECTED'?'disabled':''}>驳回</button></div></td></tr>`);return toolbar(items.length)+table(['商家','联系人','主体类型','类目/区域','资质','操作'],rows,items.length)}
-function render(){document.querySelector('#pageTitle').textContent=titles[state.view];document.querySelector('#breadcrumb').textContent=titles[state.view];const views={dashboard,merchants,leads,products,promos,reviews,orders,payments,phones,recharges,finance,settlements:settlementsView,broadband,plates,afterSales,notifications,logs,settings};document.querySelector('#content').innerHTML=views[state.view]();bindView()}
+function render(){document.querySelector('#pageTitle').textContent=titles[state.view];document.querySelector('#breadcrumb').textContent=titles[state.view];const views={dashboard,merchants,leads,products,promos,reviews,orders,payments,phones,recharges,finance,settlements:settlementsView,payouts:payoutsView,broadband,plates,afterSales,notifications,logs,settings};document.querySelector('#content').innerHTML=views[state.view]();bindView()}
 function bindView(){document.querySelector('#listSearch')?.addEventListener('input',e=>{state.query=e.target.value;render();document.querySelector('#listSearch')?.focus()});document.querySelector('#statusFilter')?.addEventListener('change',e=>{state.status=e.target.value;render()});document.querySelector('#addProduct')?.addEventListener('click',()=>openProduct());document.querySelectorAll('.edit-product').forEach(b=>b.addEventListener('click',()=>openProduct(state.data.products.find(p=>p.id===b.dataset.id))));document.querySelector('#addPromo')?.addEventListener('click',()=>openPromo());document.querySelectorAll('.edit-promo').forEach(b=>b.addEventListener('click',()=>openPromo((state.data.rechargePromos||[]).find(p=>p.id===b.dataset.id))));document.querySelectorAll('.toggle-promo').forEach(b=>b.addEventListener('click',async()=>{const promo=(state.data.rechargePromos||[]).find(p=>p.id===b.dataset.id);if(!promo)return;await api('/api/admin/recharge-promos',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...promo,payInCents:promo.pay*100,receiveInCents:promo.receive*100,active:b.dataset.active==='true'})});showToast('活动状态已更新');await load()}));document.querySelectorAll('.save-status').forEach(b=>b.addEventListener('click',()=>saveStatus(b)));document.querySelectorAll('[data-merchant]').forEach(b=>b.addEventListener('click',async()=>{const status=b.dataset.status;const note=status==='REJECTED'?prompt('请填写驳回原因')||'资质材料不符合要求':prompt('请填写审核备注','资质信息已核对')||'';await api(`/api/admin/merchants/${b.dataset.merchant}/status`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({status,reviewNote:note})});showToast('商家状态已更新');await load()}));document.querySelectorAll('.detail-button').forEach(b=>b.addEventListener('click',()=>openDetail(b.dataset.view,b.dataset.id)));document.querySelector('#exportButton')?.addEventListener('click',exportCurrent);document.querySelector('#settingsForm')?.addEventListener('submit',saveSettings);document.querySelectorAll('[data-goto]').forEach(x=>x.addEventListener('click',()=>goView(x.dataset.goto)))}
 function bindCollab(){document.querySelectorAll('.platform-collab').forEach(b=>b.addEventListener('click',async()=>{const action=b.dataset.action;const note=prompt(action==='INTERVENE'?'请填写平台介入说明':'请填写平台处理结果',action==='INTERVENE'?'已联系商家和用户，核实订单问题。':'已确认解决方案，订单继续履约。');if(!note)return;await api('/api/order-collab',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({role:'PLATFORM',action,orderId:b.dataset.id,note})});showToast('平台协同已记录');await load()}))}
 const originalBindView=bindView;
@@ -83,7 +83,7 @@ function openPromo(promo){document.querySelector('#promoModalTitle').textContent
 function togglePromoModal(show){document.querySelector('#promoModal').classList.toggle('hidden',!show);document.querySelector('#modalBackdrop').classList.toggle('hidden',!show)}
 async function savePromo(event){event.preventDefault();const id=document.querySelector('#promoId').value;const payload={id:id||undefined,payInCents:Math.round(Number(document.querySelector('#promoPay').value)*100),receiveInCents:Math.round(Number(document.querySelector('#promoReceive').value)*100),badge:document.querySelector('#promoBadge').value,active:document.querySelector('#promoActive').checked};await api('/api/admin/recharge-promos',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});togglePromoModal(false);showToast(id?'活动已更新':'活动已创建');await load()}
 async function saveProduct(event){event.preventDefault();const id=document.querySelector('#productId').value;const payload={name:document.querySelector('#productName').value,category:document.querySelector('#productCategory').value,priceInCents:Math.round(Number(document.querySelector('#productPrice').value)*100),stock:Number(document.querySelector('#productStock').value),description:document.querySelector('#productDescription').value,imageUrl:document.querySelector('#productImageUrl').value.trim(),active:document.querySelector('#productActive').checked};await api(id?`/api/admin/products/${id}`:'/api/admin/products',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});toggleModal(false);showToast(id?'商品已更新':'商品已创建');await load()}
-async function saveSettings(event){event.preventDefault();await api('/api/admin/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({brandName:document.querySelector('#settingBrand').value,schoolName:document.querySelector('#settingSchool').value,campusName:document.querySelector('#settingCampus').value,servicePhone:document.querySelector('#settingPhone').value,serviceWechat:document.querySelector('#settingWechat').value,commissionRatePercent:Number(document.querySelector('#settingCommission').value),externalPlateFeeInCents:Math.round(Number(document.querySelector('#settingPlateFee').value)*100),deliveryFeeInCents:Math.round(Number(document.querySelector('#settingDeliveryFee').value)*100),deliveryResponseHours:Number(document.querySelector('#settingDeliveryHours').value),plateResponseHours:Number(document.querySelector('#settingPlateHours').value),afterSaleResponseHours:Number(document.querySelector('#settingAfterSaleHours').value),afterSaleResolutionHours:Number(document.querySelector('#settingAfterSaleResolutionHours').value),paymentTimeoutMinutes:Number(document.querySelector('#settingPaymentTimeout').value),settlementPeriodDays:Number(document.querySelector('#settingSettlementPeriod').value),deliveryTimeSlots:document.querySelector('#settingSlots').value.split(/\r?\n/),platformNotice:document.querySelector('#settingNotice').value})});showToast('运营配置已保存');await load()}
+async function saveSettings(event){event.preventDefault();await api('/api/admin/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({brandName:document.querySelector('#settingBrand').value,schoolName:document.querySelector('#settingSchool').value,campusName:document.querySelector('#settingCampus').value,servicePhone:document.querySelector('#settingPhone').value,serviceWechat:document.querySelector('#settingWechat').value,commissionRatePercent:Number(document.querySelector('#settingCommission').value),externalPlateFeeInCents:Math.round(Number(document.querySelector('#settingPlateFee').value)*100),deliveryFeeInCents:Math.round(Number(document.querySelector('#settingDeliveryFee').value)*100),deliveryResponseHours:Number(document.querySelector('#settingDeliveryHours').value),plateResponseHours:Number(document.querySelector('#settingPlateHours').value),afterSaleResponseHours:Number(document.querySelector('#settingAfterSaleHours').value),afterSaleResolutionHours:Number(document.querySelector('#settingAfterSaleResolutionHours').value),paymentTimeoutMinutes:Number(document.querySelector('#settingPaymentTimeout').value),settlementPeriodDays:Number(document.querySelector('#settingSettlementPeriod').value),payoutMinimumInCents:Math.round(Number(document.querySelector('#settingPayoutMinimum').value)*100),deliveryTimeSlots:document.querySelector('#settingSlots').value.split(/\r?\n/),platformNotice:document.querySelector('#settingNotice').value})});showToast('运营配置已保存');await load()}
 function exportCurrent(){const key=state.view==='products'?'products':collections[state.view];if(!key){showToast('当前页面无需导出');return}const items=state.data[key];if(!items?.length){showToast('暂无可导出数据');return}const headers=[...new Set(items.flatMap(Object.keys))];const csv=[headers.join(','),...items.map(item=>headers.map(h=>`"${String(typeof item[h]==='object'?JSON.stringify(item[h]):item[h]??'').replace(/"/g,'""')}"`).join(','))].join('\n');const blob=new Blob(['\ufeff'+csv],{type:'text/csv;charset=utf-8'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`狮山智生活-${titles[state.view]}-${Date.now()}.csv`;a.click();URL.revokeObjectURL(a.href);showToast('CSV 已导出')}
 function showToast(msg){const t=document.querySelector('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1800)}
 
@@ -251,6 +251,7 @@ const settlementStageNotes = {
   PENDING_DELIVERY: '等待交付码核验',
   IN_ACCOUNT_PERIOD: '账期内，到期后自动转为可结算',
   PENDING_SETTLE: '可发起线下打款',
+  PAYOUT_REQUESTED: '商家已申请提现，等待平台审核',
   FROZEN: '售后处理中，暂停打款',
   SETTLED: '已完成打款',
   REFUNDED: '订单已退款，分账冲销'
@@ -272,6 +273,7 @@ function settlementsView() {
     ${metric('账期中', money(summary.inAccountPeriodInCents), `账期 ${summary.settlementPeriodDays ?? 7} 天`)}
     ${metric('售后冻结', money(summary.frozenInCents), '售后关闭后自动恢复')}
     ${metric('可结算', money(summary.payableInCents), '可发起线下打款', true)}
+    ${metric('提现待审核', money(summary.payoutRequestedInCents), '商家已申请，等待审核')}
     ${metric('已结算', money(summary.settledInCents), '历史累计打款')}
   </div>`;
   const payoutBar = payableByMerchant.size
@@ -287,7 +289,7 @@ function settlementsView() {
     <td>${item.settlementReference ? esc(item.settlementReference) : '—'}<small>${item.settledAt ? fmtDate(item.settledAt) : ''}</small></td>
   </tr>`);
   return cards + payoutBar
-    + toolbar(items.length, { statusesList: ['PENDING_DELIVERY', 'IN_ACCOUNT_PERIOD', 'FROZEN', 'PENDING_SETTLE', 'SETTLED', 'REFUNDED'] })
+    + toolbar(items.length, { statusesList: ['PENDING_DELIVERY', 'IN_ACCOUNT_PERIOD', 'FROZEN', 'PENDING_SETTLE', 'PAYOUT_REQUESTED', 'SETTLED', 'REFUNDED'] })
     + table(['订单', '商家', '成交/佣金', '应结', '资金状态', '可结算时间', '打款凭证'], rows, items.length);
 }
 
@@ -297,3 +299,77 @@ function settlementBadge(status) {
   if (status === 'SETTLED') return 'blue';
   return 'orange';
 }
+
+const payoutStatusNotes = {
+  PENDING_REVIEW: '商家已申请，等待平台核对收款账户后打款',
+  SETTLED: '已完成打款',
+  REJECTED: '审核未通过，金额已退回可结算余额',
+  CANCELLED: '关联分账进入售后或退款，申请自动关闭'
+};
+
+function payoutBadge(status) {
+  if (status === 'SETTLED') return 'blue';
+  if (status === 'REJECTED' || status === 'CANCELLED') return 'red';
+  return 'orange';
+}
+
+function payoutsView() {
+  const requests = (state.data.payoutRequests || [])
+    .filter(match)
+    .filter((item) => state.status === 'ALL' || item.status === state.status);
+  const all = state.data.payoutRequests || [];
+  const sumBy = (status) => all.filter((item) => item.status === status).reduce((total, item) => total + (item.amountInCents || 0), 0);
+  const pendingCount = all.filter((item) => item.status === 'PENDING_REVIEW').length;
+  const cards = `<div class="metric-grid">
+    ${metric('待审核提现', money(sumBy('PENDING_REVIEW')), `${pendingCount} 笔等待处理`, true)}
+    ${metric('累计已打款', money(sumBy('SETTLED')), '含平台主动打款')}
+    ${metric('已驳回', money(sumBy('REJECTED')), '金额已退回商家余额')}
+    ${metric('起提金额', money(state.data.settlementSummary?.payoutMinimumInCents ?? 10000), '低于该金额不能申请')}
+  </div>`;
+  const rows = requests.map((item) => {
+    const actions = item.status === 'PENDING_REVIEW'
+      ? `<button class="text-button approve-payout" data-id="${esc(item.id)}">确认打款</button><button class="text-button danger reject-payout" data-id="${esc(item.id)}">驳回</button>`
+      : '<span class="muted-empty">已处理</span>';
+    return `<tr>
+      <td><strong>${esc(item.requestNo)}</strong><small>${fmtDate(item.createdAt)}</small></td>
+      <td>${esc(item.merchantName || item.merchantId)}<small>${item.initiatedBy === 'PLATFORM' ? '平台主动打款' : '商家申请'}</small></td>
+      <td><strong>${money(item.amountInCents)}</strong><small>${item.settlementCount || 0} 笔分账</small></td>
+      <td>${esc(item.accountBank || '—')}<small>${esc(item.accountName || '')} ${esc(item.accountMasked || '')}</small></td>
+      <td><span class="badge ${payoutBadge(item.status)}">${label(item.status)}</span><small>${esc(item.reviewNote || payoutStatusNotes[item.status] || '')}</small></td>
+      <td>${item.settlementReference ? esc(item.settlementReference) : '—'}<small>${item.reviewedAt ? fmtDate(item.reviewedAt) : ''}</small></td>
+      <td><div class="row-actions">${actions}</div></td>
+    </tr>`;
+  });
+  return cards
+    + toolbar(requests.length, { statusesList: ['PENDING_REVIEW', 'SETTLED', 'REJECTED', 'CANCELLED'] })
+    + table(['提现单', '商家', '金额', '收款账户', '状态', '打款凭证', '操作'], rows, requests.length);
+}
+
+const baseBindPayoutsView = bindView;
+bindView = function () {
+  baseBindPayoutsView();
+  document.querySelectorAll('.approve-payout').forEach((button) => button.addEventListener('click', async () => {
+    const item = (state.data.payoutRequests || []).find((row) => row.id === button.dataset.id);
+    const account = item ? `${item.accountBank || ''} ${item.accountName || ''} ${item.accountMasked || ''}`.trim() : '';
+    const reference = prompt(`确认已向以下账户完成打款：\n${account || '请人工核对收款信息'}\n金额 ${item ? money(item.amountInCents) : ''}\n\n填写打款凭证号`, '平台线下打款');
+    if (reference === null) return;
+    if (!reference.trim()) return showToast('请填写打款凭证');
+    await api(`/api/admin/payout-requests/${button.dataset.id}/review`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'APPROVE', reference: reference.trim() })
+    });
+    showToast('提现已确认打款');
+    await load();
+  }));
+  document.querySelectorAll('.reject-payout').forEach((button) => button.addEventListener('click', async () => {
+    const reviewNote = prompt('请填写驳回原因（会通知商家）', '收款账户信息需要核对');
+    if (reviewNote === null) return;
+    if (!reviewNote.trim()) return showToast('请填写驳回原因');
+    await api(`/api/admin/payout-requests/${button.dataset.id}/review`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision: 'REJECT', reviewNote: reviewNote.trim() })
+    });
+    showToast('提现申请已驳回');
+    await load();
+  }));
+};

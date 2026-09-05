@@ -146,6 +146,7 @@ function initialData() {
     orders: [],
     paymentOrders: [],
     settlements: [],
+    payoutRequests: [],
     financeEvents: [],
     notifications: [],
     afterSales: [],
@@ -181,6 +182,7 @@ function initialData() {
       afterSaleResolutionHours: 72,
       paymentTimeoutMinutes: 30,
       settlementPeriodDays: 7,
+      payoutMinimumInCents: 10000,
       deliveryTimeSlots: ['今天 12:00-14:00', '今天 16:00-18:00', '明天 10:00-12:00'],
       platformNotice: '服务范围和办理结果以学校及合作方最终确认为准。'
     },
@@ -208,7 +210,7 @@ class JsonStore {
       if (!data || !Array.isArray(data.products)) throw new Error('invalid database');
       const defaults = initialData();
       let changed = false;
-      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'financeEvents', 'notifications']) {
+      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'notifications']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) { data.adminSettings = defaults.adminSettings; changed = true; }

@@ -463,14 +463,19 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
   function freezeOrderSettlements(data, order, now, reason) {
     if (!order?.id || !Array.isArray(data.settlements)) return [];
     const frozen = [];
+    const affectedPayoutRequests = new Set();
     for (const settlement of data.settlements) {
       if (settlement.orderId !== order.id) continue;
-      if (!['PENDING_DELIVERY', 'IN_ACCOUNT_PERIOD', 'PENDING_SETTLE'].includes(settlement.settlementStatus)) continue;
+      if (!['PENDING_DELIVERY', 'IN_ACCOUNT_PERIOD', 'PENDING_SETTLE', 'PAYOUT_REQUESTED'].includes(settlement.settlementStatus)) continue;
+      if (settlement.payoutRequestId) affectedPayoutRequests.add(settlement.payoutRequestId);
       settlement.statusBeforeFreeze = settlement.settlementStatus;
       settlement.settlementStatus = 'FROZEN';
       settlement.frozenReason = String(reason || '售后处理中').slice(0, 120);
       settlement.updatedAt = now;
       frozen.push(settlement);
+    }
+    for (const payoutRequestId of affectedPayoutRequests) {
+      syncPayoutRequest(data, payoutRequestId, now, '关联订单进入售后，提现申请已自动关闭');
     }
     return frozen;
   }
@@ -486,6 +491,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
         : (settlement.availableAt && settlement.availableAt <= now ? 'PENDING_SETTLE' : 'IN_ACCOUNT_PERIOD');
       settlement.statusBeforeFreeze = '';
       settlement.frozenReason = '';
+      settlement.payoutRequestId = '';
       settlement.updatedAt = now;
       restored.push(settlement);
     }
@@ -521,20 +527,153 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
       inAccountPeriodInCents: sum('IN_ACCOUNT_PERIOD'),
       frozenInCents: sum('FROZEN'),
       payableInCents: sum('PENDING_SETTLE'),
+      payoutRequestedInCents: sum('PAYOUT_REQUESTED'),
       settledInCents: sum('SETTLED'),
       refundedInCents: sum('REFUNDED')
     };
   }
 
+  function payoutMinimumInCents(data) {
+    const value = Number(data?.adminSettings?.payoutMinimumInCents);
+    return Number.isInteger(value) && value >= 0 && value <= 1000000 ? value : 10000;
+  }
+
+  // 商家提现走「申请 → 平台审核 → 打款/驳回」，避免商家自己给自己确认打款。
+  function createPayoutRequest(data, merchant, now, remark) {
+    if (!Array.isArray(data.payoutRequests)) data.payoutRequests = [];
+    if (!merchant.settlementAccountName || !merchant.settlementBank || !merchant.settlementAccount) {
+      throw new ApiError(409, 'SETTLEMENT_ACCOUNT_INCOMPLETE', '请先补全收款账户资料再申请提现');
+    }
+    const pendingRequest = data.payoutRequests.find((item) => item.merchantId === merchant.id && item.status === 'PENDING_REVIEW');
+    if (pendingRequest) throw new ApiError(409, 'PAYOUT_REQUEST_EXISTS', `已有提现申请 ${pendingRequest.requestNo} 正在审核，请等待平台处理`);
+    releaseMaturedSettlements(data, now);
+    const settlements = (data.settlements || []).filter((item) => item.merchantId === merchant.id && item.settlementStatus === 'PENDING_SETTLE');
+    if (!settlements.length) {
+      const blocked = (data.settlements || []).filter((item) => item.merchantId === merchant.id && ['PENDING_DELIVERY', 'IN_ACCOUNT_PERIOD', 'FROZEN'].includes(item.settlementStatus));
+      const reasons = {
+        PENDING_DELIVERY: '订单尚未完成交付核验',
+        IN_ACCOUNT_PERIOD: '账期未到期',
+        FROZEN: '存在售后冻结的分账'
+      };
+      const detail = [...new Set(blocked.map((item) => reasons[item.settlementStatus]))].join('、');
+      throw new ApiError(409, 'SETTLEMENT_NOT_RELEASED', detail ? `暂无可提现金额：${detail}` : '暂无可提现金额');
+    }
+    const amountInCents = settlements.reduce((total, item) => total + (item.payableAmountInCents || 0), 0);
+    const minimum = payoutMinimumInCents(data);
+    if (amountInCents < minimum) {
+      throw new ApiError(409, 'PAYOUT_BELOW_MINIMUM', `可提现金额 ¥${(amountInCents / 100).toFixed(2)} 低于起提金额 ¥${(minimum / 100).toFixed(2)}`);
+    }
+    const requestId = `pyo_${randomUUID()}`;
+    for (const settlement of settlements) {
+      settlement.settlementStatus = 'PAYOUT_REQUESTED';
+      settlement.payoutRequestId = requestId;
+      settlement.updatedAt = now;
+    }
+    const payoutRequest = {
+      id: requestId,
+      requestNo: `PO${Date.now().toString().slice(-10)}`,
+      merchantId: merchant.id,
+      merchantName: merchant.name,
+      amountInCents,
+      settlementCount: settlements.length,
+      settlementIds: settlements.map((item) => item.id),
+      status: 'PENDING_REVIEW',
+      accountName: merchant.settlementAccountName,
+      accountBank: merchant.settlementBank,
+      accountMasked: `${merchant.settlementAccount.slice(0, 4)} **** ${merchant.settlementAccount.slice(-4)}`,
+      remark: String(remark || '').slice(0, 200),
+      reviewNote: '',
+      settlementReference: '',
+      reviewedAt: '',
+      createdAt: now,
+      updatedAt: now
+    };
+    data.payoutRequests.unshift(payoutRequest);
+    addAudit(data, '商家提交提现申请', `${merchant.name} ${payoutRequest.requestNo}`);
+    notifyMerchant(data, merchant.id, 'SETTLEMENT', '提现申请已提交', `提现单 ${payoutRequest.requestNo} 合计 ¥${(amountInCents / 100).toFixed(2)}，平台审核通过后打款到 ${payoutRequest.accountBank} ${payoutRequest.accountMasked}。`);
+    return payoutRequest;
+  }
+
+  function payoutRequestSettlements(data, payoutRequest) {
+    const ids = new Set(payoutRequest.settlementIds || []);
+    return (data.settlements || []).filter((item) => ids.has(item.id) || item.payoutRequestId === payoutRequest.id);
+  }
+
+  // 提现申请里的分账被冻结或退款时，申请金额已不成立，整单退回并让商家重新申请。
+  function syncPayoutRequest(data, payoutRequestId, now, reason) {
+    const payoutRequest = (data.payoutRequests || []).find((item) => item.id === payoutRequestId);
+    if (!payoutRequest || payoutRequest.status !== 'PENDING_REVIEW') return null;
+    const settlements = payoutRequestSettlements(data, payoutRequest);
+    if (settlements.every((item) => item.settlementStatus === 'PAYOUT_REQUESTED')) return null;
+    for (const settlement of settlements) {
+      if (settlement.settlementStatus !== 'PAYOUT_REQUESTED') continue;
+      settlement.settlementStatus = 'PENDING_SETTLE';
+      settlement.payoutRequestId = '';
+      settlement.updatedAt = now;
+    }
+    payoutRequest.status = 'CANCELLED';
+    payoutRequest.reviewNote = reason;
+    payoutRequest.reviewedAt = now;
+    payoutRequest.updatedAt = now;
+    addAudit(data, '提现申请自动关闭', `${payoutRequest.merchantName} ${payoutRequest.requestNo}`);
+    notifyMerchant(data, payoutRequest.merchantId, 'SETTLEMENT', '提现申请已关闭', `提现单 ${payoutRequest.requestNo} ${reason}，未受影响的金额已退回可结算余额，可重新申请。`);
+    return payoutRequest;
+  }
+
+  function approvePayoutRequest(data, payoutRequest, now, reference) {
+    const settlements = payoutRequestSettlements(data, payoutRequest).filter((item) => item.settlementStatus === 'PAYOUT_REQUESTED');
+    if (!settlements.length) throw new ApiError(409, 'PAYOUT_REQUEST_EMPTY', '该提现申请没有待打款的分账，可能已被退款或处理');
+    let totalInCents = 0;
+    for (const settlement of settlements) {
+      settlement.settlementStatus = 'SETTLED';
+      settlement.settledAt = now;
+      settlement.settlementReference = reference;
+      settlement.updatedAt = now;
+      totalInCents += settlement.payableAmountInCents || 0;
+    }
+    payoutRequest.status = 'SETTLED';
+    payoutRequest.settlementReference = reference;
+    payoutRequest.paidAmountInCents = totalInCents;
+    payoutRequest.reviewedAt = now;
+    payoutRequest.updatedAt = now;
+    addFinanceEvent(data, 'PAYOUT', `PAYOUT_${payoutRequest.requestNo}`, -totalInCents, {
+      merchantId: payoutRequest.merchantId, merchantName: payoutRequest.merchantName, settlementReference: reference
+    }, now);
+    addAudit(data, '平台确认提现打款', `${payoutRequest.merchantName} ${payoutRequest.requestNo}`);
+    notifyMerchant(data, payoutRequest.merchantId, 'SETTLEMENT', '提现已打款', `提现单 ${payoutRequest.requestNo} 已打款 ¥${(totalInCents / 100).toFixed(2)}，凭证 ${reference}。`);
+    return totalInCents;
+  }
+
+  function rejectPayoutRequest(data, payoutRequest, now, reviewNote) {
+    const settlements = payoutRequestSettlements(data, payoutRequest).filter((item) => item.settlementStatus === 'PAYOUT_REQUESTED');
+    for (const settlement of settlements) {
+      settlement.settlementStatus = 'PENDING_SETTLE';
+      settlement.payoutRequestId = '';
+      settlement.updatedAt = now;
+    }
+    payoutRequest.status = 'REJECTED';
+    payoutRequest.reviewNote = reviewNote;
+    payoutRequest.reviewedAt = now;
+    payoutRequest.updatedAt = now;
+    addAudit(data, '平台驳回提现申请', `${payoutRequest.merchantName} ${payoutRequest.requestNo}`);
+    notifyMerchant(data, payoutRequest.merchantId, 'SETTLEMENT', '提现申请被驳回', `提现单 ${payoutRequest.requestNo} 未通过审核：${reviewNote}。金额已退回可结算余额。`);
+    return settlements.length;
+  }
+
   function markSettlementsRefunded(data, orderId, now) {
     if (!orderId || !Array.isArray(data.settlements)) return;
+    const affectedPayoutRequests = new Set();
     for (const settlement of data.settlements) {
       if (settlement.orderId !== orderId || settlement.settlementStatus === 'REFUNDED') continue;
+      if (settlement.payoutRequestId) affectedPayoutRequests.add(settlement.payoutRequestId);
       settlement.settlementStatus = 'REFUNDED';
       settlement.updatedAt = now;
       settlement.refundedAt = now;
       settlement.statusBeforeFreeze = '';
       settlement.frozenReason = '';
+    }
+    for (const payoutRequestId of affectedPayoutRequests) {
+      syncPayoutRequest(data, payoutRequestId, now, '关联订单已退款，提现申请已自动关闭');
     }
   }
 
@@ -543,6 +682,10 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     releaseMaturedSettlements(data, now);
     const settlements = data.settlements.filter((item) => item.merchantId === merchantId && item.settlementStatus === 'PENDING_SETTLE');
     if (!settlements.length) {
+      const requested = data.settlements.filter((item) => item.merchantId === merchantId && item.settlementStatus === 'PAYOUT_REQUESTED');
+      if (requested.length) {
+        throw new ApiError(409, 'PAYOUT_REQUEST_PENDING', '该商家已提交提现申请，请到「商家提现」页审核后打款');
+      }
       const blocked = data.settlements.filter((item) => item.merchantId === merchantId && ['PENDING_DELIVERY', 'IN_ACCOUNT_PERIOD', 'FROZEN'].includes(item.settlementStatus));
       if (blocked.length) {
         const reasons = {
@@ -563,7 +706,35 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
       settlement.updatedAt = now;
       totalInCents += settlement.payableAmountInCents || 0;
     }
+    recordPlatformPayout(data, merchantId, settlements, totalInCents, now, reference);
     return totalInCents;
+  }
+
+  // 平台主动打款也写一条提现单，保证所有出款都有统一的资金台账。
+  function recordPlatformPayout(data, merchantId, settlements, totalInCents, now, reference) {
+    if (!Array.isArray(data.payoutRequests)) data.payoutRequests = [];
+    const merchant = (data.merchants || []).find((item) => item.id === merchantId);
+    data.payoutRequests.unshift({
+      id: `pyo_${randomUUID()}`,
+      requestNo: `PO${Date.now().toString().slice(-10)}`,
+      merchantId,
+      merchantName: merchant?.name || '',
+      amountInCents: totalInCents,
+      paidAmountInCents: totalInCents,
+      settlementCount: settlements.length,
+      settlementIds: settlements.map((item) => item.id),
+      status: 'SETTLED',
+      initiatedBy: 'PLATFORM',
+      accountName: merchant?.settlementAccountName || '',
+      accountBank: merchant?.settlementBank || '',
+      accountMasked: merchant?.settlementAccount ? `${merchant.settlementAccount.slice(0, 4)} **** ${merchant.settlementAccount.slice(-4)}` : '',
+      remark: '平台主动打款',
+      reviewNote: '',
+      settlementReference: reference,
+      reviewedAt: now,
+      createdAt: now,
+      updatedAt: now
+    });
   }
 
   function applyOrderRefund(data, order, now) {
@@ -1107,9 +1278,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           collaboration: order.collaboration || createCollaboration(order, merchant.id)
         }));
         const settlements = (data.settlements || []).filter((item) => item.merchantId === merchant.id);
+        const payoutRequests = (data.payoutRequests || [])
+          .filter((item) => item.merchantId === merchant.id)
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
         const settlementMetrics = {
           commissionRatePercent: Number(data.adminSettings?.commissionRatePercent ?? 2),
           settlementPeriodDays: settlementPeriodDays(data),
+          payoutMinimumInCents: payoutMinimumInCents(data),
+          pendingPayoutRequest: payoutRequests.find((item) => item.status === 'PENDING_REVIEW') || null,
           ...settlementSummary(settlements)
         };
         const afterSales = (data.afterSales || []).filter((record) => orders.some((order) => order.id === record.orderId));
@@ -1134,7 +1310,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             orders: enrichedOrders,
             afterSales,
             reviews,
-            settlements
+            settlements,
+            payoutRequests
           },
           requestId
         });
@@ -1166,23 +1343,24 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: updated, requestId });
       }
 
-      if (request.method === 'POST' && pathname === '/api/merchant/settlement') {
+      // 商家只能发起提现申请，实际打款由平台在管理端审核后确认。
+      if (request.method === 'POST' && pathname === '/api/merchant/payout-requests') {
         const body = await readJson(request);
-        const settlementReference = requireString(body.reference || '平台线下打款', 'reference', { maxLength: 120 });
-        const result = store.update((data) => {
+        const remark = typeof body.remark === 'string' ? body.remark.trim().slice(0, 200) : '';
+        const payoutRequest = store.update((data) => {
           const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
           if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号不可用');
-          const now = new Date().toISOString();
-          const totalInCents = settleMerchant(data, merchant.id, now, settlementReference);
-          addFinanceEvent(data, 'PAYOUT', `PAYOUT_${merchant.id}_${now}`, -totalInCents, {
-            merchantId: merchant.id, merchantName: merchant.name, settlementReference
-          }, now);
-          const settlementCount = (data.settlements || []).filter((item) => item.merchantId === merchant.id && item.settlementStatus === 'SETTLED').length;
-          addAudit(data, '商家结算打款确认', `${merchant.name} ${settlementReference}`);
-          addNotification(data, merchant.userId, 'SETTLEMENT', '结算已完成', `平台已确认结算 ${settlementCount} 笔，合计 ¥${(totalInCents / 100).toFixed(2)}。`);
-          return { merchantId: merchant.id, totalInCents, settlementCount, settlementReference };
+          return createPayoutRequest(data, merchant, new Date().toISOString(), remark);
         });
-        return sendJson(response, 200, { data: result, requestId });
+        return sendJson(response, 201, { data: payoutRequest, requestId });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/merchant/payout-requests') {
+        const data = store.read();
+        const items = (data.payoutRequests || [])
+          .filter((item) => item.merchantId === merchantSession.merchantId)
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
       if (request.method === 'POST' && pathname === '/api/merchant/products') {
@@ -1415,7 +1593,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             afterSales: data.afterSales,
             productReviews: data.productReviews || [],
             settlements: data.settlements || [],
-            settlementSummary: { ...settlementSummary(data.settlements || []), settlementPeriodDays: settlementPeriodDays(data) },
+            settlementSummary: { ...settlementSummary(data.settlements || []), settlementPeriodDays: settlementPeriodDays(data), payoutMinimumInCents: payoutMinimumInCents(data) },
+            payoutRequests: data.payoutRequests || [],
             financeEvents: data.financeEvents || [],
             financeSummary,
             settings: data.adminSettings,
@@ -1444,6 +1623,29 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           addAudit(data, '平台确认商家结算', `${merchant.name} ${settlementReference}`);
           addNotification(data, merchant.userId, 'SETTLEMENT', '结算已完成', `平台已确认结算 ${settlementCount} 笔，合计 ¥${(totalInCents / 100).toFixed(2)}。`);
           return { merchantId: merchant.id, merchantName: merchant.name, totalInCents, settlementCount, settlementReference };
+        });
+        return sendJson(response, 200, { data: result, requestId });
+      }
+
+      const adminPayoutReviewMatch = pathname.match(/^\/api\/admin\/payout-requests\/([^/]+)\/review$/);
+      if (request.method === 'POST' && adminPayoutReviewMatch) {
+        const body = await readJson(request);
+        const decision = requireString(body.decision, 'decision', { maxLength: 20 });
+        if (!['APPROVE', 'REJECT'].includes(decision)) throw new ApiError(400, 'VALIDATION_ERROR', 'decision 需为 APPROVE 或 REJECT');
+        const reference = decision === 'APPROVE' ? requireString(body.reference, 'reference', { maxLength: 120 }) : '';
+        const reviewNote = decision === 'REJECT' ? requireString(body.reviewNote, 'reviewNote', { maxLength: 300 }) : String(body.reviewNote || '').slice(0, 300);
+        const result = store.update((data) => {
+          const payoutRequest = (data.payoutRequests || []).find((item) => item.id === adminPayoutReviewMatch[1]);
+          if (!payoutRequest) throw new ApiError(404, 'PAYOUT_REQUEST_NOT_FOUND', '提现申请不存在');
+          if (payoutRequest.status !== 'PENDING_REVIEW') throw new ApiError(409, 'PAYOUT_REQUEST_CLOSED', '该提现申请已处理');
+          const now = new Date().toISOString();
+          if (decision === 'REJECT') {
+            const restored = rejectPayoutRequest(data, payoutRequest, now, reviewNote);
+            return { ...payoutRequest, restoredSettlementCount: restored };
+          }
+          payoutRequest.reviewNote = reviewNote;
+          const paidInCents = approvePayoutRequest(data, payoutRequest, now, reference);
+          return { ...payoutRequest, paidAmountInCents: paidInCents };
         });
         return sendJson(response, 200, { data: result, requestId });
       }
@@ -1990,6 +2192,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const days = Number(body.settlementPeriodDays);
             if (!Number.isInteger(days) || days < 0 || days > 60) throw new ApiError(400, 'VALIDATION_ERROR', '结算账期需为 0-60 天');
             current.settlementPeriodDays = days;
+          }
+          if (body.payoutMinimumInCents !== undefined) {
+            const minimum = Number(body.payoutMinimumInCents);
+            if (!Number.isInteger(minimum) || minimum < 0 || minimum > 1000000) throw new ApiError(400, 'VALIDATION_ERROR', '起提金额需为 0-1000000 分');
+            current.payoutMinimumInCents = minimum;
           }
           if (body.deliveryTimeSlots !== undefined) {
             if (!Array.isArray(body.deliveryTimeSlots) || body.deliveryTimeSlots.length < 1 || body.deliveryTimeSlots.length > 8) throw new ApiError(400, 'VALIDATION_ERROR', '配送时段需为 1-8 个');

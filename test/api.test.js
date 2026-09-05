@@ -1665,3 +1665,250 @@ test('after-sale freezes merchant settlement until the case is closed', async ()
   });
   assert.equal(restoredPeriod.body.data.settlementPeriodDays, 7);
 });
+
+test('merchant payouts require a request that the platform reviews', async () => {
+  const adminHeaders = await loginAdmin();
+
+  const invalidMinimum = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ payoutMinimumInCents: 1000001 })
+  });
+  assert.equal(invalidMinimum.response.status, 400);
+  const configured = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ settlementPeriodDays: 0, payoutMinimumInCents: 50000, commissionRatePercent: 2 })
+  });
+  assert.equal(configured.response.status, 200);
+  assert.equal(configured.body.data.payoutMinimumInCents, 50000);
+  assert.equal(configured.body.data.commissionRatePercent, 2);
+
+  const ownerSession = await loginWeChat('payout_merchant_owner');
+  const applied = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ownerSession.token}` },
+    body: JSON.stringify({
+      merchantType: 'INDIVIDUAL', name: '提现测试车行', ownerName: '提店主',
+      phone: '15527110011', licenseNo: '92420111MAKMT4600R', category: 'LIFE_SERVICE',
+      serviceArea: '狮山校区', description: '提现流程回归测试', licenseUrl: '/api/uploads/test-license.jpg',
+      settlementAccountName: '提店主', settlementBank: '校园演示银行', settlementAccount: '6222000000008888',
+      agreeAgreement: true, agreePrivacy: true
+    })
+  });
+  assert.equal(applied.response.status, 201);
+  const merchantId = applied.body.data.id;
+  await api(`/api/admin/merchants/${merchantId}/status`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ status: 'APPROVED', reviewNote: '资料齐全' })
+  });
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ownerSession.token}` },
+    body: JSON.stringify({ merchantId })
+  });
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  // 分账还没到可结算阶段时申请提现应被拒绝并说明原因。
+  const tooEarly = await api('/api/merchant/payout-requests', { method: 'POST', headers: merchantAuth, body: JSON.stringify({}) });
+  assert.equal(tooEarly.response.status, 409);
+  assert.equal(tooEarly.body.error.code, 'SETTLEMENT_NOT_RELEASED');
+
+  const product = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ name: '提现测试通勤车', category: 'E_BIKE_NEW', description: '提现流程回归', priceInCents: 40000, stock: 5 })
+  });
+  assert.equal(product.response.status, 201);
+
+  const buyer = await loginWeChat('payout_buyer');
+  async function payAndDeliver(quantity) {
+    const order = await api('/api/orders', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+      body: JSON.stringify({ items: [{ productId: product.body.data.id, quantity }] })
+    });
+    assert.equal(order.response.status, 201);
+    await confirmPayment(order.body.paymentOrder.id, buyer.token);
+    const detail = await api(`/api/orders/${order.body.data.id}`, { headers: { authorization: `Bearer ${buyer.token}` } });
+    const completed = await api(`/api/merchant/orders/${order.body.data.id}/status`, {
+      method: 'POST', headers: merchantAuth,
+      body: JSON.stringify({ status: 'COMPLETED', deliveryCode: detail.body.data.deliveryCode })
+    });
+    assert.equal(completed.response.status, 200);
+    return order.body.data.id;
+  }
+
+  // 单笔 ¥400 扣 2% 服务费后是 ¥392，低于 ¥500 起提金额。
+  const firstOrderId = await payAndDeliver(1);
+  const belowMinimum = await api('/api/merchant/payout-requests', { method: 'POST', headers: merchantAuth, body: JSON.stringify({}) });
+  assert.equal(belowMinimum.response.status, 409);
+  assert.equal(belowMinimum.body.error.code, 'PAYOUT_BELOW_MINIMUM');
+
+  await payAndDeliver(1);
+  const beforeRequest = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(beforeRequest.body.data.metrics.settlementMetrics.payableInCents, 78400);
+  assert.equal(beforeRequest.body.data.metrics.settlementMetrics.payoutMinimumInCents, 50000);
+  assert.equal(beforeRequest.body.data.metrics.settlementMetrics.pendingPayoutRequest, null);
+
+  const requested = await api('/api/merchant/payout-requests', {
+    method: 'POST', headers: merchantAuth, body: JSON.stringify({ remark: '本周结算' })
+  });
+  assert.equal(requested.response.status, 201);
+  assert.equal(requested.body.data.status, 'PENDING_REVIEW');
+  assert.equal(requested.body.data.amountInCents, 78400);
+  assert.equal(requested.body.data.settlementCount, 2);
+  assert.equal(requested.body.data.accountMasked, '6222 **** 8888');
+  const payoutRequestId = requested.body.data.id;
+
+  const duplicated = await api('/api/merchant/payout-requests', { method: 'POST', headers: merchantAuth, body: JSON.stringify({}) });
+  assert.equal(duplicated.response.status, 409);
+  assert.equal(duplicated.body.error.code, 'PAYOUT_REQUEST_EXISTS');
+
+  // 提现待审核期间平台不能绕过申请直接打款。
+  const bypass = await api(`/api/admin/merchants/${merchantId}/settle`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ reference: 'TEST-BYPASS' })
+  });
+  assert.equal(bypass.response.status, 409);
+  assert.equal(bypass.body.error.code, 'PAYOUT_REQUEST_PENDING');
+
+  const requestedOverview = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(requestedOverview.body.data.metrics.settlementMetrics.payableInCents, 0);
+  assert.equal(requestedOverview.body.data.metrics.settlementMetrics.payoutRequestedInCents, 78400);
+  assert.equal(requestedOverview.body.data.metrics.settlementMetrics.pendingPayoutRequest.id, payoutRequestId);
+  assert.equal(requestedOverview.body.data.payoutRequests[0].requestNo, requested.body.data.requestNo);
+
+  const rejected = await api(`/api/admin/payout-requests/${payoutRequestId}/review`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ decision: 'REJECT', reviewNote: '收款账户需要核对' })
+  });
+  assert.equal(rejected.response.status, 200);
+  assert.equal(rejected.body.data.status, 'REJECTED');
+  assert.equal(rejected.body.data.restoredSettlementCount, 2);
+
+  const afterReject = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(afterReject.body.data.metrics.settlementMetrics.payableInCents, 78400);
+  assert.equal(afterReject.body.data.metrics.settlementMetrics.payoutRequestedInCents, 0);
+  assert.equal(afterReject.body.data.metrics.settlementMetrics.pendingPayoutRequest, null);
+
+  const reopened = await api('/api/merchant/payout-requests', { method: 'POST', headers: merchantAuth, body: JSON.stringify({}) });
+  assert.equal(reopened.response.status, 201);
+  const reopenedId = reopened.body.data.id;
+
+  const missingReference = await api(`/api/admin/payout-requests/${reopenedId}/review`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ decision: 'APPROVE' })
+  });
+  assert.equal(missingReference.response.status, 400);
+
+  const approved = await api(`/api/admin/payout-requests/${reopenedId}/review`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ decision: 'APPROVE', reference: 'TEST-PAYOUT-REVIEW' })
+  });
+  assert.equal(approved.response.status, 200);
+  assert.equal(approved.body.data.status, 'SETTLED');
+  assert.equal(approved.body.data.paidAmountInCents, 78400);
+
+  const settledOverview = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(settledOverview.body.data.metrics.settlementMetrics.settledInCents, 78400);
+  assert.equal(settledOverview.body.data.metrics.settlementMetrics.payableInCents, 0);
+
+  const closedAgain = await api(`/api/admin/payout-requests/${reopenedId}/review`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ decision: 'APPROVE', reference: 'TEST-DOUBLE' })
+  });
+  assert.equal(closedAgain.response.status, 409);
+  assert.equal(closedAgain.body.error.code, 'PAYOUT_REQUEST_CLOSED');
+
+  const adminOverview = await api('/api/admin/overview', { headers: adminHeaders });
+  const payoutEvent = adminOverview.body.data.financeEvents.find((event) => event.settlementReference === 'TEST-PAYOUT-REVIEW');
+  assert.ok(payoutEvent);
+  assert.equal(payoutEvent.amountInCents, -78400);
+  assert.equal(payoutEvent.merchantId, merchantId);
+  assert.ok((adminOverview.body.data.payoutRequests || []).some((item) => item.id === reopenedId));
+
+  const restored = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ settlementPeriodDays: 7, payoutMinimumInCents: 10000 })
+  });
+  assert.equal(restored.body.data.payoutMinimumInCents, 10000);
+  assert.ok(firstOrderId);
+});
+
+test('after-sale closes a pending payout request and returns the money to the balance', async () => {
+  const adminHeaders = await loginAdmin();
+  const configured = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ settlementPeriodDays: 0, payoutMinimumInCents: 0, commissionRatePercent: 2 })
+  });
+  assert.equal(configured.response.status, 200);
+
+  const ownerSession = await loginWeChat('payout_freeze_owner');
+  const applied = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ownerSession.token}` },
+    body: JSON.stringify({
+      merchantType: 'INDIVIDUAL', name: '提现冻结车行', ownerName: '冻提店主',
+      phone: '15527110012', licenseNo: '92420111MAKMT4601R', category: 'LIFE_SERVICE',
+      serviceArea: '狮山校区', description: '提现冻结回归测试', licenseUrl: '/api/uploads/test-license.jpg',
+      settlementAccountName: '冻提店主', settlementBank: '校园演示银行', settlementAccount: '6222000000007777',
+      agreeAgreement: true, agreePrivacy: true
+    })
+  });
+  assert.equal(applied.response.status, 201);
+  const merchantId = applied.body.data.id;
+  await api(`/api/admin/merchants/${merchantId}/status`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ status: 'APPROVED', reviewNote: '资料齐全' })
+  });
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ownerSession.token}` },
+    body: JSON.stringify({ merchantId })
+  });
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const product = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ name: '提现冻结测试车', category: 'E_BIKE_NEW', description: '提现冻结回归', priceInCents: 60000, stock: 3 })
+  });
+  const buyer = await loginWeChat('payout_freeze_buyer');
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ items: [{ productId: product.body.data.id, quantity: 1 }] })
+  });
+  await confirmPayment(order.body.paymentOrder.id, buyer.token);
+  const detail = await api(`/api/orders/${order.body.data.id}`, { headers: { authorization: `Bearer ${buyer.token}` } });
+  await api(`/api/merchant/orders/${order.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'COMPLETED', deliveryCode: detail.body.data.deliveryCode })
+  });
+
+  const requested = await api('/api/merchant/payout-requests', { method: 'POST', headers: merchantAuth, body: JSON.stringify({}) });
+  assert.equal(requested.response.status, 201);
+  const payoutRequestId = requested.body.data.id;
+
+  const afterSale = await api('/api/after-sales', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ orderId: order.body.data.id, type: 'REPAIR', reason: '提车后发现仪表异常' })
+  });
+  assert.equal(afterSale.response.status, 201);
+
+  const frozen = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(frozen.body.data.metrics.settlementMetrics.payoutRequestedInCents, 0);
+  assert.equal(frozen.body.data.metrics.settlementMetrics.frozenInCents, 58800);
+  assert.equal(frozen.body.data.metrics.settlementMetrics.pendingPayoutRequest, null);
+  const cancelledRequest = frozen.body.data.payoutRequests.find((item) => item.id === payoutRequestId);
+  assert.equal(cancelledRequest.status, 'CANCELLED');
+  assert.ok(cancelledRequest.reviewNote.includes('售后'));
+
+  const reviewClosed = await api(`/api/admin/payout-requests/${payoutRequestId}/review`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ decision: 'APPROVE', reference: 'TEST-CANCELLED' })
+  });
+  assert.equal(reviewClosed.response.status, 409);
+
+  const closed = await api(`/api/merchant/after-sales/${afterSale.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'CLOSED', resolutionNote: '已更换仪表并复检通过' })
+  });
+  assert.equal(closed.response.status, 200);
+
+  const recovered = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(recovered.body.data.metrics.settlementMetrics.payableInCents, 58800);
+  assert.equal(recovered.body.data.metrics.settlementMetrics.frozenInCents, 0);
+
+  const reRequested = await api('/api/merchant/payout-requests', { method: 'POST', headers: merchantAuth, body: JSON.stringify({}) });
+  assert.equal(reRequested.response.status, 201);
+  assert.equal(reRequested.body.data.amountInCents, 58800);
+
+  const restored = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ settlementPeriodDays: 7, payoutMinimumInCents: 10000 })
+  });
+  assert.equal(restored.response.status, 200);
+});

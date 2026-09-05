@@ -153,17 +153,50 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 支付成功            → PENDING_DELIVERY   待交付核验
 用户交付码核验通过  → IN_ACCOUNT_PERIOD  账期中（availableAt = 核验时间 + settlementPeriodDays）
 账期到期            → PENDING_SETTLE     可结算
-平台确认打款        → SETTLED            已结算
+商家申请提现        → PAYOUT_REQUESTED   提现待审核（写入 payoutRequestId 并锁定金额）
+平台审核通过打款    → SETTLED            已结算
+平台驳回提现        → 回到 PENDING_SETTLE
 订单进入售后        → FROZEN             售后冻结（记录 statusBeforeFreeze / frozenReason）
 售后关闭            → 恢复冻结前状态
 订单退款            → REFUNDED           已冲销
 ```
 
 - 账期天数由管理端 `settlementPeriodDays` 控制（0–60 天，默认 7；设为 0 表示核验后立即可结算）。
-- `POST /api/admin/merchants/:id/settle` 只结算 `PENDING_SETTLE` 的记录；若资金还卡在交付核验、账期或售后冻结，接口返回 409 `SETTLEMENT_NOT_RELEASED` 并说明卡在哪一步。
+- `POST /api/admin/merchants/:id/settle` 只结算 `PENDING_SETTLE` 的记录；若资金还卡在交付核验、账期或售后冻结，接口返回 409 `SETTLEMENT_NOT_RELEASED` 并说明卡在哪一步；若该商家已有待审核提现单，返回 409 `PAYOUT_REQUEST_PENDING`，必须走审核流程而不能绕过。
 - 售后关闭（非退款）会解冻并恢复原有 `availableAt`，不会因为走过售后而重新起算账期。
 - 账期到期同样是惰性清扫：商家概览、管理端概览接口会在读取时把到期记录推进到 `PENDING_SETTLE`。
-- 商家概览的 `settlementMetrics` 与管理端概览的 `settlementSummary` 都按上述六种状态分别汇总金额，管理端「商家结算」页和小程序商家工作台据此展示资金分布。
+- 商家概览的 `settlementMetrics` 与管理端概览的 `settlementSummary` 都按上述状态分别汇总金额（含 `payoutRequestedInCents`），管理端「商家结算」页和小程序商家工作台据此展示资金分布。
+
+### 商家提现申请与平台审核
+
+资金不再由商家自己确认到账。商家只能提交提现申请，平台在管理端审核后才会打款，提现单状态机为 `PENDING_REVIEW → SETTLED / REJECTED / CANCELLED`。
+
+`POST /api/merchant/payout-requests`（商家身份，可选 body `{ "remark": "本周结算" }`）
+
+- 未配置完整收款账户（户名/开户行/账号）返回 400。
+- 已存在待审核提现单返回 409 `PAYOUT_REQUEST_EXISTS`。
+- 无可结算金额返回 409 `SETTLEMENT_NOT_RELEASED` 并说明资金卡在哪一步。
+- 可结算金额低于起提门槛返回 409 `PAYOUT_BELOW_MINIMUM`。
+- 成功返回 201，把该商家所有 `PENDING_SETTLE` 分账置为 `PAYOUT_REQUESTED` 并写入 `payoutRequestId`。
+
+`GET /api/merchant/payout-requests` 返回该商家的提现记录。
+
+`POST /api/admin/payout-requests/:id/review`
+
+```json
+{
+  "decision": "APPROVE",
+  "reference": "BANK-20260906-001",
+  "reviewNote": "已通过企业网银转账"
+}
+```
+
+- `decision` 为 `APPROVE` 时必须提供 `reference`（打款凭证号），否则 400；通过后分账转 `SETTLED` 并写入一条 `PAYOUT` 财务流水。
+- `decision` 为 `REJECT` 时必须提供 `reviewNote`（驳回原因），否则 400；驳回后金额退回 `PENDING_SETTLE`，商家可修改信息后重新申请。
+- 已处理过的提现单再次审核返回 409 `PAYOUT_REQUEST_CLOSED`。
+- 起提门槛由管理端 `payoutMinimumInCents` 控制（0–1000000 分，默认 10000 分即 ¥100），管理端设置页以“元”为单位填写。
+- 平台在「商家结算」页直接打款（`/api/admin/merchants/:id/settle`）也会补记一条 `initiatedBy: "PLATFORM"` 的已结算提现单，保证台账口径一致。
+- 订单进入售后或退款时，关联的待审核提现单会自动置为 `CANCELLED`，未受影响的金额退回 `PENDING_SETTLE`；商家与平台都会收到通知。
 
 ## 当前边界
 
@@ -173,4 +206,4 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 未接入真实微信支付、实名服务、校方校园卡系统、物流或消息通知。
 - 库存已实现“预占 → 支付扣减 → 取消/超时释放 → 退款回补”闭环，但仍是单进程 JSON/MySQL 快照方案，高并发场景需要数据库行级锁或独立库存服务。
 - 超时关单依赖读接口触发的惰性清扫（商品、订单、概览接口），没有独立定时任务；长时间无人访问时订单会在下一次访问时统一关闭。
-- 分账账期到期同样依赖读接口惰性清扫，没有独立定时任务；打款本身仍是人工在管理端确认的模拟动作，未接入真实企业付款接口。
+- 分账账期到期同样依赖读接口惰性清扫，没有独立定时任务；提现审核与打款仍是人工在管理端确认的模拟动作，未接入真实企业付款/企业转账接口，也没有银行回单附件上传与批量打款。
