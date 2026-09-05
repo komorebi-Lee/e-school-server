@@ -180,6 +180,7 @@ function initialData() {
       afterSaleResponseHours: 24,
       afterSaleResolutionHours: 72,
       paymentTimeoutMinutes: 30,
+      settlementPeriodDays: 7,
       deliveryTimeSlots: ['今天 12:00-14:00', '今天 16:00-18:00', '明天 10:00-12:00'],
       platformNotice: '服务范围和办理结果以学校及合作方最终确认为准。'
     },

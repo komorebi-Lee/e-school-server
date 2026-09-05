@@ -51,6 +51,7 @@ function publicSettings(settings = {}) {
     afterSaleResponseHours: settings.afterSaleResponseHours || 24,
     afterSaleResolutionHours: settings.afterSaleResolutionHours || 72,
     paymentTimeoutMinutes: settings.paymentTimeoutMinutes || 30,
+    settlementPeriodDays: Number.isInteger(settings.settlementPeriodDays) ? settings.settlementPeriodDays : 7,
     deliveryTimeSlots: Array.isArray(settings.deliveryTimeSlots) && settings.deliveryTimeSlots.length ? settings.deliveryTimeSlots : ['尽快配送'],
     platformNotice: settings.platformNotice || '服务范围和办理结果以学校及合作方最终确认为准。'
   };
@@ -407,7 +408,13 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
         amountInCents: 0,
         commissionRatePercent,
         platformFeeInCents: 0,
-        settlementStatus: 'PENDING_SETTLE',
+        // 支付成功只是资金在途，必须等交付核验通过并过完账期才可打款。
+        settlementStatus: 'PENDING_DELIVERY',
+        deliveredAt: '',
+        availableAt: '',
+        settlementPeriodDays: settlementPeriodDays(data),
+        statusBeforeFreeze: '',
+        frozenReason: '',
         createdAt: now,
         updatedAt: now,
         refundedAt: ''
@@ -425,6 +432,100 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     return created;
   }
 
+  function settlementPeriodDays(data) {
+    const value = Number(data?.adminSettings?.settlementPeriodDays);
+    return Number.isInteger(value) && value >= 0 && value <= 60 ? value : 7;
+  }
+
+  // 交付核验通过后开始计算账期；账期为 0 天时立即可结算。
+  function activateOrderSettlements(data, order, now) {
+    if (!order?.id || !Array.isArray(data.settlements)) return [];
+    const days = settlementPeriodDays(data);
+    const touched = [];
+    for (const settlement of data.settlements) {
+      if (settlement.orderId !== order.id) continue;
+      if (['SETTLED', 'REFUNDED'].includes(settlement.settlementStatus)) continue;
+      // 已经开始计算账期的分账不重置到期时间，避免售后关闭后账期被无故延长。
+      const availableAt = settlement.availableAt || new Date(new Date(now).getTime() + days * 24 * 60 * 60 * 1000).toISOString();
+      settlement.deliveredAt = settlement.deliveredAt || now;
+      settlement.availableAt = availableAt;
+      settlement.settlementPeriodDays = settlement.deliveredAt === now ? days : (settlement.settlementPeriodDays ?? days);
+      settlement.settlementStatus = availableAt <= now ? 'PENDING_SETTLE' : 'IN_ACCOUNT_PERIOD';
+      settlement.statusBeforeFreeze = '';
+      settlement.frozenReason = '';
+      settlement.updatedAt = now;
+      touched.push(settlement);
+    }
+    return touched;
+  }
+
+  // 订单进入售后时冻结分账，避免钱已打款但商品要退回。
+  function freezeOrderSettlements(data, order, now, reason) {
+    if (!order?.id || !Array.isArray(data.settlements)) return [];
+    const frozen = [];
+    for (const settlement of data.settlements) {
+      if (settlement.orderId !== order.id) continue;
+      if (!['PENDING_DELIVERY', 'IN_ACCOUNT_PERIOD', 'PENDING_SETTLE'].includes(settlement.settlementStatus)) continue;
+      settlement.statusBeforeFreeze = settlement.settlementStatus;
+      settlement.settlementStatus = 'FROZEN';
+      settlement.frozenReason = String(reason || '售后处理中').slice(0, 120);
+      settlement.updatedAt = now;
+      frozen.push(settlement);
+    }
+    return frozen;
+  }
+
+  function unfreezeOrderSettlements(data, order, now) {
+    if (!order?.id || !Array.isArray(data.settlements)) return [];
+    const restored = [];
+    for (const settlement of data.settlements) {
+      if (settlement.orderId !== order.id || settlement.settlementStatus !== 'FROZEN') continue;
+      const previous = settlement.statusBeforeFreeze || 'PENDING_DELIVERY';
+      settlement.settlementStatus = previous === 'PENDING_DELIVERY'
+        ? 'PENDING_DELIVERY'
+        : (settlement.availableAt && settlement.availableAt <= now ? 'PENDING_SETTLE' : 'IN_ACCOUNT_PERIOD');
+      settlement.statusBeforeFreeze = '';
+      settlement.frozenReason = '';
+      settlement.updatedAt = now;
+      restored.push(settlement);
+    }
+    return restored;
+  }
+
+  function releaseMaturedSettlements(data, now = new Date().toISOString()) {
+    const released = [];
+    for (const settlement of data.settlements || []) {
+      if (settlement.settlementStatus !== 'IN_ACCOUNT_PERIOD') continue;
+      if (!settlement.availableAt || settlement.availableAt > now) continue;
+      settlement.settlementStatus = 'PENDING_SETTLE';
+      settlement.updatedAt = now;
+      released.push(settlement.id);
+    }
+    return released;
+  }
+
+  function sweepMaturedSettlements() {
+    const snapshot = store.read();
+    const now = new Date().toISOString();
+    const hasMatured = (snapshot.settlements || []).some((item) => item.settlementStatus === 'IN_ACCOUNT_PERIOD' && item.availableAt && item.availableAt <= now);
+    if (!hasMatured) return [];
+    return store.update((data) => releaseMaturedSettlements(data, new Date().toISOString()));
+  }
+
+  function settlementSummary(settlements) {
+    const sum = (status) => settlements
+      .filter((item) => item.settlementStatus === status)
+      .reduce((total, item) => total + (item.payableAmountInCents || 0), 0);
+    return {
+      pendingDeliveryInCents: sum('PENDING_DELIVERY'),
+      inAccountPeriodInCents: sum('IN_ACCOUNT_PERIOD'),
+      frozenInCents: sum('FROZEN'),
+      payableInCents: sum('PENDING_SETTLE'),
+      settledInCents: sum('SETTLED'),
+      refundedInCents: sum('REFUNDED')
+    };
+  }
+
   function markSettlementsRefunded(data, orderId, now) {
     if (!orderId || !Array.isArray(data.settlements)) return;
     for (const settlement of data.settlements) {
@@ -432,13 +533,28 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
       settlement.settlementStatus = 'REFUNDED';
       settlement.updatedAt = now;
       settlement.refundedAt = now;
+      settlement.statusBeforeFreeze = '';
+      settlement.frozenReason = '';
     }
   }
 
   function settleMerchant(data, merchantId, now, reference) {
     if (!Array.isArray(data.settlements)) throw new ApiError(404, 'SETTLEMENT_NOT_FOUND', 'Settlement record not found');
+    releaseMaturedSettlements(data, now);
     const settlements = data.settlements.filter((item) => item.merchantId === merchantId && item.settlementStatus === 'PENDING_SETTLE');
-    if (!settlements.length) throw new ApiError(404, 'PENDING_SETTLEMENT_NOT_FOUND', 'No pending settlement');
+    if (!settlements.length) {
+      const blocked = data.settlements.filter((item) => item.merchantId === merchantId && ['PENDING_DELIVERY', 'IN_ACCOUNT_PERIOD', 'FROZEN'].includes(item.settlementStatus));
+      if (blocked.length) {
+        const reasons = {
+          PENDING_DELIVERY: '订单尚未完成交付核验',
+          IN_ACCOUNT_PERIOD: '账期未到期',
+          FROZEN: '存在售后冻结的分账'
+        };
+        const detail = [...new Set(blocked.map((item) => reasons[item.settlementStatus]))].join('、');
+        throw new ApiError(409, 'SETTLEMENT_NOT_RELEASED', `暂无可结算金额：${detail}`);
+      }
+      throw new ApiError(404, 'PENDING_SETTLEMENT_NOT_FOUND', 'No pending settlement');
+    }
     let totalInCents = 0;
     for (const settlement of settlements) {
       settlement.settlementStatus = 'SETTLED';
@@ -828,6 +944,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 throw new ApiError(409, 'DELIVERY_CODE_INVALID', '交付码不正确，请向用户确认后完成订单');
               }
               item.status = 'COMPLETED';
+              activateOrderSettlements(data, item, new Date().toISOString());
             }
             else if (!['CONTACT','NOTE'].includes(action)) throw new ApiError(409,'ACTION_NOT_ALLOWED','当前状态不支持该商家动作');
           }
@@ -956,6 +1073,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (request.method === 'GET' && pathname === '/api/merchant/overview') {
         sweepExpiredOrders();
+        sweepMaturedSettlements();
         const data = store.read();
             const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
             if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
@@ -991,9 +1109,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const settlements = (data.settlements || []).filter((item) => item.merchantId === merchant.id);
         const settlementMetrics = {
           commissionRatePercent: Number(data.adminSettings?.commissionRatePercent ?? 2),
-          payableInCents: settlements.filter((item) => item.settlementStatus === 'PENDING_SETTLE').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0),
-          settledInCents: settlements.filter((item) => item.settlementStatus === 'SETTLED').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0),
-          refundedInCents: settlements.filter((item) => item.settlementStatus === 'REFUNDED').reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0)
+          settlementPeriodDays: settlementPeriodDays(data),
+          ...settlementSummary(settlements)
         };
         const afterSales = (data.afterSales || []).filter((record) => orders.some((order) => order.id === record.orderId));
         const revenueInCents = orders.filter((order) => ['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(order.status))
@@ -1141,7 +1258,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           item.updatedAt = new Date().toISOString();
           appendCollaborationEvent(item, 'MERCHANT', status === 'FULFILLING' ? 'ACCEPT' : 'COMPLETE', status === 'FULFILLING' ? '商家已确认履约' : '商家已核验交付码，订单已完成');
           addAudit(data, '商家更新订单状态', item.orderNo);
-          if (status === 'COMPLETED') addNotification(data, item.userId, 'ORDER', '订单已完成', `订单 ${item.orderNo} 已通过交付码核验并完成。`);
+          if (status === 'COMPLETED') {
+            const released = activateOrderSettlements(data, item, item.updatedAt);
+            addNotification(data, item.userId, 'ORDER', '订单已完成', `订单 ${item.orderNo} 已通过交付码核验并完成。`);
+            if (released.length) {
+              const days = settlementPeriodDays(data);
+              notifyMerchant(data, merchantSession.merchantId, 'SETTLEMENT', '分账已进入账期', `订单 ${item.orderNo} 交付核验通过，${days > 0 ? `${days} 天账期后可结算` : '可立即结算'}。`);
+            }
+          }
           return item;
         });
         return sendJson(response, 200, { data: order, requestId });
@@ -1170,6 +1294,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           } else if (status === 'CLOSED') {
             order.status = 'COMPLETED';
             order.updatedAt = item.updatedAt;
+            unfreezeOrderSettlements(data, order, item.updatedAt);
+            activateOrderSettlements(data, order, item.updatedAt);
             appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', `售后处理完成：${resolutionNote}`);
             addNotification(data, order.userId, 'AFTER_SALE', '售后处理完成', resolutionNote);
           }
@@ -1250,6 +1376,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (request.method === 'GET' && pathname === '/api/admin/overview') {
         sweepExpiredOrders();
+        sweepMaturedSettlements();
         const data = store.read();
         const leads = data.leads || [];
         const revenueInCents = data.orders.filter((item) => item.status !== 'PENDING_PAYMENT' && item.status !== 'CANCELLED').reduce((sum, order) => sum + (order.totalInCents || 0), 0)
@@ -1288,6 +1415,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             afterSales: data.afterSales,
             productReviews: data.productReviews || [],
             settlements: data.settlements || [],
+            settlementSummary: { ...settlementSummary(data.settlements || []), settlementPeriodDays: settlementPeriodDays(data) },
             financeEvents: data.financeEvents || [],
             financeSummary,
             settings: data.adminSettings,
@@ -1722,8 +1850,19 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (adminStatusMatch[1] === 'after-sales' && status === 'CLOSED') {
             const order = (data.orders || []).find((row) => row.id === item.orderId);
             if (order && item.type === 'REFUND') applyOrderRefund(data, order, item.updatedAt);
-            else if (order) { order.status = 'COMPLETED'; order.updatedAt = item.updatedAt; }
+            else if (order) {
+              order.status = 'COMPLETED';
+              order.updatedAt = item.updatedAt;
+              unfreezeOrderSettlements(data, order, item.updatedAt);
+              activateOrderSettlements(data, order, item.updatedAt);
+            }
             item.resolutionNote = resolutionNote;
+          }
+          if (adminStatusMatch[1] === 'orders' && status === 'COMPLETED') {
+            activateOrderSettlements(data, item, item.updatedAt);
+          }
+          if (adminStatusMatch[1] === 'orders' && status === 'AFTER_SALE') {
+            freezeOrderSettlements(data, item, item.updatedAt, '平台已将订单转入售后');
           }
           const template = adminStatusMatch[1] === 'after-sales' && status === 'CLOSED'
             ? null
@@ -1846,6 +1985,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const minutes = Number(body.paymentTimeoutMinutes);
             if (!Number.isInteger(minutes) || minutes < 5 || minutes > 1440) throw new ApiError(400, 'VALIDATION_ERROR', '支付超时需为 5-1440 分钟');
             current.paymentTimeoutMinutes = minutes;
+          }
+          if (body.settlementPeriodDays !== undefined) {
+            const days = Number(body.settlementPeriodDays);
+            if (!Number.isInteger(days) || days < 0 || days > 60) throw new ApiError(400, 'VALIDATION_ERROR', '结算账期需为 0-60 天');
+            current.settlementPeriodDays = days;
           }
           if (body.deliveryTimeSlots !== undefined) {
             if (!Array.isArray(body.deliveryTimeSlots) || body.deliveryTimeSlots.length < 1 || body.deliveryTimeSlots.length > 8) throw new ApiError(400, 'VALIDATION_ERROR', '配送时段需为 1-8 个');
@@ -2303,6 +2447,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           data.afterSales.push(record);
           order.status = 'AFTER_SALE';
           order.updatedAt = now;
+          freezeOrderSettlements(data, order, now, `${record.typeLabel}：${reason}`);
           notifyOrderMerchant(data, order, 'AFTER_SALE', '收到新的售后申请', `订单 ${order.orderNo}：${record.typeLabel}，${reason}`);
           addAudit(data, '用户提交售后申请', order.orderNo);
           return record;

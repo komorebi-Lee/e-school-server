@@ -420,38 +420,22 @@ test('merchant can be approved and manage its own products and orders', async ()
   assert.equal(overview.body.data.settlements[0].commissionRatePercent, 8);
   assert.equal(overview.body.data.settlements[0].platformFeeInCents, 200);
   assert.equal(overview.body.data.settlements[0].payableAmountInCents, 2300);
+  assert.equal(overview.body.data.settlements[0].settlementStatus, 'PENDING_DELIVERY');
   assert.equal(overview.body.data.metrics.settlementMetrics.commissionRatePercent, 8);
-  assert.equal(overview.body.data.metrics.settlementMetrics.payableInCents, 2300);
+  assert.equal(overview.body.data.metrics.settlementMetrics.pendingDeliveryInCents, 2300);
+  assert.equal(overview.body.data.metrics.settlementMetrics.payableInCents, 0);
   assert.equal(overview.body.data.merchant.settlementAccountReady, true);
   assert.equal(overview.body.data.merchant.settlementAccountMasked, '6222 **** 0000');
   assert.ok(!('deliveryCode' in overview.body.data.orders[0]));
 
-  const settled = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
+  // 交付未核验前不允许打款，避免钱先出后货没到。
+  const earlySettle = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
-    body: JSON.stringify({ reference: 'TEST-PAYOUT-001' })
+    body: JSON.stringify({ reference: 'TEST-PAYOUT-EARLY' })
   });
-  assert.equal(settled.response.status, 200);
-  assert.equal(settled.body.data.totalInCents, 2300);
-  assert.equal(settled.body.data.settlementCount, 1);
-  assert.equal(settled.body.data.settlementReference, 'TEST-PAYOUT-001');
-  const settledOverview = await api('/api/merchant/overview', { headers: merchantAuth });
-  assert.equal(settledOverview.body.data.metrics.settlementMetrics.payableInCents, 0);
-  assert.equal(settledOverview.body.data.metrics.settlementMetrics.settledInCents, 2300);
-  const payoutOverview = await api('/api/admin/overview', { headers: { authorization: `Bearer ${adminLogin.body.data.token}` } });
-  const payoutFinanceEvent = payoutOverview.body.data.financeEvents.find((event) => event.eventType === 'PAYOUT' && event.settlementReference === 'TEST-PAYOUT-001');
-  assert.ok(payoutFinanceEvent);
-  assert.equal(payoutFinanceEvent.amountInCents, -2300);
-  assert.equal(payoutFinanceEvent.merchantId, applied.body.data.id);
-  const resetRate = await api('/api/admin/settings', {
-    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
-    body: JSON.stringify({ commissionRatePercent: 2 })
-  });
-  assert.equal(resetRate.body.data.commissionRatePercent, 2);
-  const repeatSettle = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
-    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
-    body: JSON.stringify({ reference: 'TEST-PAYOUT-002' })
-  });
-  assert.equal(repeatSettle.response.status, 404);
+  assert.equal(earlySettle.response.status, 409);
+  assert.equal(earlySettle.body.error.code, 'SETTLEMENT_NOT_RELEASED');
+  assert.ok(earlySettle.body.error.message.includes('交付核验'));
 
   const paidOrder = await api(`/api/orders/${created.body.data.id}`, {
     headers: { authorization: `Bearer ${merchantSession.token}` }
@@ -480,6 +464,59 @@ test('merchant can be approved and manage its own products and orders', async ()
   });
   assert.equal(fulfilled.response.status, 200);
   assert.equal(fulfilled.body.data.status, 'COMPLETED');
+
+  // 交付核验通过后进入账期，账期未到期仍然不能打款。
+  const inPeriod = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(inPeriod.body.data.settlements[0].settlementStatus, 'IN_ACCOUNT_PERIOD');
+  assert.equal(inPeriod.body.data.settlements[0].settlementPeriodDays, 7);
+  assert.ok(inPeriod.body.data.settlements[0].deliveredAt);
+  assert.equal(inPeriod.body.data.metrics.settlementMetrics.inAccountPeriodInCents, 2300);
+  assert.equal(inPeriod.body.data.metrics.settlementMetrics.payableInCents, 0);
+  assert.equal(inPeriod.body.data.metrics.settlementMetrics.settlementPeriodDays, 7);
+
+  const periodSettle = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ reference: 'TEST-PAYOUT-PERIOD' })
+  });
+  assert.equal(periodSettle.response.status, 409);
+  assert.ok(periodSettle.body.error.message.includes('账期'));
+
+  store.update((data) => {
+    for (const settlement of data.settlements) {
+      if (settlement.merchantId === applied.body.data.id) settlement.availableAt = new Date(Date.now() - 60 * 1000).toISOString();
+    }
+  });
+
+  const matured = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(matured.body.data.settlements[0].settlementStatus, 'PENDING_SETTLE');
+  assert.equal(matured.body.data.metrics.settlementMetrics.payableInCents, 2300);
+
+  const settled = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ reference: 'TEST-PAYOUT-001' })
+  });
+  assert.equal(settled.response.status, 200);
+  assert.equal(settled.body.data.totalInCents, 2300);
+  assert.equal(settled.body.data.settlementCount, 1);
+  assert.equal(settled.body.data.settlementReference, 'TEST-PAYOUT-001');
+  const settledOverview = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(settledOverview.body.data.metrics.settlementMetrics.payableInCents, 0);
+  assert.equal(settledOverview.body.data.metrics.settlementMetrics.settledInCents, 2300);
+  const payoutOverview = await api('/api/admin/overview', { headers: { authorization: `Bearer ${adminLogin.body.data.token}` } });
+  const payoutFinanceEvent = payoutOverview.body.data.financeEvents.find((event) => event.eventType === 'PAYOUT' && event.settlementReference === 'TEST-PAYOUT-001');
+  assert.ok(payoutFinanceEvent);
+  assert.equal(payoutFinanceEvent.amountInCents, -2300);
+  assert.equal(payoutFinanceEvent.merchantId, applied.body.data.id);
+  const resetRate = await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ commissionRatePercent: 2 })
+  });
+  assert.equal(resetRate.body.data.commissionRatePercent, 2);
+  const repeatSettle = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ reference: 'TEST-PAYOUT-002' })
+  });
+  assert.equal(repeatSettle.response.status, 404);
 
   const afterSale = await api('/api/after-sales', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
@@ -945,7 +982,7 @@ test('payment lifecycle creates notifications and supports cancel or refund', as
   });
   const linkedSettlement = adminOverviewBeforeRefund.body.data.settlements.find((item) => item.paymentId === paidOrder.body.paymentOrder.id);
   assert.ok(linkedSettlement);
-  assert.equal(linkedSettlement.settlementStatus, 'PENDING_SETTLE');
+  assert.equal(linkedSettlement.settlementStatus, 'PENDING_DELIVERY');
   assert.equal(linkedSettlement.commissionRatePercent, 2);
   assert.equal(linkedSettlement.payableAmountInCents, linkedSettlement.amountInCents - linkedSettlement.platformFeeInCents);
   const paidFinanceEvent = adminOverviewBeforeRefund.body.data.financeEvents.find((event) => event.referenceId === `PAYMENT_${paidOrder.body.paymentOrder.id}`);
@@ -1518,4 +1555,113 @@ test('unpaid orders expire on the configured payment timeout and free the stock'
     body: JSON.stringify({ paymentTimeoutMinutes: 30, afterSaleResolutionHours: 72 })
   });
   assert.equal(restored.response.status, 200);
+});
+
+test('after-sale freezes merchant settlement until the case is closed', async () => {
+  const adminHeaders = await loginAdmin();
+
+  const invalidPeriod = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ settlementPeriodDays: 61 })
+  });
+  assert.equal(invalidPeriod.response.status, 400);
+  const zeroPeriod = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ settlementPeriodDays: 0 })
+  });
+  assert.equal(zeroPeriod.response.status, 200);
+  assert.equal(zeroPeriod.body.data.settlementPeriodDays, 0);
+
+  const ownerSession = await loginWeChat('freeze_merchant_owner');
+  const applied = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ownerSession.token}` },
+    body: JSON.stringify({
+      merchantType: 'INDIVIDUAL', name: '冻结测试车行', ownerName: '冻店主',
+      phone: '15527110009', licenseNo: '92420111MAKMT4599R', category: 'LIFE_SERVICE',
+      serviceArea: '狮山校区', description: '售后冻结回归测试', licenseUrl: '/api/uploads/test-license.jpg',
+      settlementAccountName: '冻店主', settlementBank: '校园演示银行', settlementAccount: '6222000000009999',
+      agreeAgreement: true, agreePrivacy: true
+    })
+  });
+  assert.equal(applied.response.status, 201);
+  const approved = await api(`/api/admin/merchants/${applied.body.data.id}/status`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ status: 'APPROVED', reviewNote: '资料齐全' })
+  });
+  assert.equal(approved.response.status, 200);
+
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ownerSession.token}` },
+    body: JSON.stringify({ merchantId: applied.body.data.id })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const product = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ name: '冻结测试通勤车', category: 'E_BIKE_NEW', description: '售后冻结回归', priceInCents: 100000, stock: 5 })
+  });
+  assert.equal(product.response.status, 201);
+
+  const buyer = await loginWeChat('freeze_buyer');
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ items: [{ productId: product.body.data.id, quantity: 1 }] })
+  });
+  assert.equal(order.response.status, 201);
+  await confirmPayment(order.body.paymentOrder.id, buyer.token);
+
+  const detail = await api(`/api/orders/${order.body.data.id}`, { headers: { authorization: `Bearer ${buyer.token}` } });
+  const completed = await api(`/api/merchant/orders/${order.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'COMPLETED', deliveryCode: detail.body.data.deliveryCode })
+  });
+  assert.equal(completed.response.status, 200);
+
+  // 账期设为 0 天，交付核验通过后应直接可结算。
+  const releasable = await api('/api/merchant/overview', { headers: merchantAuth });
+  const settlementId = releasable.body.data.settlements[0].id;
+  assert.equal(releasable.body.data.settlements[0].settlementStatus, 'PENDING_SETTLE');
+  assert.equal(releasable.body.data.settlements[0].settlementPeriodDays, 0);
+  assert.equal(releasable.body.data.metrics.settlementMetrics.payableInCents, 98000);
+
+  const afterSale = await api('/api/after-sales', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ orderId: order.body.data.id, type: 'REPAIR', reason: '刹车异响需要检修' })
+  });
+  assert.equal(afterSale.response.status, 201);
+
+  const frozen = await api('/api/merchant/overview', { headers: merchantAuth });
+  const frozenSettlement = frozen.body.data.settlements.find((item) => item.id === settlementId);
+  assert.equal(frozenSettlement.settlementStatus, 'FROZEN');
+  assert.ok(frozenSettlement.frozenReason.includes('刹车异响'));
+  assert.equal(frozen.body.data.metrics.settlementMetrics.frozenInCents, 98000);
+  assert.equal(frozen.body.data.metrics.settlementMetrics.payableInCents, 0);
+
+  const blockedSettle = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ reference: 'TEST-FROZEN' })
+  });
+  assert.equal(blockedSettle.response.status, 409);
+  assert.equal(blockedSettle.body.error.code, 'SETTLEMENT_NOT_RELEASED');
+  assert.ok(blockedSettle.body.error.message.includes('售后冻结'));
+
+  const closed = await api(`/api/merchant/after-sales/${afterSale.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'CLOSED', resolutionNote: '已更换刹车片并复检通过' })
+  });
+  assert.equal(closed.response.status, 200);
+
+  const unfrozen = await api('/api/merchant/overview', { headers: merchantAuth });
+  const releasedSettlement = unfrozen.body.data.settlements.find((item) => item.id === settlementId);
+  assert.equal(releasedSettlement.settlementStatus, 'PENDING_SETTLE');
+  assert.equal(releasedSettlement.frozenReason, '');
+  assert.equal(unfrozen.body.data.metrics.settlementMetrics.payableInCents, 98000);
+
+  const payout = await api(`/api/admin/merchants/${applied.body.data.id}/settle`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ reference: 'TEST-UNFROZEN' })
+  });
+  assert.equal(payout.response.status, 200);
+  assert.equal(payout.body.data.totalInCents, 98000);
+
+  const restoredPeriod = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ settlementPeriodDays: 7 })
+  });
+  assert.equal(restoredPeriod.body.data.settlementPeriodDays, 7);
 });

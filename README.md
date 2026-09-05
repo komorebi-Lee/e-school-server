@@ -145,6 +145,26 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 
 `GET /api/after-sales?userId=user_demo`
 
+### 商家分账与账期
+
+支付成功会为每个涉及商家的订单生成分账记录，但资金不会立刻可结算，而是走下面这条状态机：
+
+```
+支付成功            → PENDING_DELIVERY   待交付核验
+用户交付码核验通过  → IN_ACCOUNT_PERIOD  账期中（availableAt = 核验时间 + settlementPeriodDays）
+账期到期            → PENDING_SETTLE     可结算
+平台确认打款        → SETTLED            已结算
+订单进入售后        → FROZEN             售后冻结（记录 statusBeforeFreeze / frozenReason）
+售后关闭            → 恢复冻结前状态
+订单退款            → REFUNDED           已冲销
+```
+
+- 账期天数由管理端 `settlementPeriodDays` 控制（0–60 天，默认 7；设为 0 表示核验后立即可结算）。
+- `POST /api/admin/merchants/:id/settle` 只结算 `PENDING_SETTLE` 的记录；若资金还卡在交付核验、账期或售后冻结，接口返回 409 `SETTLEMENT_NOT_RELEASED` 并说明卡在哪一步。
+- 售后关闭（非退款）会解冻并恢复原有 `availableAt`，不会因为走过售后而重新起算账期。
+- 账期到期同样是惰性清扫：商家概览、管理端概览接口会在读取时把到期记录推进到 `PENDING_SETTLE`。
+- 商家概览的 `settlementMetrics` 与管理端概览的 `settlementSummary` 都按上述六种状态分别汇总金额，管理端「商家结算」页和小程序商家工作台据此展示资金分布。
+
 ## 当前边界
 
 - `userId` 是模拟身份参数，生产环境应从微信登录后的服务端会话中取得，不能信任客户端传值。
@@ -153,3 +173,4 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 未接入真实微信支付、实名服务、校方校园卡系统、物流或消息通知。
 - 库存已实现“预占 → 支付扣减 → 取消/超时释放 → 退款回补”闭环，但仍是单进程 JSON/MySQL 快照方案，高并发场景需要数据库行级锁或独立库存服务。
 - 超时关单依赖读接口触发的惰性清扫（商品、订单、概览接口），没有独立定时任务；长时间无人访问时订单会在下一次访问时统一关闭。
+- 分账账期到期同样依赖读接口惰性清扫，没有独立定时任务；打款本身仍是人工在管理端确认的模拟动作，未接入真实企业付款接口。
