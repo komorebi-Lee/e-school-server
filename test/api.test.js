@@ -1380,6 +1380,42 @@ test('admin overview includes a seven day operations report', async () => {
   assert.ok(report.totals.paymentInCents > 0);
 });
 
+test('operations report provides trends and csv export', async () => {
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(adminLogin.response.status, 200);
+  const overview = await api('/api/admin/overview', {
+    headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
+  });
+  const insights = overview.body.data.operationsInsights;
+  assert.equal(insights.reports.length, 14);
+  assert.equal(insights.current.reports.length, 7);
+  assert.equal(insights.previous.reports.length, 7);
+  assert.ok(insights.comparisons.some((item) => item.key === 'paymentInCents'));
+  const totalOrdersComparison = insights.comparisons.find((item) => item.key === 'totalOrders');
+  assert.equal(totalOrdersComparison.current, insights.current.totals.ebikeOrders
+    + insights.current.totals.phoneCardOrders
+    + insights.current.totals.rechargeOrders
+    + insights.current.totals.plateApplications);
+  assert.ok(Array.isArray(insights.alerts));
+
+  const exportResponse = await fetch(`${baseUrl}/api/admin/operations-report/export`, {
+    headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
+  });
+  assert.equal(exportResponse.status, 200);
+  assert.equal(exportResponse.headers.get('content-type'), 'text/csv; charset=utf-8');
+  const exportBytes = new Uint8Array(await exportResponse.arrayBuffer());
+  assert.deepEqual([...exportBytes.slice(0, 3)], [0xef, 0xbb, 0xbf]);
+  const csv = new TextDecoder('utf-8').decode(exportBytes);
+  assert.ok(csv.includes('日期,电瓶车订单,电话卡订单,话费权益,牌照申请'));
+  assert.ok(csv.includes('近14天合计'));
+
+  const unauthorized = await fetch(`${baseUrl}/api/admin/operations-report/export`);
+  assert.equal(unauthorized.status, 401);
+});
+
 test('merchant workspace receives operational notifications and metrics', async () => {
   const userSession = await loginWeChat('merchant_notify_user');
   const merchantSession = await loginWeChat('merchant_demo');

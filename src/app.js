@@ -1536,26 +1536,90 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       add(item.createdAt, 'netInCents', item.amountInCents);
     }
     const reports = [...byDate.values()];
+    const totals = reports.reduce((sum, item) => ({
+      ebikeOrders: sum.ebikeOrders + item.ebikeOrders,
+      phoneCardOrders: sum.phoneCardOrders + item.phoneCardOrders,
+      rechargeOrders: sum.rechargeOrders + item.rechargeOrders,
+      plateApplications: sum.plateApplications + item.plateApplications,
+      completedEbikeOrders: sum.completedEbikeOrders + item.completedEbikeOrders,
+      afterSalesCreated: sum.afterSalesCreated + item.afterSalesCreated,
+      afterSalesClosed: sum.afterSalesClosed + item.afterSalesClosed,
+      reviewsCreated: sum.reviewsCreated + item.reviewsCreated,
+      paymentInCents: sum.paymentInCents + item.paymentInCents,
+      refundOutCents: sum.refundOutCents + item.refundOutCents,
+      payoutOutCents: sum.payoutOutCents + item.payoutOutCents,
+      netInCents: sum.netInCents + item.netInCents
+    }), {
+      ebikeOrders: 0, phoneCardOrders: 0, rechargeOrders: 0, plateApplications: 0,
+      completedEbikeOrders: 0, afterSalesCreated: 0, afterSalesClosed: 0, reviewsCreated: 0,
+      paymentInCents: 0, refundOutCents: 0, payoutOutCents: 0, netInCents: 0
+    });
     return {
       reports,
-      totals: reports.reduce((sum, item) => ({
-        ebikeOrders: sum.ebikeOrders + item.ebikeOrders,
-        phoneCardOrders: sum.phoneCardOrders + item.phoneCardOrders,
-        rechargeOrders: sum.rechargeOrders + item.rechargeOrders,
-        plateApplications: sum.plateApplications + item.plateApplications,
-        completedEbikeOrders: sum.completedEbikeOrders + item.completedEbikeOrders,
-        afterSalesCreated: sum.afterSalesCreated + item.afterSalesCreated,
-        afterSalesClosed: sum.afterSalesClosed + item.afterSalesClosed,
-        reviewsCreated: sum.reviewsCreated + item.reviewsCreated,
-        paymentInCents: sum.paymentInCents + item.paymentInCents,
-        refundOutCents: sum.refundOutCents + item.refundOutCents,
-        payoutOutCents: sum.payoutOutCents + item.payoutOutCents,
-        netInCents: sum.netInCents + item.netInCents
-      }), {
-        ebikeOrders: 0, phoneCardOrders: 0, rechargeOrders: 0, plateApplications: 0,
-        completedEbikeOrders: 0, afterSalesCreated: 0, afterSalesClosed: 0, reviewsCreated: 0,
-        paymentInCents: 0, refundOutCents: 0, payoutOutCents: 0, netInCents: 0
-      })
+      totals
+    };
+  }
+
+  function operationsReportInsights(data) {
+    const reports = dailyOperationsReports(data, 14).reports;
+    const currentReports = reports.slice(0, 7);
+    const previousReports = reports.slice(7);
+    const sum = (items) => items.reduce((result, item) => ({
+      ebikeOrders: result.ebikeOrders + item.ebikeOrders,
+      phoneCardOrders: result.phoneCardOrders + item.phoneCardOrders,
+      rechargeOrders: result.rechargeOrders + item.rechargeOrders,
+      plateApplications: result.plateApplications + item.plateApplications,
+      completedEbikeOrders: result.completedEbikeOrders + item.completedEbikeOrders,
+      afterSalesCreated: result.afterSalesCreated + item.afterSalesCreated,
+      afterSalesClosed: result.afterSalesClosed + item.afterSalesClosed,
+      paymentInCents: result.paymentInCents + item.paymentInCents,
+      netInCents: result.netInCents + item.netInCents
+    }), {
+      ebikeOrders: 0, phoneCardOrders: 0, rechargeOrders: 0, plateApplications: 0,
+      completedEbikeOrders: 0, afterSalesCreated: 0, afterSalesClosed: 0,
+      paymentInCents: 0, netInCents: 0
+    });
+    const current = sum(currentReports);
+    const previous = sum(previousReports);
+    const total = (item) => item.ebikeOrders + item.phoneCardOrders + item.rechargeOrders + item.plateApplications;
+    const change = (now, before) => {
+      if (!before) return now > 0 ? 100 : 0;
+      return Math.round(((now - before) / before) * 1000) / 10;
+    };
+    const metrics = [
+      { label: '新增业务', now: total(current), before: total(previous) },
+      { label: '支付收入', now: current.paymentInCents, before: previous.paymentInCents, money: true },
+      { label: '完成电瓶车订单', now: current.completedEbikeOrders, before: previous.completedEbikeOrders },
+      { label: '新增售后', now: current.afterSalesCreated, before: previous.afterSalesCreated }
+    ];
+    const now = new Date().toISOString();
+    const alerts = [];
+    if ((data.metrics || []).afterSaleOverdue || (data.afterSales || []).some((item) => item.status !== 'CLOSED' && item.responseDueAt && item.responseDueAt < now)) {
+      alerts.push({ level: 'HIGH', message: '有售后超过承诺响应时限，需当天处理。' });
+    }
+    const leadsOverdue = (data.leads || []).filter((item) => openLeadStatuses.has(item.status) && item.slaDueAt < now).length;
+    if (leadsOverdue) alerts.push({ level: 'HIGH', message: `有 ${leadsOverdue} 条咨询线索超过跟进时限。` });
+    const openPatrol = (data.slaAlerts || []).filter((item) => item.status !== 'RESOLVED').length;
+    if (openPatrol) alerts.push({ level: 'MEDIUM', message: `有 ${openPatrol} 条运营巡检预警未闭环。` });
+    const lowStock = (data.products || []).filter((item) => item.active !== false && availableStock(item) < 10).length;
+    if (lowStock) alerts.push({ level: 'MEDIUM', message: `有 ${lowStock} 个在售商品库存低于 10 件。` });
+    const afterSaleRate = total(current) ? Math.round((current.afterSalesCreated / total(current)) * 1000) / 10 : 0;
+    if (afterSaleRate >= 20) alerts.push({ level: 'MEDIUM', message: `近 7 天售后率为 ${afterSaleRate}%，建议复核商品质量与履约。` });
+    const paymentChange = change(current.paymentInCents, previous.paymentInCents);
+    if (previous.paymentInCents > 0 && paymentChange <= -30) {
+      alerts.push({ level: 'MEDIUM', message: `支付收入环比下降 ${Math.abs(paymentChange)}%，建议排查流量、库存和转化。` });
+    }
+    return {
+      reports,
+      current: { reports: currentReports, totals: current },
+      previous: { reports: previousReports, totals: previous },
+      comparisons: [
+      { label: '新增业务', key: 'totalOrders', current: total(current), previous: total(previous), changePercent: change(total(current), total(previous)) },
+      { label: '电话卡订单', key: 'phoneCardOrders', current: current.phoneCardOrders, previous: previous.phoneCardOrders, changePercent: change(current.phoneCardOrders, previous.phoneCardOrders) },
+      { label: '话费权益', key: 'rechargeOrders', current: current.rechargeOrders, previous: previous.rechargeOrders, changePercent: change(current.rechargeOrders, previous.rechargeOrders) },
+      { label: '支付收入', key: 'paymentInCents', current: current.paymentInCents, previous: previous.paymentInCents, changePercent: change(current.paymentInCents, previous.paymentInCents) }
+      ],
+      alerts
     };
   }
 
@@ -2697,6 +2761,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             slaSummary: slaSummary(data.slaAlerts || []),
             patrolState: data.patrolState || {},
             operationsReport: dailyOperationsReports(data, 7),
+            operationsInsights: operationsReportInsights(data),
             merchantScores: (data.merchants || [])
               .filter((merchant) => merchant.status === 'APPROVED' && merchant.serviceScore)
               .sort((a, b) => a.serviceScore.score - b.serviceScore.score)
@@ -2736,6 +2801,34 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             ,leads
           }, requestId
         });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/admin/operations-report/export') {
+        const data = store.read();
+        const { reports, totals } = dailyOperationsReports(data, 14);
+        const headers = ['日期', '电瓶车订单', '电话卡订单', '话费权益', '牌照申请', '完成电瓶车订单', '新增售后', '完成售后', '新增评价', '支付收入(元)', '退款支出(元)', '商家打款(元)', '净额(元)'];
+        const money = (value) => ((Number(value) || 0) / 100).toFixed(2);
+        const rows = reports.map((item) => [
+          item.date, item.ebikeOrders, item.phoneCardOrders, item.rechargeOrders, item.plateApplications,
+          item.completedEbikeOrders, item.afterSalesCreated, item.afterSalesClosed, item.reviewsCreated,
+          money(item.paymentInCents), money(item.refundOutCents), money(item.payoutOutCents), money(item.netInCents)
+        ]);
+        rows.push(['近14天合计', totals.ebikeOrders, totals.phoneCardOrders, totals.rechargeOrders, totals.plateApplications,
+          totals.completedEbikeOrders, totals.afterSalesCreated, totals.afterSalesClosed, totals.reviewsCreated,
+          money(totals.paymentInCents), money(totals.refundOutCents), money(totals.payoutOutCents), money(totals.netInCents)]);
+        const csv = [headers, ...rows].map((row) => row.map((value) => {
+          const text = String(value ?? '');
+          return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+        }).join(',')).join('\r\n');
+        const fileName = `shishan-operations-report-${new Date().toISOString().slice(0, 10)}.csv`;
+        response.writeHead(200, {
+          'content-type': 'text/csv; charset=utf-8',
+          'content-disposition': `attachment; filename="${fileName}"`,
+          'access-control-allow-origin': '*',
+          'cache-control': 'no-store'
+        });
+        response.end(`${String.fromCharCode(65279)}${csv}`);
+        return;
       }
 
       const adminSettlementMatch = pathname.match(/^\/api\/admin\/merchants\/([^/]+)\/settle$/);
