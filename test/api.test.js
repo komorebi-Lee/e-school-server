@@ -1403,6 +1403,8 @@ test('admin overview includes a seven day operations report', async () => {
   assert.equal(report.reports[0].date, new Date().toISOString().slice(0, 10));
   assert.ok(report.totals.ebikeOrders >= 1);
   assert.ok(report.totals.paymentInCents > 0);
+  assert.equal(typeof report.totals.autoDelists, 'number');
+  assert.equal(typeof report.totals.complianceRestores, 'number');
 });
 
 test('operations report provides trends and csv export', async () => {
@@ -1419,6 +1421,8 @@ test('operations report provides trends and csv export', async () => {
   assert.equal(insights.current.reports.length, 7);
   assert.equal(insights.previous.reports.length, 7);
   assert.ok(insights.comparisons.some((item) => item.key === 'paymentInCents'));
+  assert.ok(insights.comparisons.some((item) => item.key === 'autoDelists'));
+  assert.ok(insights.comparisons.some((item) => item.key === 'rectifyCasesCreated'));
   const totalOrdersComparison = insights.comparisons.find((item) => item.key === 'totalOrders');
   assert.equal(totalOrdersComparison.current, insights.current.totals.ebikeOrders
     + insights.current.totals.phoneCardOrders
@@ -1435,6 +1439,7 @@ test('operations report provides trends and csv export', async () => {
   assert.deepEqual([...exportBytes.slice(0, 3)], [0xef, 0xbb, 0xbf]);
   const csv = new TextDecoder('utf-8').decode(exportBytes);
   assert.ok(csv.includes('日期,电瓶车订单,电话卡订单,话费权益,牌照申请'));
+  assert.ok(csv.includes('自动下架,恢复上架,整改工单,整改通过'));
   assert.ok(csv.includes('近14天合计'));
 
   const unauthorized = await fetch(`${baseUrl}/api/admin/operations-report/export`);
@@ -2528,6 +2533,12 @@ test('low quality products are auto delisted and can be restored after complianc
   assert.equal(restored.body.data.active, true);
   assert.equal(restored.body.data.autoDelistStatus, 'MANUAL_RESTORED');
   assert.ok((store.read().subscribeMessages || []).some((item) => item.templateId === 'product_compliance_restored' && item.status === 'QUEUED'));
+
+  const riskOverview = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.ok(riskOverview.body.data.operationsReport.totals.autoDelists >= 1);
+  assert.ok(riskOverview.body.data.operationsReport.totals.complianceRestores >= 1);
+  assert.ok(riskOverview.body.data.operationsReport.totals.rectifyCasesCreated >= 1);
+  assert.ok(riskOverview.body.data.operationsReport.totals.rectifyCasesApproved >= 1);
   assert.ok((store.read().subscribeMessages || []).some((item) => item.templateId === 'product_compliance_restored' && item.status === 'QUEUED'));
 
   store.update((data) => {

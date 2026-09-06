@@ -1577,6 +1577,10 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
         afterSalesCreated: 0,
         afterSalesClosed: 0,
         reviewsCreated: 0,
+        autoDelists: 0,
+        complianceRestores: 0,
+        rectifyCasesCreated: 0,
+        rectifyCasesApproved: 0,
         paymentInCents: 0,
         refundOutCents: 0,
         payoutOutCents: 0,
@@ -1599,6 +1603,17 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       if (item.status === 'CLOSED') add(item.updatedAt, 'afterSalesClosed');
     }
     for (const item of data.productReviews || []) add(item.createdAt, 'reviewsCreated');
+    for (const item of data.merchantScoreLogs || []) {
+      if (item.type === 'AUTO_DELIST') add(item.createdAt, 'autoDelists');
+      if (['COMPLIANCE_RESTORED', 'SCORE_CASE_COMPLIANCE_RESTORED', 'MANUAL_COMPLIANCE_RESTORED'].includes(item.type)) {
+        add(item.createdAt, 'complianceRestores');
+      }
+    }
+    for (const item of data.serviceScoreCases || []) {
+      if (item.type !== 'RECTIFY') continue;
+      add(item.createdAt, 'rectifyCasesCreated');
+      if (item.status === 'COMPLETED') add(item.updatedAt, 'rectifyCasesApproved');
+    }
     for (const item of data.financeEvents || []) {
       if (item.eventType === 'PAYMENT') add(item.createdAt, 'paymentInCents', item.amountInCents);
       if (item.eventType === 'REFUND') add(item.createdAt, 'refundOutCents', Math.abs(item.amountInCents));
@@ -1615,6 +1630,10 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       afterSalesCreated: sum.afterSalesCreated + item.afterSalesCreated,
       afterSalesClosed: sum.afterSalesClosed + item.afterSalesClosed,
       reviewsCreated: sum.reviewsCreated + item.reviewsCreated,
+      autoDelists: sum.autoDelists + item.autoDelists,
+      complianceRestores: sum.complianceRestores + item.complianceRestores,
+      rectifyCasesCreated: sum.rectifyCasesCreated + item.rectifyCasesCreated,
+      rectifyCasesApproved: sum.rectifyCasesApproved + item.rectifyCasesApproved,
       paymentInCents: sum.paymentInCents + item.paymentInCents,
       refundOutCents: sum.refundOutCents + item.refundOutCents,
       payoutOutCents: sum.payoutOutCents + item.payoutOutCents,
@@ -1622,6 +1641,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
     }), {
       ebikeOrders: 0, phoneCardOrders: 0, rechargeOrders: 0, plateApplications: 0,
       completedEbikeOrders: 0, afterSalesCreated: 0, afterSalesClosed: 0, reviewsCreated: 0,
+      autoDelists: 0, complianceRestores: 0, rectifyCasesCreated: 0, rectifyCasesApproved: 0,
       paymentInCents: 0, refundOutCents: 0, payoutOutCents: 0, netInCents: 0
     });
     return {
@@ -1642,11 +1662,16 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       completedEbikeOrders: result.completedEbikeOrders + item.completedEbikeOrders,
       afterSalesCreated: result.afterSalesCreated + item.afterSalesCreated,
       afterSalesClosed: result.afterSalesClosed + item.afterSalesClosed,
+      autoDelists: result.autoDelists + item.autoDelists,
+      complianceRestores: result.complianceRestores + item.complianceRestores,
+      rectifyCasesCreated: result.rectifyCasesCreated + item.rectifyCasesCreated,
+      rectifyCasesApproved: result.rectifyCasesApproved + item.rectifyCasesApproved,
       paymentInCents: result.paymentInCents + item.paymentInCents,
       netInCents: result.netInCents + item.netInCents
     }), {
       ebikeOrders: 0, phoneCardOrders: 0, rechargeOrders: 0, plateApplications: 0,
       completedEbikeOrders: 0, afterSalesCreated: 0, afterSalesClosed: 0,
+      autoDelists: 0, complianceRestores: 0, rectifyCasesCreated: 0, rectifyCasesApproved: 0,
       paymentInCents: 0, netInCents: 0
     });
     const current = sum(currentReports);
@@ -1678,6 +1703,12 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
     const paymentChange = change(current.paymentInCents, previous.paymentInCents);
     if (previous.paymentInCents > 0 && paymentChange <= -30) {
       alerts.push({ level: 'MEDIUM', message: `支付收入环比下降 ${Math.abs(paymentChange)}%，建议排查流量、库存和转化。` });
+    if (current.autoDelists >= 3 && current.complianceRestores < current.autoDelists) {
+      alerts.push({ level: 'HIGH', message: `近 7 天自动下架 ${current.autoDelists} 次，仅恢复 ${current.complianceRestores} 次，商品供给质量需要专项跟进。` });
+    }
+    if (current.rectifyCasesCreated > 0 && current.rectifyCasesApproved === 0) {
+      alerts.push({ level: 'MEDIUM', message: `近 7 天有 ${current.rectifyCasesCreated} 个整改工单尚未验收通过，请检查商家整改进度。` });
+    }
     }
     return {
       reports,
@@ -1687,6 +1718,8 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       { label: '新增业务', key: 'totalOrders', current: total(current), previous: total(previous), changePercent: change(total(current), total(previous)) },
       { label: '电话卡订单', key: 'phoneCardOrders', current: current.phoneCardOrders, previous: previous.phoneCardOrders, changePercent: change(current.phoneCardOrders, previous.phoneCardOrders) },
       { label: '话费权益', key: 'rechargeOrders', current: current.rechargeOrders, previous: previous.rechargeOrders, changePercent: change(current.rechargeOrders, previous.rechargeOrders) },
+      { label: '自动下架', key: 'autoDelists', current: current.autoDelists, previous: previous.autoDelists, changePercent: change(current.autoDelists, previous.autoDelists) },
+      { label: '整改工单', key: 'rectifyCasesCreated', current: current.rectifyCasesCreated, previous: previous.rectifyCasesCreated, changePercent: change(current.rectifyCasesCreated, previous.rectifyCasesCreated) },
       { label: '支付收入', key: 'paymentInCents', current: current.paymentInCents, previous: previous.paymentInCents, changePercent: change(current.paymentInCents, previous.paymentInCents) }
       ],
       alerts
@@ -3067,15 +3100,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/admin/operations-report/export') {
         const data = store.read();
         const { reports, totals } = dailyOperationsReports(data, 14);
-        const headers = ['日期', '电瓶车订单', '电话卡订单', '话费权益', '牌照申请', '完成电瓶车订单', '新增售后', '完成售后', '新增评价', '支付收入(元)', '退款支出(元)', '商家打款(元)', '净额(元)'];
+        const headers = ['日期', '电瓶车订单', '电话卡订单', '话费权益', '牌照申请', '完成电瓶车订单', '新增售后', '完成售后', '新增评价', '自动下架', '恢复上架', '整改工单', '整改通过', '支付收入(元)', '退款支出(元)', '商家打款(元)', '净额(元)'];
         const money = (value) => ((Number(value) || 0) / 100).toFixed(2);
         const rows = reports.map((item) => [
           item.date, item.ebikeOrders, item.phoneCardOrders, item.rechargeOrders, item.plateApplications,
           item.completedEbikeOrders, item.afterSalesCreated, item.afterSalesClosed, item.reviewsCreated,
+          item.autoDelists, item.complianceRestores, item.rectifyCasesCreated, item.rectifyCasesApproved,
           money(item.paymentInCents), money(item.refundOutCents), money(item.payoutOutCents), money(item.netInCents)
         ]);
         rows.push(['近14天合计', totals.ebikeOrders, totals.phoneCardOrders, totals.rechargeOrders, totals.plateApplications,
           totals.completedEbikeOrders, totals.afterSalesCreated, totals.afterSalesClosed, totals.reviewsCreated,
+          totals.autoDelists, totals.complianceRestores, totals.rectifyCasesCreated, totals.rectifyCasesApproved,
           money(totals.paymentInCents), money(totals.refundOutCents), money(totals.payoutOutCents), money(totals.netInCents)]);
         const csv = [headers, ...rows].map((row) => row.map((value) => {
           const text = String(value ?? '');
