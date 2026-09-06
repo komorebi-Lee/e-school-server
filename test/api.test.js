@@ -1930,6 +1930,12 @@ test('pending service payments expire and block confirmation', async () => {
   assert.ok(notifications.body.data.some((item) => item.title === '电话卡订单已超时关闭'));
   assert.ok(notifications.body.data.some((item) => item.title === '话费权益订单已超时关闭'));
   assert.ok(notifications.body.data.some((item) => item.title === '校园牌照申请已超时关闭'));
+
+  const adminOverview = await api('/api/admin/overview', { headers: await loginAdmin() });
+  assert.equal(adminOverview.response.status, 200);
+  assert.ok(adminOverview.body.data.metrics.paymentTimeouts >= 3);
+  assert.ok(adminOverview.body.data.operationsReport.totals.paymentTimeouts >= 3);
+  assert.ok(adminOverview.body.data.operationsInsights.comparisons.some((item) => item.key === 'paymentTimeouts'));
 });
 
 test('after-sale freezes merchant settlement until the case is closed', async () => {

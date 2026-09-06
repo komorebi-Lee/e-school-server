@@ -1632,6 +1632,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
         complianceRestores: 0,
         rectifyCasesCreated: 0,
         rectifyCasesApproved: 0,
+        paymentTimeouts: 0,
         paymentInCents: 0,
         refundOutCents: 0,
         payoutOutCents: 0,
@@ -1646,6 +1647,13 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       add(item.createdAt, 'ebikeOrders');
       if (item.status === 'COMPLETED') add(orderCompletedAt(item), 'completedEbikeOrders');
     }
+    const timeoutClosures = [
+      ...(data.orders || []),
+      ...(data.phoneCardOrders || []),
+      ...(data.rechargeOrders || []),
+      ...(data.plateApplications || [])
+    ].filter((item) => item.cancelReason === 'PAYMENT_TIMEOUT');
+    for (const item of timeoutClosures) add(item.updatedAt || item.createdAt, 'paymentTimeouts');
     for (const item of data.phoneCardOrders || []) add(item.createdAt, 'phoneCardOrders');
     for (const item of data.rechargeOrders || []) add(item.createdAt, 'rechargeOrders');
     for (const item of data.plateApplications || []) add(item.createdAt, 'plateApplications');
@@ -1685,6 +1693,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       complianceRestores: sum.complianceRestores + item.complianceRestores,
       rectifyCasesCreated: sum.rectifyCasesCreated + item.rectifyCasesCreated,
       rectifyCasesApproved: sum.rectifyCasesApproved + item.rectifyCasesApproved,
+      paymentTimeouts: sum.paymentTimeouts + item.paymentTimeouts,
       paymentInCents: sum.paymentInCents + item.paymentInCents,
       refundOutCents: sum.refundOutCents + item.refundOutCents,
       payoutOutCents: sum.payoutOutCents + item.payoutOutCents,
@@ -1692,7 +1701,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
     }), {
       ebikeOrders: 0, phoneCardOrders: 0, rechargeOrders: 0, plateApplications: 0,
       completedEbikeOrders: 0, afterSalesCreated: 0, afterSalesClosed: 0, reviewsCreated: 0,
-      autoDelists: 0, complianceRestores: 0, rectifyCasesCreated: 0, rectifyCasesApproved: 0,
+      autoDelists: 0, complianceRestores: 0, rectifyCasesCreated: 0, rectifyCasesApproved: 0, paymentTimeouts: 0,
       paymentInCents: 0, refundOutCents: 0, payoutOutCents: 0, netInCents: 0
     });
     return {
@@ -1717,12 +1726,13 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       complianceRestores: result.complianceRestores + item.complianceRestores,
       rectifyCasesCreated: result.rectifyCasesCreated + item.rectifyCasesCreated,
       rectifyCasesApproved: result.rectifyCasesApproved + item.rectifyCasesApproved,
+      paymentTimeouts: result.paymentTimeouts + item.paymentTimeouts,
       paymentInCents: result.paymentInCents + item.paymentInCents,
       netInCents: result.netInCents + item.netInCents
     }), {
       ebikeOrders: 0, phoneCardOrders: 0, rechargeOrders: 0, plateApplications: 0,
       completedEbikeOrders: 0, afterSalesCreated: 0, afterSalesClosed: 0,
-      autoDelists: 0, complianceRestores: 0, rectifyCasesCreated: 0, rectifyCasesApproved: 0,
+      autoDelists: 0, complianceRestores: 0, rectifyCasesCreated: 0, rectifyCasesApproved: 0, paymentTimeouts: 0,
       paymentInCents: 0, netInCents: 0
     });
     const current = sum(currentReports);
@@ -1751,6 +1761,9 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
     if (lowStock) alerts.push({ level: 'MEDIUM', message: `有 ${lowStock} 个在售商品库存低于 10 件。` });
     const afterSaleRate = total(current) ? Math.round((current.afterSalesCreated / total(current)) * 1000) / 10 : 0;
     if (afterSaleRate >= 20) alerts.push({ level: 'MEDIUM', message: `近 7 天售后率为 ${afterSaleRate}%，建议复核商品质量与履约。` });
+    if (current.paymentTimeouts >= 3) {
+      alerts.push({ level: 'MEDIUM', message: `近 7 天支付超时 ${current.paymentTimeouts} 次，建议优化待支付提醒和下单转化。` });
+    }
     const paymentChange = change(current.paymentInCents, previous.paymentInCents);
     if (previous.paymentInCents > 0 && paymentChange <= -30) {
       alerts.push({ level: 'MEDIUM', message: `支付收入环比下降 ${Math.abs(paymentChange)}%，建议排查流量、库存和转化。` });
@@ -1771,6 +1784,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       { label: '话费权益', key: 'rechargeOrders', current: current.rechargeOrders, previous: previous.rechargeOrders, changePercent: change(current.rechargeOrders, previous.rechargeOrders) },
       { label: '自动下架', key: 'autoDelists', current: current.autoDelists, previous: previous.autoDelists, changePercent: change(current.autoDelists, previous.autoDelists) },
       { label: '整改工单', key: 'rectifyCasesCreated', current: current.rectifyCasesCreated, previous: previous.rectifyCasesCreated, changePercent: change(current.rectifyCasesCreated, previous.rectifyCasesCreated) },
+      { label: '支付超时', key: 'paymentTimeouts', current: current.paymentTimeouts, previous: previous.paymentTimeouts, changePercent: change(current.paymentTimeouts, previous.paymentTimeouts) },
       { label: '支付收入', key: 'paymentInCents', current: current.paymentInCents, previous: previous.paymentInCents, changePercent: change(current.paymentInCents, previous.paymentInCents) }
       ],
       alerts
@@ -3117,6 +3131,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           + data.broadbandApplications.filter((item) => item.status === 'PENDING_VERIFY').length
           + data.plateApplications.filter((item) => ['MATERIAL_PENDING', 'REVIEWING'].includes(item.status)).length;
         const financeEvents = data.financeEvents || [];
+        const paymentTimeouts = [
+          ...data.orders,
+          ...data.phoneCardOrders,
+          ...data.rechargeOrders,
+          ...data.plateApplications
+        ].filter((item) => item.cancelReason === 'PAYMENT_TIMEOUT').length;
         const financeSummary = {
           paymentInCents: financeEvents.filter((event) => event.eventType === 'PAYMENT').reduce((sum, event) => sum + event.amountInCents, 0),
           refundOutCents: financeEvents.filter((event) => event.eventType === 'REFUND').reduce((sum, event) => sum + event.amountInCents, 0),
@@ -3125,7 +3145,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         };
         return sendJson(response, 200, {
           data: {
-            metrics: { revenueInCents, paidOrders, pending, lowStock: data.products.filter((item) => availableStock(item) < 10).length, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length, afterSaleOverdue: (data.afterSales || []).filter((item) => item.status !== 'CLOSED' && item.responseDueAt && item.responseDueAt < new Date().toISOString()).length },
+            metrics: { revenueInCents, paidOrders, pending, lowStock: data.products.filter((item) => availableStock(item) < 10).length, paymentTimeouts, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length, afterSaleOverdue: (data.afterSales || []).filter((item) => item.status !== 'CLOSED' && item.responseDueAt && item.responseDueAt < new Date().toISOString()).length },
             products: data.products.map(withAvailableStock),
             rechargePromos: data.rechargePromos || [],
             merchants: data.merchants,
@@ -3197,17 +3217,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/admin/operations-report/export') {
         const data = store.read();
         const { reports, totals } = dailyOperationsReports(data, 14);
-        const headers = ['日期', '电瓶车订单', '电话卡订单', '话费权益', '牌照申请', '完成电瓶车订单', '新增售后', '完成售后', '新增评价', '自动下架', '恢复上架', '整改工单', '整改通过', '支付收入(元)', '退款支出(元)', '商家打款(元)', '净额(元)'];
+        const headers = ['日期', '电瓶车订单', '电话卡订单', '话费权益', '牌照申请', '完成电瓶车订单', '新增售后', '完成售后', '新增评价', '自动下架', '恢复上架', '整改工单', '整改通过', '支付超时', '支付收入(元)', '退款支出(元)', '商家打款(元)', '净额(元)'];
         const money = (value) => ((Number(value) || 0) / 100).toFixed(2);
         const rows = reports.map((item) => [
           item.date, item.ebikeOrders, item.phoneCardOrders, item.rechargeOrders, item.plateApplications,
           item.completedEbikeOrders, item.afterSalesCreated, item.afterSalesClosed, item.reviewsCreated,
-          item.autoDelists, item.complianceRestores, item.rectifyCasesCreated, item.rectifyCasesApproved,
+          item.autoDelists, item.complianceRestores, item.rectifyCasesCreated, item.rectifyCasesApproved, item.paymentTimeouts,
           money(item.paymentInCents), money(item.refundOutCents), money(item.payoutOutCents), money(item.netInCents)
         ]);
         rows.push(['近14天合计', totals.ebikeOrders, totals.phoneCardOrders, totals.rechargeOrders, totals.plateApplications,
           totals.completedEbikeOrders, totals.afterSalesCreated, totals.afterSalesClosed, totals.reviewsCreated,
-          totals.autoDelists, totals.complianceRestores, totals.rectifyCasesCreated, totals.rectifyCasesApproved,
+          totals.autoDelists, totals.complianceRestores, totals.rectifyCasesCreated, totals.rectifyCasesApproved, totals.paymentTimeouts,
           money(totals.paymentInCents), money(totals.refundOutCents), money(totals.payoutOutCents), money(totals.netInCents)]);
         const csv = [headers, ...rows].map((row) => row.map((value) => {
           const text = String(value ?? '');
