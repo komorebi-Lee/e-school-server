@@ -14,13 +14,18 @@ let server;
 let baseUrl;
 let tempDirectory;
 let store;
+const sentSubscribeMessages = [];
 
 before(async () => {
   tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-test-'));
   store = new JsonStore(path.join(tempDirectory, 'db.json'));
   server = http.createServer(createApp({
     store,
-    wechatAuth: async (code) => ({ openid: `openid_${code}`, userId: `wx_${code}` })
+    wechatAuth: async (code) => ({ openid: `openid_${code}`, userId: `wx_${code}` }),
+    wechatSubscribeSend: async (message) => {
+      sentSubscribeMessages.push(message);
+      return { errcode: 0, errmsg: 'ok' };
+    }
   }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -2259,6 +2264,17 @@ test('service score cases support appeal review, rectification and subscription 
   const subscribeMessages = store.read().subscribeMessages || [];
   assert.ok(subscribeMessages.some((item) => item.templateId === 'score_appeal_result' && item.status === 'QUEUED'));
   assert.ok(subscribeMessages.some((item) => item.templateId === 'score_rectify_result' && item.status === 'QUEUED'));
+
+  const dispatch = await api('/api/admin/subscribe-messages/dispatch', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ limit: 20 })
+  });
+  assert.equal(dispatch.response.status, 200);
+  assert.ok(dispatch.body.data.sent >= 1);
+  const sentAppealMessage = (store.read().subscribeMessages || [])
+    .find((item) => item.templateId === 'score_appeal_result' && item.status === 'SENT');
+  assert.ok(sentAppealMessage.sentAt);
+  assert.ok(sentSubscribeMessages.some((message) => message.template_id === 'wx_test_appeal_template' && message.touser === 'openid_merchant_demo'));
 });
 
 test('low quality products are auto delisted and can be restored after compliance review', async () => {

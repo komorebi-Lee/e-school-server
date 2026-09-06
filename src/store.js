@@ -148,6 +148,7 @@ function initialData() {
     settlements: [],
     payoutRequests: [],
     financeEvents: [],
+    userOpenIds: {},
     notifications: [],
     slaAlerts: [],
     patrolState: { lastRunAt: '', runCount: 0, lastCreated: 0, lastResolved: 0, lastOpen: 0 },
@@ -225,6 +226,7 @@ class JsonStore {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) { data.adminSettings = defaults.adminSettings; changed = true; }
+      if (!data.userOpenIds || typeof data.userOpenIds !== 'object') { data.userOpenIds = {}; changed = true; }
       if (!data.patrolState || typeof data.patrolState !== 'object') { data.patrolState = defaults.patrolState; changed = true; }
       if (changed) this.write(data);
     } catch (error) {

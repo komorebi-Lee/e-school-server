@@ -32,6 +32,7 @@ const adminOrderStatuses = {
 };
 const allowedPaymentStatuses = new Set(['PENDING', 'PAID', 'CANCELLED', 'REFUNDED']);
 const identityVerifications = new Map();
+let weChatAccessToken = { token: '', expiresAt: 0 };
 
 function isTlsInterceptionError(error) {
   const tlsCodes = new Set(['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'CERT_HAS_EXPIRED']);
@@ -195,6 +196,50 @@ function wechatOpenApiRequest(pathname, rejectUnauthorized) {
   });
 }
 
+function wechatOpenApiPost(pathname, payload) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const request = https.request(`https://api.weixin.qq.com${pathname}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }
+    }, (response) => {
+      let responseBody = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { responseBody += chunk; });
+      response.on('end', () => {
+        try {
+          if (response.statusCode < 200 || response.statusCode >= 300) throw new Error(`HTTP ${response.statusCode}`);
+          resolve(JSON.parse(responseBody));
+        } catch (error) {
+          reject(Object.assign(new Error(error.message || 'response parse failed'), { code: 'WECHAT_API_UNAVAILABLE' }));
+        }
+      });
+    });
+    request.on('error', (error) => reject(Object.assign(new Error(error.message), { code: error.code || 'WECHAT_API_UNAVAILABLE' })));
+    request.setTimeout(8000, () => request.destroy(new Error('timeout after 8s')));
+    request.end(body);
+  });
+}
+
+async function getWeChatAccessToken() {
+  const appid = process.env.WECHAT_APPID || process.env.WX_APPID;
+  const secret = process.env.WECHAT_APP_SECRET || process.env.WX_APP_SECRET;
+  if (!appid || !secret) throw Object.assign(new Error('微信订阅消息尚未配置'), { code: 'WECHAT_SUBSCRIBE_NOT_CONFIGURED' });
+  if (weChatAccessToken.token && weChatAccessToken.expiresAt > Date.now() + 60000) return weChatAccessToken.token;
+  const query = new URLSearchParams({ appid, secret, grant_type: 'client_credential' }).toString();
+  const result = await wechatOpenApiRequest(`/cgi-bin/token?${query}`, true);
+  if (!result.access_token) {
+    throw Object.assign(new Error(result.errmsg || 'access_token 获取失败'), { code: `WECHAT_TOKEN_${result.errcode || 'FAILED'}` });
+  }
+  weChatAccessToken = { token: result.access_token, expiresAt: Date.now() + Number(result.expires_in || 7200) * 1000 };
+  return weChatAccessToken.token;
+}
+
+async function sendWeChatSubscribeMessage(message) {
+  const accessToken = await getWeChatAccessToken();
+  return wechatOpenApiPost(`/cgi-bin/message/subscribe/send?access_token=${encodeURIComponent(accessToken)}`, message);
+}
+
 async function exchangeWeChatCode(code) {
   const appid = process.env.WECHAT_APPID || process.env.WX_APPID;
   const secret = process.env.WECHAT_APP_SECRET || process.env.WX_APP_SECRET;
@@ -345,11 +390,26 @@ function complaintDueAt(now) {
   return new Date(new Date(now).getTime() + 48 * 3600 * 1000).toISOString();
 }
 
-function createApp({ store, wechatAuth = exchangeWeChatCode }) {
+function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend = sendWeChatSubscribeMessage }) {
   const adminSessions = new Map();
   const merchantSessions = new Map();
+  const userWeChatIdentities = new Map();
   const userSessions = new Map();
   const userSessionTtlMs = 7 * 24 * 60 * 60 * 1000;
+
+  function loadWeChatIdentity(data, userId) {
+    if (userWeChatIdentities.has(userId)) return userWeChatIdentities.get(userId);
+    const saved = data.userOpenIds?.[userId];
+    if (saved) userWeChatIdentities.set(userId, saved);
+    return saved || '';
+  }
+
+  function saveWeChatIdentity(data, userId, openid) {
+    if (!openid) return;
+    userWeChatIdentities.set(userId, openid);
+    data.userOpenIds = data.userOpenIds || {};
+    data.userOpenIds[userId] = openid;
+  }
 
   function requireUser(request) {
     const token = (request.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -1659,10 +1719,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const code = requireString(body.code, 'code', { maxLength: 128 });
           const identity = await wechatAuth(code);
           userId = identity.userId || `wx_${identity.openid}`;
+          store.update((data) => saveWeChatIdentity(data, userId, identity.openid));
         }
         if (!userId) throw new ApiError(502, 'WECHAT_LOGIN_INVALID', '微信登录返回缺少用户标识');
         const token = createHash('sha256').update(`${userId}:${randomUUID()}`).digest('hex');
         userSessions.set(token, { userId, expiresAt: Date.now() + userSessionTtlMs });
+        store.update((data) => saveWeChatIdentity(data, userId, platformOpenid));
         return sendJson(response, 200, { data: { token, userId, expiresIn: 604800 }, requestId });
       }
 
@@ -2591,6 +2653,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 priceInCents: product.priceInCents,
                 publishReviewNote: product.publishReviewNote || ''
               })),
+            subscribeMessages: (data.subscribeMessages || []).slice(0, 120),
+            subscribeStats: {
+              queued: (data.subscribeMessages || []).filter((item) => item.status === 'QUEUED').length,
+              sent: (data.subscribeMessages || []).filter((item) => item.status === 'SENT').length,
+              failed: (data.subscribeMessages || []).filter((item) => item.status === 'FAILED').length
+            },
             settings: data.adminSettings,
             auditLogs: data.auditLogs
             ,leads
@@ -3258,6 +3326,71 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           total: Object.keys(scoreNotificationTemplates).length,
           requestId
         });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/admin/subscribe-messages/dispatch') {
+        const body = await readJson(request);
+        const limitInput = Number(body.limit || 20);
+        if (!Number.isInteger(limitInput) || limitInput < 1 || limitInput > 100) {
+          throw new ApiError(400, 'VALIDATION_ERROR', 'limit 需为 1-100 的整数');
+        }
+        const queued = (store.read().subscribeMessages || []).filter((item) => item.status === 'QUEUED');
+        const batch = queued.slice(0, limitInput);
+        if (!batch.length) return sendJson(response, 200, { data: { sent: 0, failed: 0, remaining: 0 }, requestId });
+        const identityByUserId = new Map();
+        const openIdData = store.read().userOpenIds || {};
+        for (const [key, value] of Object.entries(openIdData)) identityByUserId.set(key, value);
+        for (const [key, value] of userWeChatIdentities) identityByUserId.set(key, value);
+        const settings = store.read().adminSettings || {};
+        const templateIdByKey = {
+          score_stage_warning: settings.scoreStageWarningTemplateId || '',
+          score_rectify_apply: settings.scoreRectifyApplyTemplateId || '',
+          score_rectify_result: settings.scoreRectifyResultTemplateId || '',
+          score_appeal_result: settings.scoreAppealResultTemplateId || ''
+        };
+        let sent = 0;
+        let failed = 0;
+        for (const message of batch) {
+          try {
+            const wechatIdentity = identityByUserId.get(message.userId);
+            if (!wechatIdentity) throw Object.assign(new Error('缺少微信身份'), { code: 'WECHAT_IDENTITY_MISSING' });
+            const templateId = templateIdByKey[message.templateId];
+            if (!templateId) throw Object.assign(new Error('订阅模板未配置'), { code: 'SUBSCRIBE_TEMPLATE_NOT_CONFIGURED' });
+            const payload = {
+              touser: wechatIdentity,
+              template_id: templateId,
+              page: 'pages/merchant/index',
+              data: {
+                thing1: { value: (message.title || '').slice(0, 20) },
+                thing2: { value: (message.content || '').slice(0, 20) }
+              }
+            };
+            const result = await wechatSubscribeSend(payload);
+            if (result && Number(result.errcode || 0) !== 0) {
+              throw Object.assign(new Error(result.errmsg || '微信发送失败'), { code: `WECHAT_SEND_${result.errcode}` });
+            }
+            message.status = 'SENT';
+            message.sentAt = new Date().toISOString();
+            message.error = '';
+            sent += 1;
+          } catch (error) {
+            message.status = 'FAILED';
+            message.sentAt = '';
+            message.error = String(error.code || 'SEND_FAILED') + ': ' + String(error.message || '发送失败').slice(0, 200);
+            failed += 1;
+          }
+        }
+        store.update((data) => {
+          const queuedMessages = data.subscribeMessages || [];
+          for (const message of batch) {
+            const current = queuedMessages.find((item) => item.id === message.id);
+            if (current) Object.assign(current, message);
+          }
+          return true;
+        });
+        addAudit(store.read(), '派发微信订阅消息', `成功 ${sent} · 失败 ${failed}`);
+        const remaining = (store.read().subscribeMessages || []).filter((item) => item.status === 'QUEUED').length;
+        return sendJson(response, 200, { data: { sent, failed, remaining }, requestId });
       }
 
       if (request.method === 'POST' && adminProductMatch) {
