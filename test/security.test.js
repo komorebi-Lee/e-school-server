@@ -154,7 +154,7 @@ test('order collaboration cannot be submitted as another user', async () => {
     headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({ role: 'USER', userId: 'attacker_user', orderId, action: 'APPEAL', note: '尝试冒用' })
   });
-  assert.equal(spoofed.response.status, 200);
+  assert.equal(spoofed.response.status, 403);
 });
 
 test('uploads require a login session', async () => {

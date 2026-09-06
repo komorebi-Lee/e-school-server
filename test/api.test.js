@@ -852,7 +852,7 @@ test('order collaboration is shared by user merchant and platform', async () => 
 
   const appealed = await api('/api/order-collab', {
     method:'POST', headers:{ 'content-type':'application/json', authorization:`Bearer ${userSession.token}` },
-    body:JSON.stringify({ role:'USER', action:'APPEAL', orderId, userId:'collab_user', note:'配送时间需要改成明天上午。' })
+    body:JSON.stringify({ role:'USER', action:'APPEAL', orderId, note:'配送时间需要改成明天上午。' })
   });
   assert.equal(appealed.response.status, 200);
   assert.equal(appealed.body.data.collaboration.intervention.status, 'REQUESTED');
@@ -2395,4 +2395,52 @@ test('low quality products are auto delisted and can be restored after complianc
   const refreshed = await api('/api/products?category=E_BIKE_NEW');
   assert.equal(refreshed.response.status, 200);
   assert.ok(refreshed.body.data.some((item) => item.id === 'prod_ebike_001'));
+});
+
+test('order notifications queue and dispatch to subscribed users', async () => {
+  const session = await loginWeChat('message_user');
+  const subscription = await api('/api/order-message-subscriptions', {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ accepted: true })
+  });
+  assert.equal(subscription.response.status, 200);
+  assert.equal(subscription.body.data.subscribed, true);
+
+  const state = await api('/api/order-message-subscriptions', {
+    headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(state.body.data.subscribed, true);
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  const settings = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ orderStatusTemplateId: 'wx_test_order_status' })
+  });
+  assert.equal(settings.response.status, 200);
+
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(created.response.status, 201);
+  const paid = await confirmPayment(created.body.paymentOrder.id, session.token);
+  assert.equal(paid.response.status, 200);
+
+  const queuedMessage = (store.read().subscribeMessages || [])
+    .find((item) => item.templateId === 'order_status' && item.status === 'QUEUED');
+  assert.ok(queuedMessage);
+
+  const dispatch = await api('/api/admin/subscribe-messages/dispatch', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ limit: 100 })
+  });
+  assert.equal(dispatch.response.status, 200);
+  assert.ok(dispatch.body.data.sent >= 1);
+  assert.ok(sentSubscribeMessages.some((message) => message.template_id === 'wx_test_order_status'
+    && message.touser === 'openid_message_user'
+    && message.page === 'pages/orders/orders'));
 });

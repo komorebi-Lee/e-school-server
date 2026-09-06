@@ -59,8 +59,8 @@ function notifications(){
   const stats=state.data.subscribeStats||{queued:0,sent:0,failed:0};
   const messages=(state.data.subscribeMessages||[]).filter(match).slice(0,50);
   const queueRows=messages.map(x=>`<tr><td><strong>${esc(x.title)}</strong><small>${esc(x.templateId)}</small></td><td>${esc(x.content)}</td><td><span class="badge ${x.status==='SENT'?'green':x.status==='FAILED'?'red':'orange'}">${x.status==='SENT'?'已发送':x.status==='FAILED'?'发送失败':'待发送'}</span>${x.error?`<small>${esc(x.error)}</small>`:''}</td><td>${fmtDate(x.createdAt)}</td><td>${fmtDate(x.sentAt)}</td></tr>`).join('');
-  return `<div class="metric-grid">${metric('待发送',stats.queued||0,'商家服务分提醒队列')}${metric('已发送',stats.sent||0,'微信已确认')}${metric('失败',stats.failed||0,'可修正配置后重试')}</div>
-  <section class="panel"><div class="panel-head"><h2>订阅消息队列</h2><span>服务分申诉、整改与分档提醒</span></div>
+  return `<div class="metric-grid">${metric('待发送',stats.queued||0,'商家与用户提醒队列')}${metric('已发送',stats.sent||0,'微信已确认')}${metric('失败',stats.failed||0,'可修正配置后重试')}${metric('订阅用户',state.data.orderMessageSubscribers||0,'已开启订单提醒')}</div>
+  <section class="panel"><div class="panel-head"><h2>订阅消息队列</h2><span>服务分与订单进度提醒</span></div>
     <div class="page-actions"><p>仅发送已配置模板的消息，失败原因会保留在队列中。</p><div><button id="dispatchSubscribe" class="primary">派发前 20 条</button></div></div>
     <div class="table-wrap"><table><thead><tr><th>消息</th><th>内容</th><th>发送状态</th><th>创建时间</th><th>发送时间</th></tr></thead><tbody>${queueRows||'<tr><td colspan="5" class="empty">暂无订阅消息</td></tr>'}</tbody></table></div>
   </section>` + toolbar(items.length)+table(['通知','内容','状态','时间'],rows,items.length);
@@ -523,11 +523,14 @@ function scoresView() {
     ${metric('限流整改', summary.limitedCount || 0, '曝光降权且上新需复核')}
     ${metric('暂停上新', summary.restrictedCount || 0, '需先处理超时与售后')}
   </div>`;
-  const templatePanel = `<section class="panel"><div class="panel-head"><h2>微信订阅消息模板</h2><span>用于服务分提醒</span></div><div class="form-grid" style="grid-template-columns:repeat(2,1fr)">
+  const templatePanel = `<section class="panel"><div class="panel-head"><h2>微信订阅消息模板</h2><span>服务分与订单提醒</span></div><div class="form-grid" style="grid-template-columns:repeat(2,1fr)">
     <label>服务分下降模板 ID<input id="scoreStageTemplate" value="${esc(state.data.settings?.scoreStageWarningTemplateId || '')}"></label>
     <label>整改申请模板 ID<input id="scoreRectifyApplyTemplate" value="${esc(state.data.settings?.scoreRectifyApplyTemplateId || '')}"></label>
     <label>整改结果模板 ID<input id="scoreRectifyResultTemplate" value="${esc(state.data.settings?.scoreRectifyResultTemplateId || '')}"></label>
     <label>申诉结果模板 ID<input id="scoreAppealResultTemplate" value="${esc(state.data.settings?.scoreAppealResultTemplateId || '')}"></label>
+    <label>订单状态模板 ID<input id="orderStatusTemplate" value="${esc(state.data.settings?.orderStatusTemplateId || '')}"></label>
+    <label>订单客服模板 ID<input id="orderServiceTemplate" value="${esc(state.data.settings?.orderServiceTemplateId || '')}"></label>
+    <label>售后进度模板 ID<input id="afterSaleTemplate" value="${esc(state.data.settings?.afterSaleTemplateId || '')}"></label>
   </div><button class="primary" style="margin-top:12px" id="saveScoreTemplates">保存模板配置</button></section>`;
   const pendingPanel = pending.length
     ? `<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>商品复核</h2><span>限流商家新增的商品</span></div><div class="table-wrap"><table><thead><tr><th>商品</th><th>商家</th><th>价格</th><th>说明</th><th>操作</th></tr></thead><tbody>${pending.map((product) => `<tr>
@@ -645,7 +648,10 @@ bindView = function () {
         scoreStageWarningTemplateId: document.querySelector('#scoreStageTemplate').value.trim(),
         scoreRectifyApplyTemplateId: document.querySelector('#scoreRectifyApplyTemplate').value.trim(),
         scoreRectifyResultTemplateId: document.querySelector('#scoreRectifyResultTemplate').value.trim(),
-        scoreAppealResultTemplateId: document.querySelector('#scoreAppealResultTemplate').value.trim()
+        scoreAppealResultTemplateId: document.querySelector('#scoreAppealResultTemplate').value.trim(),
+        orderStatusTemplateId: document.querySelector('#orderStatusTemplate').value.trim(),
+        orderServiceTemplateId: document.querySelector('#orderServiceTemplate').value.trim(),
+        afterSaleTemplateId: document.querySelector('#afterSaleTemplate').value.trim()
       })
     });
     showToast('订阅模板已保存');

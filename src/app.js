@@ -82,6 +82,24 @@ const scoreNotificationTemplates = {
   }
 };
 
+const orderNotificationTemplates = {
+  ORDER_STATUS: {
+    id: 'order_status',
+    keywords: ['订单', '状态', '履约'],
+    description: '支付、配送、激活和办理进度提醒'
+  },
+  ORDER_SERVICE: {
+    id: 'order_service',
+    keywords: ['订单', '客服', '留言'],
+    description: '商家或平台回复订单消息时提醒用户'
+  },
+  AFTER_SALE: {
+    id: 'after_sale',
+    keywords: ['售后', '退款', '处理'],
+    description: '售后受理、处理和完成提醒'
+  }
+};
+
 function normalizeTimeSlot(value) {
   return String(value || '').trim().slice(0, 40);
 }
@@ -465,6 +483,25 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       sentAt: ''
     });
     data.subscribeMessages = data.subscribeMessages.slice(0, 300);
+    return { notification, subscribeMessage: data.subscribeMessages[0] };
+  }
+
+  function sendOrderNotification(data, userId, templateKey, title, content, now = new Date().toISOString()) {
+    const notification = addNotification(data, userId, templateKey === 'AFTER_SALE' ? 'AFTER_SALE' : 'ORDER', title, content);
+    if (!notification) return null;
+    if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
+    data.subscribeMessages.unshift({
+      id: `sub_${randomUUID()}`,
+      userId,
+      templateId: orderNotificationTemplates[templateKey]?.id || templateKey,
+      status: 'QUEUED',
+      title,
+      content,
+      error: '',
+      createdAt: now,
+      sentAt: ''
+    });
+    data.subscribeMessages = data.subscribeMessages.slice(0, 500);
     return { notification, subscribeMessage: data.subscribeMessages[0] };
   }
 
@@ -1870,6 +1907,30 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: { token, userId, expiresIn: 604800 }, requestId });
       }
 
+      if (pathname === '/api/order-message-subscriptions') {
+        const { userId } = requireUser(request);
+        if (request.method === 'GET') {
+          const subscribed = (store.read().orderMessageSubscribers || []).includes(userId);
+          return sendJson(response, 200, { data: { subscribed }, requestId });
+        }
+        if (request.method === 'POST') {
+          const body = await readJson(request);
+          if (body.accepted === false) {
+            const result = store.update((data) => {
+              data.orderMessageSubscribers = (data.orderMessageSubscribers || []).filter((item) => item !== userId);
+              return { subscribed: false };
+            });
+            return sendJson(response, 200, { data: result, requestId });
+          }
+          const result = store.update((data) => {
+            data.orderMessageSubscribers = Array.isArray(data.orderMessageSubscribers) ? data.orderMessageSubscribers : [];
+            if (!data.orderMessageSubscribers.includes(userId)) data.orderMessageSubscribers.unshift(userId);
+            return { subscribed: true };
+          });
+          return sendJson(response, 200, { data: result, requestId });
+        }
+      }
+
       if (request.method === 'POST' && pathname === '/api/uploads') {
         requireUser(request);
         const body = await readJson(request);
@@ -1984,12 +2045,27 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           score_rectify_result: settings.scoreRectifyResultTemplateId || '',
           score_appeal_result: settings.scoreAppealResultTemplateId || ''
         };
-        const data = Object.entries(scoreNotificationTemplates).map(([key, item]) => ({
-          key,
-          id: item.id,
-          description: item.description,
-          configuredId: configuredIds[item.id] || ''
-        }));
+        const configuredUserIds = {
+          order_status: settings.orderStatusTemplateId || '',
+          order_service: settings.orderServiceTemplateId || '',
+          after_sale: settings.afterSaleTemplateId || ''
+        };
+        const data = [
+          ...Object.entries(scoreNotificationTemplates).map(([key, item]) => ({
+            key,
+            id: item.id,
+            audience: 'MERCHANT',
+            description: item.description,
+            configuredId: configuredIds[item.id] || ''
+          })),
+          ...Object.entries(orderNotificationTemplates).map(([key, item]) => ({
+            key,
+            id: item.id,
+            audience: 'USER',
+            description: item.description,
+            configuredId: configuredUserIds[item.id] || ''
+          }))
+        ];
         return sendJson(response, 200, { data, total: data.length, requestId });
       }
 
@@ -2120,6 +2196,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const note = requireString(body.note, 'note', { maxLength: 300 });
         if (!['USER','MERCHANT','PLATFORM'].includes(role)) throw new ApiError(400,'VALIDATION_ERROR','Unsupported role');
         const userSession = role === 'USER' ? requireUser(request) : null;
+        if (role === 'USER' && body.userId && body.userId !== userSession.userId) {
+          throw new ApiError(403, 'ORDER_FORBIDDEN', '不能以其他用户身份提交订单消息');
+        }
         if (role === 'MERCHANT') requireMerchant(request);
         if (role === 'PLATFORM') {
           const adminToken=(request.headers.authorization||'').replace(/^Bearer\s+/i,'');
@@ -2147,10 +2226,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (role === 'USER' && item.collaboration.merchantId) {
             notifyOrderMerchant(data, item, 'ORDER', `订单 ${item.orderNo} 有新用户留言`, note);
           } else if (role === 'MERCHANT' && item.userId) {
-            addNotification(data, item.userId, 'ORDER', `订单 ${item.orderNo} 有新商家留言`, note);
+            sendOrderNotification(data, item.userId, 'ORDER_SERVICE', `订单 ${item.orderNo} 有新商家留言`, note);
           } else if (role === 'PLATFORM') {
             notifyOrderMerchant(data, item, 'ORDER', `平台已介入订单 ${item.orderNo}`, note);
-            addNotification(data, item.userId, 'ORDER', `平台已处理订单 ${item.orderNo}`, note);
+            sendOrderNotification(data, item.userId, 'ORDER_SERVICE', `平台已处理订单 ${item.orderNo}`, note);
           }
           if (role === 'PLATFORM' && action === 'INTERVENE') item.collaboration.intervention = { status:'REQUESTED', note, updatedAt:new Date().toISOString() };
           if (role === 'PLATFORM' && action === 'RESOLVE') item.collaboration.intervention = { status:'RESOLVED', note, updatedAt:new Date().toISOString() };
@@ -2791,6 +2870,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 publishReviewNote: product.publishReviewNote || ''
               })),
             subscribeMessages: (data.subscribeMessages || []).slice(0, 120),
+            orderMessageSubscribers: (data.orderMessageSubscribers || []).length,
             subscribeStats: {
               queued: (data.subscribeMessages || []).filter((item) => item.status === 'QUEUED').length,
               sent: (data.subscribeMessages || []).filter((item) => item.status === 'SENT').length,
@@ -3299,11 +3379,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             ? null
             : notificationTemplates[adminStatusMatch[1]]?.[status];
           if (adminStatusMatch[1] === 'after-sales' && status === 'CLOSED' && item.userId) {
-            addNotification(data, item.userId, 'AFTER_SALE', '售后处理完成', resolutionNote);
+            sendOrderNotification(data, item.userId, 'AFTER_SALE', '售后处理完成', resolutionNote);
           }
           if (template && item.userId) {
             const detail = item.planName || item.vehicleModel || item.reason || item.orderNo || item.id;
-            addNotification(data, item.userId, template[0], template[1], `${detail}：${template[2]}`);
+            sendOrderNotification(data, item.userId, adminStatusMatch[1] === 'after-sales' ? 'AFTER_SALE' : 'ORDER_STATUS', template[1], `${detail}：${template[2]}`);
           }
           return item;
         });
@@ -3478,17 +3558,32 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/admin/subscribe-templates') {
         const data = store.read();
         return sendJson(response, 200, {
-          data: Object.values(scoreNotificationTemplates).map((item) => ({
-            ...item,
-            keywords: item.keywords.join('；'),
-            configuredId: ({
-              score_stage_warning: data.adminSettings?.scoreStageWarningTemplateId || '',
-              score_rectify_apply: data.adminSettings?.scoreRectifyApplyTemplateId || '',
-              score_rectify_result: data.adminSettings?.scoreRectifyResultTemplateId || '',
-              score_appeal_result: data.adminSettings?.scoreAppealResultTemplateId || ''
-            })[item.id] || ''
-          })),
-          total: Object.keys(scoreNotificationTemplates).length,
+          data: [
+            ...Object.entries(scoreNotificationTemplates).map(([key, item]) => ({
+              key,
+              ...item,
+              audience: 'MERCHANT',
+              keywords: item.keywords.join('；'),
+              configuredId: ({
+                score_stage_warning: data.adminSettings?.scoreStageWarningTemplateId || '',
+                score_rectify_apply: data.adminSettings?.scoreRectifyApplyTemplateId || '',
+                score_rectify_result: data.adminSettings?.scoreRectifyResultTemplateId || '',
+                score_appeal_result: data.adminSettings?.scoreAppealResultTemplateId || ''
+              })[item.id] || ''
+            })),
+            ...Object.entries(orderNotificationTemplates).map(([key, item]) => ({
+              key,
+              ...item,
+              audience: 'USER',
+              keywords: item.keywords.join('；'),
+              configuredId: ({
+                order_status: data.adminSettings?.orderStatusTemplateId || '',
+                order_service: data.adminSettings?.orderServiceTemplateId || '',
+                after_sale: data.adminSettings?.afterSaleTemplateId || ''
+              })[item.id] || ''
+            }))
+          ],
+          total: Object.keys(scoreNotificationTemplates).length + Object.keys(orderNotificationTemplates).length,
           requestId
         });
       }
@@ -3512,6 +3607,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           score_rectify_apply: settings.scoreRectifyApplyTemplateId || '',
           score_rectify_result: settings.scoreRectifyResultTemplateId || '',
           score_appeal_result: settings.scoreAppealResultTemplateId || ''
+          ,order_status: settings.orderStatusTemplateId || '',
+          order_service: settings.orderServiceTemplateId || '',
+          after_sale: settings.afterSaleTemplateId || ''
         };
         let sent = 0;
         let failed = 0;
@@ -3524,7 +3622,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const payload = {
               touser: wechatIdentity,
               template_id: templateId,
-              page: 'pages/merchant/index',
+              page: message.templateId.startsWith('score_') ? 'pages/merchant/index' : 'pages/orders/orders',
               data: {
                 thing1: { value: (message.title || '').slice(0, 20) },
                 thing2: { value: (message.content || '').slice(0, 20) }
@@ -3687,7 +3785,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             current.serviceScoreLimitedThreshold = limited;
             current.serviceScoreRestrictedThreshold = restricted;
           }
-          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId']) {
+          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'afterSaleTemplateId']) {
             if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);
           }
           if (body.paymentTimeoutMinutes !== undefined) {
@@ -4017,7 +4115,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             }, now);
             order.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'\u652f\u4ed8\u6210\u529f\uff0c\u5f85\u5546\u5bb6\u786e\u8ba4\u5c65\u7ea6\u3002', createdAt:now });
             addAudit(data, '\u6a21\u62df\u652f\u4ed8\u56de\u8c03\u6210\u529f', order.orderNo);
-            addNotification(data, userId, 'ORDER', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${order.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
+            sendOrderNotification(data, userId, 'ORDER_STATUS', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${order.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
             notifyOrderMerchant(data, order, 'ORDER', '新订单已支付', `订单 ${order.orderNo} 已支付，请尽快确认履约。`);
             return { order, paymentOrder };
           }
@@ -4164,6 +4262,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           order.updatedAt = now;
           freezeOrderSettlements(data, order, now, `${record.typeLabel}：${reason}`);
           notifyOrderMerchant(data, order, 'AFTER_SALE', '收到新的售后申请', `订单 ${order.orderNo}：${record.typeLabel}，${reason}`);
+          sendOrderNotification(data, userId, 'AFTER_SALE', '售后已受理', `${order.orderNo}：已受理，预计 24 小时内响应。`);
           addAudit(data, '用户提交售后申请', order.orderNo);
           return record;
         });
