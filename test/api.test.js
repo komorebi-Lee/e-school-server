@@ -1875,6 +1875,63 @@ test('unpaid orders expire on the configured payment timeout and free the stock'
   assert.equal(restored.response.status, 200);
 });
 
+test('pending service payments expire and block confirmation', async () => {
+  const session = await loginWeChat('service_timeout_user');
+  const card = await api('/api/phone-card-orders', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ productId: 'prod_card_service_001', customerName: '超时同学', phone: '13800001111' })
+  });
+  assert.equal(card.response.status, 201);
+  assert.ok(card.body.data.paymentExpiresAt);
+
+  const recharge = await api('/api/recharge-orders', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ promoId: 'promo_recharge_100', phone: '13800001111' })
+  });
+  assert.equal(recharge.response.status, 201);
+  assert.ok(recharge.body.data.paymentExpiresAt);
+
+  const plate = await api('/api/plate-applications', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      customerName: '超时同学', customerPhone: '13800001111',
+      studentNo: '202600001', vehicleModel: '自带车辆'
+    })
+  });
+  assert.equal(plate.response.status, 201);
+  assert.ok(plate.body.data.paymentExpiresAt);
+
+  const expiredAt = new Date(Date.now() - 60 * 1000).toISOString();
+  store.update((data) => {
+    const records = [
+      ...(data.phoneCardOrders || []),
+      ...(data.rechargeOrders || []),
+      ...(data.plateApplications || [])
+    ].filter((item) => item.userId === session.userId && item.status === 'PENDING_PAYMENT');
+    records.forEach((item) => { item.paymentExpiresAt = expiredAt; });
+  });
+
+  const blockedCard = await confirmPayment(card.body.paymentOrder.id, session.token);
+  assert.equal(blockedCard.response.status, 409);
+
+  const orders = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.equal(orders.response.status, 200);
+  for (const record of orders.body.data.serviceRecords) {
+    if (!['PHONE_PLAN', 'RECHARGE', 'PLATE'].includes(record.type)) continue;
+    assert.equal(record.status, 'CANCELLED');
+    assert.equal(record.paymentStatus, 'EXPIRED');
+    assert.equal(record.cancelReason, 'PAYMENT_TIMEOUT');
+  }
+
+  const notifications = await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.ok(notifications.body.data.some((item) => item.title === '电话卡订单已超时关闭'));
+  assert.ok(notifications.body.data.some((item) => item.title === '话费权益订单已超时关闭'));
+  assert.ok(notifications.body.data.some((item) => item.title === '校园牌照申请已超时关闭'));
+});
+
 test('after-sale freezes merchant settlement until the case is closed', async () => {
   const adminHeaders = await loginAdmin();
 

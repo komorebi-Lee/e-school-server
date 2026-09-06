@@ -989,6 +989,38 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       addNotification(data, order.userId, 'ORDER', '订单已超时关闭', `订单 ${order.orderNo} 超过 ${timeoutMinutes} 分钟未支付，已自动关闭并释放库存。`);
       expired.push(order.orderNo);
     }
+
+    const serviceTimeoutTargets = [
+      { collection: 'phoneCardOrders', type: 'PHONE_PLAN', label: '电话卡订单' },
+      { collection: 'rechargeOrders', type: 'RECHARGE', label: '话费权益订单' },
+      { collection: 'plateApplications', type: 'PLATE', label: '校园牌照申请' }
+    ];
+    for (const target of serviceTimeoutTargets) {
+      for (const record of data[target.collection] || []) {
+        if (record.status !== 'PENDING_PAYMENT') continue;
+        const dueAt = record.paymentExpiresAt
+          || new Date(new Date(record.createdAt).getTime() + timeoutMinutes * 60 * 1000).toISOString();
+        if (dueAt > now) continue;
+        record.status = 'CANCELLED';
+        record.paymentStatus = 'EXPIRED';
+        record.cancelReason = 'PAYMENT_TIMEOUT';
+        record.updatedAt = now;
+        const paymentOrder = (data.paymentOrders || []).find((item) => item.id === record.paymentOrderId);
+        if (paymentOrder && paymentOrder.status === 'PENDING') {
+          paymentOrder.status = 'CANCELLED';
+          paymentOrder.updatedAt = now;
+        }
+        addAudit(data, `${target.label}超时自动关闭`, record.id);
+        addNotification(
+          data,
+          record.userId,
+          target.type,
+          `${target.label}已超时关闭`,
+          `超过 ${timeoutMinutes} 分钟未支付，已自动关闭。如仍需办理，请重新下单。`
+        );
+        expired.push(record.id);
+      }
+    }
     return expired;
   }
 
@@ -1000,7 +1032,13 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       if (order.status !== 'PENDING_PAYMENT') return false;
       const dueAt = order.paymentExpiresAt || new Date(new Date(order.createdAt).getTime() + timeoutMinutes * 60 * 1000).toISOString();
       return dueAt <= now;
-    });
+    })
+      || (snapshot.phoneCardOrders || []).some((item) => item.status === 'PENDING_PAYMENT'
+        && (item.paymentExpiresAt || new Date(new Date(item.createdAt).getTime() + timeoutMinutes * 60 * 1000).toISOString()) <= now)
+      || (snapshot.rechargeOrders || []).some((item) => item.status === 'PENDING_PAYMENT'
+        && (item.paymentExpiresAt || new Date(new Date(item.createdAt).getTime() + timeoutMinutes * 60 * 1000).toISOString()) <= now)
+      || (snapshot.plateApplications || []).some((item) => item.status === 'PENDING_PAYMENT'
+        && (item.paymentExpiresAt || new Date(new Date(item.createdAt).getTime() + timeoutMinutes * 60 * 1000).toISOString()) <= now);
     if (!hasExpired) return [];
     return store.update((data) => expirePendingOrders(data, new Date().toISOString()));
   }
@@ -3257,10 +3295,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const merchants = data.merchants || [];
           const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, statusLabel:statusLabels[order.status]||order.status, collaboration:order.collaboration || createCollaboration(order, order.items?.[0]?.merchantId || ''), merchantName:merchants.find(merchant=>merchant.id===order.collaboration?.merchantId)?.name || '平台自营', plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '' }));
         const serviceRecords = (() => {
-          const phoneCardOrders=(data.phoneCardOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.amountInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
-          const rechargeOrders=(data.rechargeOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents||0)/100).toFixed(0)}送${((item.receiveInCents||0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.paidInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const phoneCardOrders=(data.phoneCardOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.amountInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', paymentExpiresAt:item.paymentExpiresAt || '', cancelReason:item.cancelReason || '', relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const rechargeOrders=(data.rechargeOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents||0)/100).toFixed(0)}送${((item.receiveInCents||0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.paidInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', paymentExpiresAt:item.paymentExpiresAt || '', cancelReason:item.cancelReason || '', relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           const broadbandApplications=(data.broadbandApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'BROADBAND', typeLabel:'宽带', title:'双人购卡宽带', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:0, relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
-          const plateApplications=(data.plateApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel||'校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.feeInCents||0, paymentOrderId:item.paymentOrderId||'', paymentStatus:item.paymentStatus||'', studentNo:item.studentNo||'', materialCount:(item.materials||[]).length, relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const plateApplications=(data.plateApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel||'校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.feeInCents||0, paymentOrderId:item.paymentOrderId||'', paymentStatus:item.paymentStatus||'', paymentExpiresAt:item.paymentExpiresAt || '', cancelReason:item.cancelReason || '', studentNo:item.studentNo||'', materialCount:(item.materials||[]).length, relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           return [...phoneCardOrders,...rechargeOrders,...broadbandApplications,...plateApplications];
         })();
         return sendJson(response,200,{data:{ebikeOrders,serviceRecords},requestId});
@@ -3309,7 +3347,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
         }
         const now = new Date().toISOString();
-        const record = { id:`tel_${randomUUID()}`, userId, customerName:requireString(body.customerName,'customerName',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), productId, planName:planProduct.name, amountInCents, status:'PENDING_PAYMENT', paymentStatus:'UNPAID', relatedIds:{}, createdAt:now, updatedAt:now };
+        const paymentTimeoutMinutes = Number(store.read().adminSettings?.paymentTimeoutMinutes || 30);
+        const record = { id:`tel_${randomUUID()}`, userId, customerName:requireString(body.customerName,'customerName',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), productId, planName:planProduct.name, amountInCents, status:'PENDING_PAYMENT', paymentStatus:'UNPAID', paymentExpiresAt:new Date(new Date(now).getTime() + paymentTimeoutMinutes * 60 * 1000).toISOString(), relatedIds:{}, createdAt:now, updatedAt:now };
         const result = store.update(data=>{
           (data.phoneCardOrders=data.phoneCardOrders||[]).unshift(record);
           (data.rechargeOrders||[]).forEach(item=>{if(item.userId===userId&&item.phone===record.phone&&!item.relatedIds?.phoneCardOrderId)item.relatedIds={...(item.relatedIds||{}),phoneCardOrderId:record.id};});
@@ -3356,7 +3395,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
         }
         const now = new Date().toISOString();
-        const record = { id:`top_${randomUUID()}`, userId, phone:requireString(body.phone,'phone',{maxLength:30}), promoId, paidInCents, receiveInCents, status:'PENDING_PAYMENT', paymentStatus:'UNPAID', relatedIds:{}, createdAt:now, updatedAt:now };
+        const paymentTimeoutMinutes = Number(store.read().adminSettings?.paymentTimeoutMinutes || 30);
+        const record = { id:`top_${randomUUID()}`, userId, phone:requireString(body.phone,'phone',{maxLength:30}), promoId, paidInCents, receiveInCents, status:'PENDING_PAYMENT', paymentStatus:'UNPAID', paymentExpiresAt:new Date(new Date(now).getTime() + paymentTimeoutMinutes * 60 * 1000).toISOString(), relatedIds:{}, createdAt:now, updatedAt:now };
         const result = store.update(data=>{
           const related=(data.phoneCardOrders||[]).find(item=>item.userId===userId&&item.phone===record.phone);
           if(related)record.relatedIds={phoneCardOrderId:related.id};
@@ -3416,12 +3456,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const studentNo = requireString(body.studentNo,'studentNo',{maxLength:40});
         const vehicleModel = requireString(body.vehicleModel,'vehicleModel',{maxLength:80});
         const now = new Date().toISOString();
+        const paymentTimeoutMinutes = Number(store.read().adminSettings?.paymentTimeoutMinutes || 30);
         const result = store.update(data=>{
           const order = body.orderId ? (data.orders||[]).find(item=>item.id===body.orderId && item.userId===userId) : null;
           if (body.orderId && !order) throw new ApiError(404,'ORDER_NOT_FOUND','Order not found');
           const platformOrder = order && (data.products||[]).find(product=>product.id===order.items?.[0]?.productId)?.category === 'E_BIKE_NEW';
           const feeInCents = platformOrder ? 0 : ((data.adminSettings||{}).externalPlateFeeInCents ?? 4900);
-          const application = { id:`plate_${randomUUID()}`, userId, customerName, phone:customerPhone, studentNo, vehicleModel, source:platformOrder?'PLATFORM_ORDER':'EXTERNAL', feeInCents, relatedOrderId:order?.id || '', status:platformOrder?'MATERIAL_PENDING':'PENDING_PAYMENT', paymentStatus:platformOrder?'PAID':'UNPAID', relatedIds:order?{ platformOrderIds:[order.id] }:{}, createdAt:now, updatedAt:now };
+          const application = { id:`plate_${randomUUID()}`, userId, customerName, phone:customerPhone, studentNo, vehicleModel, source:platformOrder?'PLATFORM_ORDER':'EXTERNAL', feeInCents, relatedOrderId:order?.id || '', status:platformOrder?'MATERIAL_PENDING':'PENDING_PAYMENT', paymentStatus:platformOrder?'PAID':'UNPAID', paymentExpiresAt:platformOrder?'':new Date(new Date(now).getTime() + paymentTimeoutMinutes * 60 * 1000).toISOString(), relatedIds:order?{ platformOrderIds:[order.id] }:{}, createdAt:now, updatedAt:now };
           if (!platformOrder) {
             const paymentOrder = {
               id:`pay_${randomUUID()}`,
@@ -3633,6 +3674,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const item = data[collectionMap[adminStatusMatch[1]]].find((record) => record.id === adminStatusMatch[2]);
           if (!item) throw new ApiError(404, 'ADMIN_RECORD_NOT_FOUND', 'Record not found');
           const isOrder = adminStatusMatch[1] === 'orders';
+          const isPendingPaymentCollection = ['orders', 'phone-card-orders', 'recharge-orders', 'plate-applications'].includes(adminStatusMatch[1]);
           if (isOrder) {
             if (status === 'PAID') throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '已支付状态必须通过支付单确认，不能人工设置');
             if (status === 'FULFILLING' && item.status !== 'PAID') throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '仅已支付订单可以进入履约');
@@ -3640,6 +3682,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (status === 'CANCELLED' && item.status !== 'PENDING_PAYMENT') throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '已支付订单请先走售后退款，不能直接取消');
           }
           item.status = status; item.updatedAt = new Date().toISOString(); addAudit(data, `更新${adminStatusMatch[1]}状态为${status}`, item.id);
+          if (isPendingPaymentCollection && status === 'PENDING_PAYMENT') {
+            const timeoutMinutes = Number(data.adminSettings?.paymentTimeoutMinutes || 30);
+            item.paymentExpiresAt = new Date(new Date(item.updatedAt).getTime() + timeoutMinutes * 60 * 1000).toISOString();
+          }
           if (isOrder && status === 'CANCELLED') {
             releaseOrderStock(data, item);
             const paymentOrder = (data.paymentOrders || []).find((row) => row.id === item.paymentOrderId);
@@ -4381,6 +4427,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const action = paymentMatch[2];
         if (!action) throw new ApiError(404, 'NOT_FOUND', 'Payment action is required');
+        sweepExpiredOrders();
         const updated = store.update((data) => {
           if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
           const paymentOrder = data.paymentOrders.find((item) => item.id === paymentMatch[1] && item.userId === userId);
