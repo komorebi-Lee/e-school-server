@@ -133,6 +133,10 @@ test('active product detail exposes merchant and stock', async () => {
   assert.equal(result.body.data.reviews.length, 2);
   assert.ok(result.body.data.reviews.every((review) => review.purchaseVerified));
   assert.equal(result.body.data.settings.deliveryResponseHours, 24);
+  assert.equal(result.body.data.storeProfile.name, '狮山校园车行');
+  assert.equal(result.body.data.storeProfile.serviceArea, '华中农业大学狮山校区');
+  assert.equal(typeof result.body.data.storeProfile.score, 'number');
+  assert.equal(typeof result.body.data.storeProfile.soldCount, 'number');
 
   const missing = await api('/api/products/not_exists');
   assert.equal(missing.response.status, 404);

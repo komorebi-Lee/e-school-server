@@ -388,6 +388,43 @@ function withProductReviewSummary(product, reviews = []) {
   };
 }
 
+function productSalesCount(data, productId) {
+  let count = 0;
+  for (const order of data.orders || []) {
+    if (!['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(order.status)) continue;
+    for (const item of order.items || []) {
+      if (item.productId === productId) count += Number(item.quantity || 1);
+    }
+  }
+  for (const order of data.phoneCardOrders || []) {
+    if (!['PENDING_REALNAME', 'ACTIVATED'].includes(order.status) || order.productId !== productId) continue;
+    count += 1;
+  }
+  return count;
+}
+
+function productStoreProfile(product, { deliveryResponseHours = 24, soldCount = 0 } = {}) {
+  const score = product.merchantScore || null;
+  const rating = product.ratingSummary || {};
+  const positiveRate = rating.count
+    ? Math.round((Number(rating.positiveCount || 0) / Number(rating.count)) * 1000) / 10
+    : null;
+  return {
+    name: product.merchantName || '平台自营',
+    serviceArea: product.serviceArea || '华中农业大学狮山校区',
+    responseText: `校内配送 ${Number(deliveryResponseHours) || 24} 小时内响应`,
+    score: score ? score.score : null,
+    scoreText: score ? String(score.score) : '待评估',
+    scoreLabel: score ? (score.gradeLabel || '已评估') : '新商家',
+    scoreToneClass: score ? (score.stage === 'NORMAL' ? 'good' : score.stage === 'LIMITED' ? 'watch' : 'risk') : 'new',
+    ratingText: rating.count ? Number(rating.average || 0).toFixed(1) : '新',
+    ratingCountText: rating.count ? `${rating.count} 条已购评价` : '暂无已购评价',
+    positiveText: positiveRate === null ? '暂无好评率' : `好评率 ${positiveRate}%`,
+    soldCount,
+    soldText: soldCount > 0 ? `已售 ${soldCount}` : '新品上架'
+  };
+}
+
 function createCollaboration(order, merchantId) {
   return {
     merchantId,
@@ -2304,9 +2341,21 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .slice(0, 3)
           .map((item) => withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || [])), data.merchants || []));
         const productMerchant = (data.merchants || []).find((item) => item.id === product.merchantId);
+        const enrichedProduct = withMerchantScore(
+          withAvailableStock(
+            withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])
+          ),
+          data.merchants || []
+        );
+        enrichedProduct.serviceArea = productMerchant?.serviceArea || '华中农业大学狮山校区';
+        const storeProfile = productStoreProfile(enrichedProduct, {
+          deliveryResponseHours: settings.deliveryResponseHours,
+          soldCount: productSalesCount(data, product.id)
+        });
         return sendJson(response, 200, {
           data: {
-            ...withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])), data.merchants || []),
+            ...enrichedProduct,
+            storeProfile,
             merchantServiceScore: productMerchant?.serviceScore
               ? {
                 score: productMerchant.serviceScore.score,
