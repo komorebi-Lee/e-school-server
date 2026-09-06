@@ -146,6 +146,37 @@ test('admin can adjust service score and review a limited merchant product', asy
   const seeded = scoreList.body.data.find((item) => item.merchantId === 'merchant_001');
   assert.ok(seeded);
   assert.equal(seeded.stage, 'NORMAL');
+  assert.equal(seeded.breakdown.length, 5);
+  assert.ok(seeded.breakdown.some((item) => item.key === 'NEGATIVE_REVIEW'));
+
+  const beforeReply = seeded.breakdown.find((item) => item.key === 'NEGATIVE_REVIEW');
+  store.update((data) => {
+    data.productReviews.unshift({
+      id: 'review_service_score_negative', productId: 'prod_ebike_001', rating: 1,
+      content: '服务分测试差评', customerName: '测试同学', purchaseVerified: true,
+      visibility: 'PUBLISHED', reply: null, createdAt: new Date().toISOString()
+    });
+  });
+  const afterNegative = await api('/api/admin/merchant-scores', { headers: adminHeaders });
+  const negativeScore = afterNegative.body.data.find((item) => item.merchantId === 'merchant_001');
+  assert.equal(negativeScore.breakdown.find((item) => item.key === 'NEGATIVE_REVIEW').score, 0);
+
+  const merchantSessionForReply = await loginWeChat('merchant_demo');
+  const merchantLoginForReply = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSessionForReply.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const reply = await api('/api/merchant/product-reviews/review_service_score_negative/reply', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLoginForReply.body.data.token}` },
+    body: JSON.stringify({ content: '已联系并完成整改' })
+  });
+  assert.equal(reply.response.status, 200);
+  const persistedAfterReply = store.read().merchants.find((item) => item.id === 'merchant_001');
+  assert.equal(persistedAfterReply.serviceScore.breakdown.find((item) => item.key === 'NEGATIVE_REVIEW').score, 100);
+  const afterReply = await api('/api/admin/merchant-scores', { headers: adminHeaders });
+  const repliedScore = afterReply.body.data.find((item) => item.merchantId === 'merchant_001');
+  assert.equal(repliedScore.breakdown.find((item) => item.key === 'NEGATIVE_REVIEW').score, 100);
+  assert.equal(beforeReply.score, 100);
 
   const adjusted = await api('/api/admin/merchant-scores/merchant_001/adjust', {
     method: 'POST', headers: adminHeaders,

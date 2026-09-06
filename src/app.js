@@ -1133,10 +1133,11 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
   // ===== 商家服务分 =====
   // 分数只由平台已经记录的事实推导：交付是否按时、售后多不多、学生评价好不好、超时预警有没有堆积。
   const serviceScoreWeights = [
-    { key: 'DELIVERY', label: '履约及时', weight: 30 },
+    { key: 'DELIVERY', label: '履约及时', weight: 35 },
     { key: 'AFTER_SALE', label: '售后表现', weight: 25 },
-    { key: 'REVIEW', label: '学生评价', weight: 30 },
-    { key: 'SLA', label: '超时预警', weight: 15 }
+    { key: 'REVIEW', label: '学生评价', weight: 20 },
+    { key: 'SLA', label: '超时预警', weight: 15 },
+    { key: 'NEGATIVE_REVIEW', label: '差评处理', weight: 5 }
   ];
 
   // 分档不是标签，而是真实处置：曝光权重影响商品排序，是否自动上架影响商家上新。
@@ -1218,10 +1219,21 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
       : 0;
     const lowRatings = reviews.filter((review) => Number(review.rating) <= 2).length;
     const reviewScore = reviews.length ? clampScore((averageRating / 5) * 100 - lowRatings * 5) : 85;
+    const negativeReviews = reviews.filter((review) => Number(review.rating) <= 2);
+    const negativeReviewRepliedCount = negativeReviews.filter((review) => review.reply && String(review.reply.content || '').trim()).length;
+    const negativeReviewScore = negativeReviews.length
+      ? clampScore((negativeReviewRepliedCount / negativeReviews.length) * 100)
+      : 100;
 
     const slaScore = clampScore(100 - overdueAlerts.length * 20 - (openAlerts.length - overdueAlerts.length) * 8);
 
-    const rawScores = { DELIVERY: deliveryScore, AFTER_SALE: afterSaleScore, REVIEW: reviewScore, SLA: slaScore };
+    const rawScores = {
+      DELIVERY: deliveryScore,
+      AFTER_SALE: afterSaleScore,
+      REVIEW: reviewScore,
+      SLA: slaScore,
+      NEGATIVE_REVIEW: negativeReviewScore
+    };
     const totalWeight = serviceScoreWeights.reduce((sum, item) => sum + item.weight, 0);
     const weighted = serviceScoreWeights.reduce((sum, item) => sum + rawScores[item.key] * item.weight, 0) / totalWeight;
     const manualAdjustment = Math.max(-20, Math.min(20, Number(merchant.serviceScore?.manualAdjustment || 0)));
@@ -1241,7 +1253,10 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
         : '暂无已购评价，按中性基准计分',
       SLA: openAlerts.length
         ? `未关闭预警 ${openAlerts.length} 条，其中已超时 ${overdueAlerts.length} 条`
-        : '无未关闭的履约预警'
+        : '无未关闭的履约预警',
+      NEGATIVE_REVIEW: negativeReviews.length
+        ? `差评 ${negativeReviews.length} 条，已回复 ${negativeReviewRepliedCount} 条`
+        : '暂无差评，按满分计入'
     };
     return {
       score,
@@ -1271,6 +1286,8 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
         reviewCount: reviews.length,
         averageRating: Math.round(averageRating * 10) / 10,
         lowRatingCount: lowRatings,
+        negativeReviewCount: negativeReviews.length,
+        negativeReviewRepliedCount,
         openAlertCount: openAlerts.length,
         overdueAlertCount: overdueAlerts.length
       },
@@ -2660,6 +2677,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           };
           item.updatedAt = item.reply.repliedAt;
           addAudit(data, '商家回复商品评价', item.productId);
+          // 差评处理率是服务分的计算维度，回复完成后立即落盘，避免后台与用户端看到旧分数。
+          refreshMerchantScores(data, item.reply.repliedAt);
           return item;
         });
         return sendJson(response, 200, { data: review, requestId });
