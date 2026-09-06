@@ -2283,6 +2283,23 @@ test('service score cases support appeal review, rectification and subscription 
   const merchantCases = await api('/api/merchant/score-cases', { headers: merchantHeaders });
   assert.ok(merchantCases.body.data.some((item) => item.id === appeal.body.data.id));
 
+  const evidenceUpload = await api('/api/uploads', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify(makeImage())
+  });
+  assert.equal(evidenceUpload.response.status, 201);
+  const badEvidence = await api('/api/merchant/score-cases', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ type: 'APPEAL', reasonType: 'DELAYED_DELIVERY', reason: '外部图片链接必须被拒绝。', evidence: ['https://example.com/fake.png'] })
+  });
+  assert.equal(badEvidence.response.status, 400);
+  const duplicateCase = await api('/api/merchant/score-cases', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ type: 'APPEAL', reasonType: 'DELAYED_DELIVERY', reason: '当前已有工单，仅验证携带凭证提交被拦截。', evidence: [evidenceUpload.body.data.url] })
+  });
+  assert.equal(duplicateCase.response.status, 409);
+  assert.equal(merchantCases.body.data.find((item) => item.id === appeal.body.data.id).evidence.length, 0);
+
   const adminLogin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
@@ -2336,12 +2353,14 @@ test('service score cases support appeal review, rectification and subscription 
       type: 'RECTIFY',
       reason: '48 小时内清空超时工单，并完成售后回访。',
       plan: '指定值班人员，每日检查履约预警。',
-      productId: 'prod_ebike_001'
+      productId: 'prod_ebike_001',
+      evidence: [evidenceUpload.body.data.url]
     })
   });
   assert.equal(rectify.response.status, 201);
   assert.equal(rectify.body.data.productId, 'prod_ebike_001');
   assert.equal(rectify.body.data.productName, store.read().products.find((item) => item.id === 'prod_ebike_001').name);
+  assert.deepEqual(rectify.body.data.evidence, [evidenceUpload.body.data.url]);
 
   const rectifyReviewed = await api(`/api/admin/score-cases/${rectify.body.data.id}/review`, {
     method: 'POST', headers: adminHeaders,
