@@ -2195,6 +2195,17 @@ test('service score cases support appeal review, rectification and subscription 
     body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
   });
   const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  store.update((data) => {
+    const overdueCase = (data.serviceScoreCases || []).find((item) => item.id === appeal.body.data.id);
+    overdueCase.createdAt = new Date(Date.now() - 49 * 3600 * 1000).toISOString();
+    overdueCase.dueAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  });
+  const patrolBeforeReview = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(patrolBeforeReview.response.status, 200);
+  const overdueScoreAlert = (store.read().slaAlerts || []).find((alert) => alert.ruleKey === 'SCORE_APPEAL_REVIEW' && alert.businessId === appeal.body.data.id);
+  assert.ok(overdueScoreAlert);
+  assert.equal(overdueScoreAlert.status, 'OPEN');
+
   const adminOverview = await api('/api/admin/overview', { headers: adminHeaders });
   assert.ok(adminOverview.body.data.serviceScoreCases.some((item) => item.id === appeal.body.data.id));
 
@@ -2211,6 +2222,11 @@ test('service score cases support appeal review, rectification and subscription 
   assert.equal(reviewed.response.status, 200);
   assert.equal(reviewed.body.data.status, 'COMPLETED');
   assert.equal(reviewed.body.data.appliedAdjustment, 3);
+
+  const patrolAfterReview = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(patrolAfterReview.response.status, 200);
+  const resolvedScoreAlert = (store.read().slaAlerts || []).find((alert) => alert.ruleKey === 'SCORE_APPEAL_REVIEW' && alert.businessId === appeal.body.data.id);
+  assert.equal(resolvedScoreAlert.status, 'RESOLVED');
 
   const merchantAfterAppeal = await api('/api/merchant/overview', { headers: merchantHeaders });
   assert.equal(merchantAfterAppeal.body.data.serviceScore.appealAdjustment, 3);

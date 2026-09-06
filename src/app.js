@@ -1034,6 +1034,23 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
       });
     }
 
+    for (const record of data.serviceScoreCases || []) {
+      if (!['SUBMITTED', 'REVIEWING'].includes(record.status)) continue;
+      targets.push({
+        ruleKey: record.type === 'APPEAL' ? 'SCORE_APPEAL_REVIEW' : 'SCORE_RECTIFY_REVIEW',
+        ruleLabel: record.type === 'APPEAL' ? '服务分申诉审核' : '服务分整改审核',
+        businessType: 'SCORE_CASE',
+        businessId: record.id,
+        businessNo: record.caseNo || record.id,
+        ownerRole: 'PLATFORM',
+        merchantId: record.merchantId || '',
+        merchantName: record.merchantName || '',
+        userId: record.userId || '',
+        dueAt: record.dueAt || addHours(record.createdAt, 48),
+        detail: `${record.reason || ''}`.slice(0, 120)
+      });
+    }
+
     return targets;
   }
 

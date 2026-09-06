@@ -513,7 +513,7 @@ function scoresView() {
   const autoDelistPanel = `<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>低质自动下架</h2><span>复核后可恢复展示</span></div><div class="table-wrap"><table><thead><tr><th>商品</th><th>商家</th><th>触发依据</th><th>操作</th></tr></thead><tbody>${autoDelisted.map((item) => `<tr>
       <td><strong>${esc(item.name)}</strong><small>${esc(item.id)}</small></td>
       <td>${esc(item.merchantName || '')}</td>
-      <td>${esc(item.reason)}<small>低分 ${item.metrics?.lowRatingCount || 0} 条 · 均分 ${item.metrics?.averageRating || 0} · 认定记录 ${item.metrics?.complaintCount || 0} 条</small></td>
+      <td>${esc(item.reason)}<small>低分 ${item.metrics?.lowRatingCount || 0} 条 · 均分 ${item.metrics?.averageRating || 0}</small></td>
       <td><button class="text-button restore-compliance" data-id="${esc(item.id)}">复核恢复</button></td>
     </tr>`).join('') || `<tr><td colspan="4" class="empty">暂无自动下架商品</td></tr>`}</tbody></table></div></section>`;
   const rows = items.map((item) => `<tr>
