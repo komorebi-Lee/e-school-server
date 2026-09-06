@@ -276,6 +276,7 @@ test('business rules configure public commitments and delivery fees', async () =
   assert.equal(config.response.status, 200);
   assert.equal(config.body.data.deliveryFeeInCents, 0);
   assert.equal(config.body.data.deliveryResponseHours, 24);
+  assert.equal(config.body.data.externalPlateFeeInCents, 4900);
   assert.equal(config.body.data.afterSaleResolutionHours, 72);
   assert.ok(config.body.data.deliveryTimeSlots.length > 0);
 
@@ -288,6 +289,22 @@ test('business rules configure public commitments and delivery fees', async () =
     body: JSON.stringify({ deliveryFeeInCents: 500 })
   });
   const session = await loginWeChat('fee_user');
+  const plateSession = await loginWeChat('plate_fee_user');
+  await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ externalPlateFeeInCents: 5900 })
+  });
+  const plateCreated = await api('/api/plate-applications', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${plateSession.token}` },
+    body: JSON.stringify({ customerName: '牌照费同学', customerPhone: '15527111002', studentNo: '2026101234568', vehicleModel: '自带测试车' })
+  });
+  assert.equal(plateCreated.response.status, 201);
+  assert.equal(plateCreated.body.data.feeInCents, 5900);
+  assert.equal(plateCreated.body.paymentOrder.amountInCents, 5900);
+  await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ externalPlateFeeInCents: 4900 })
+  });
   const created = await api('/api/orders', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
