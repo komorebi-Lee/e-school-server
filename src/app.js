@@ -92,6 +92,11 @@ const scoreNotificationTemplates = {
     id: 'product_compliance_restored',
     keywords: ['商品', '复核', '恢复上架'],
     description: '商品通过平台复核或整改验收后提醒商家'
+  },
+  PRODUCT_LOW_STOCK: {
+    id: 'stock_low_stock',
+    keywords: ['库存', '补货', '商品'],
+    description: '商品可售库存达到补货阈值时提醒商家及时补货'
   }
 };
 
@@ -168,18 +173,35 @@ function evaluateLowStockAlert(data, product, now = new Date().toISOString()) {
   const merchant = (data.merchants || []).find((item) => item.id === product.merchantId);
   product.lowStockAlertedAt = now;
   product.lowStockAlertStatus = 'OPEN';
+  const title = '商品库存偏低';
+  const content = `「${product.name}」可售库存 ${stock} 件，已达到补货阈值 ${threshold} 件。`;
   if (merchant?.userId) {
     if (!Array.isArray(data.notifications)) data.notifications = [];
     data.notifications.unshift({
       id: `ntf_${randomUUID()}`,
       userId: merchant.userId,
       type: 'STOCK',
-      title: '商品库存偏低',
-      content: `「${product.name}」可售库存 ${stock} 件，已达到补货阈值 ${threshold} 件。`,
+      title,
+      content,
       read: false,
       createdAt: now
     });
     data.notifications = data.notifications.slice(0, 500);
+    if ((data.serviceMessageSubscribers || []).includes(merchant.userId)) {
+      if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
+      data.subscribeMessages.unshift({
+        id: `sub_${randomUUID()}`,
+        userId: merchant.userId,
+        templateId: 'stock_low_stock',
+        status: 'QUEUED',
+        title,
+        content,
+        error: '',
+        createdAt: now,
+        sentAt: ''
+      });
+      data.subscribeMessages = data.subscribeMessages.slice(0, 300);
+    }
   }
   if (merchant?.id) {
     if (!Array.isArray(data.auditLogs)) data.auditLogs = [];
@@ -616,8 +638,8 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
     return notification;
   }
 
-  function sendScoreNotification(data, userId, templateKey, title, content, now = new Date().toISOString()) {
-    const notification = addNotification(data, userId, 'SCORE', title, content);
+  function sendScoreNotification(data, userId, templateKey, title, content, now = new Date().toISOString(), notificationType = 'SCORE') {
+    const notification = addNotification(data, userId, notificationType, title, content);
     if (!notification) return null;
     if (!(data.serviceMessageSubscribers || []).includes(userId)) return { notification, subscribeMessage: null };
     if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
@@ -2454,7 +2476,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           score_rectify_result: settings.scoreRectifyResultTemplateId || '',
           score_appeal_result: settings.scoreAppealResultTemplateId || ''
           ,product_auto_delist: settings.productAutoDelistTemplateId || '',
-          product_compliance_restored: settings.productComplianceRestoredTemplateId || ''
+          product_compliance_restored: settings.productComplianceRestoredTemplateId || '',
+          stock_low_stock: settings.stockLowStockTemplateId || ''
         };
         const configuredUserIds = {
           order_status: settings.orderStatusTemplateId || '',
@@ -4255,7 +4278,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 score_rectify_result: data.adminSettings?.scoreRectifyResultTemplateId || '',
                 score_appeal_result: data.adminSettings?.scoreAppealResultTemplateId || '',
                 product_auto_delist: data.adminSettings?.productAutoDelistTemplateId || '',
-                product_compliance_restored: data.adminSettings?.productComplianceRestoredTemplateId || ''
+                product_compliance_restored: data.adminSettings?.productComplianceRestoredTemplateId || '',
+                stock_low_stock: data.adminSettings?.stockLowStockTemplateId || ''
               })[item.id] || ''
             })),
             ...Object.entries(orderNotificationTemplates).map(([key, item]) => ({
@@ -4296,6 +4320,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           score_appeal_result: settings.scoreAppealResultTemplateId || ''
           ,product_auto_delist: settings.productAutoDelistTemplateId || '',
           product_compliance_restored: settings.productComplianceRestoredTemplateId || ''
+          ,stock_low_stock: settings.stockLowStockTemplateId || ''
           ,order_status: settings.orderStatusTemplateId || '',
           order_service: settings.orderServiceTemplateId || '',
           after_sale: settings.afterSaleTemplateId || ''
@@ -4306,7 +4331,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           try {
             const wechatIdentity = identityByUserId.get(message.userId);
             if (!wechatIdentity) throw Object.assign(new Error('缺少微信身份'), { code: 'WECHAT_IDENTITY_MISSING' });
-            if (message.templateId.startsWith('score_')
+            const merchantTemplate = scoreNotificationTemplates[Object.keys(scoreNotificationTemplates)
+              .find((key) => scoreNotificationTemplates[key].id === message.templateId) || ''];
+            if (merchantTemplate
               && !(store.read().serviceMessageSubscribers || []).includes(message.userId)) {
               throw Object.assign(new Error('商家未开启服务分提醒'), { code: 'MERCHANT_SUBSCRIPTION_MISSING' });
             }
@@ -4315,7 +4342,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const payload = {
               touser: wechatIdentity,
               template_id: templateId,
-              page: message.templateId.startsWith('score_') ? 'pages/merchant/index' : 'pages/orders/orders',
+              page: merchantTemplate ? 'pages/merchant/index' : 'pages/orders/orders',
               data: {
                 thing1: { value: (message.title || '').slice(0, 20) },
                 thing2: { value: (message.content || '').slice(0, 20) }
@@ -4484,7 +4511,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isFinite(value) || value < 1 || value > 4.5) throw new ApiError(400, 'VALIDATION_ERROR', '均分下架阈值需为 1-4.5 分');
             current.productComplianceAverageRatingThreshold = Math.round(value * 10) / 10;
           }
-          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'afterSaleTemplateId']) {
+          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'afterSaleTemplateId']) {
             if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);
           }
           if (body.paymentTimeoutMinutes !== undefined) {

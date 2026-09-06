@@ -2847,10 +2847,38 @@ test('low stock reaches merchants exactly once and clears after restocking', asy
   const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
   const configured = await api('/api/admin/settings', {
     method: 'POST', headers: adminHeaders,
-    body: JSON.stringify({ lowStockThreshold: 25 })
+    body: JSON.stringify({ lowStockThreshold: 25, stockLowStockTemplateId: 'wx_test_low_stock' })
   });
   assert.equal(configured.response.status, 200);
   assert.equal(configured.body.data.lowStockThreshold, 25);
+  assert.equal(configured.body.data.stockLowStockTemplateId, 'wx_test_low_stock');
+
+  const subscribe = await api('/api/merchant/message-subscriptions', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ accepted: true })
+  });
+  assert.equal(subscribe.response.status, 200);
+  assert.equal(subscribe.body.data.subscribed, true);
+
+  const preRestock = await api('/api/merchant/products/prod_ebike_001', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ stock: 80 })
+  });
+  assert.equal(preRestock.response.status, 200);
+  const notificationsBeforeTrigger = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${merchantSession.token}` }
+  });
+  const stockCountBefore = notificationsBeforeTrigger.body.data.filter((item) => item.type === 'STOCK').length;
+
+  const trigger = await api('/api/merchant/products/prod_ebike_001', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ stock: 25 })
+  });
+  assert.equal(trigger.response.status, 200);
+
+  const templateList = await api('/api/admin/subscribe-templates', { headers: adminHeaders });
+  assert.ok(templateList.body.data.some((item) => item.id === 'stock_low_stock'
+    && item.configuredId === 'wx_test_low_stock' && item.audience === 'MERCHANT'));
 
   const firstOverview = await api('/api/merchant/overview', { headers: merchantAuth });
   assert.equal(firstOverview.response.status, 200);
@@ -2863,7 +2891,11 @@ test('low stock reaches merchants exactly once and clears after restocking', asy
     headers: { authorization: `Bearer ${merchantSession.token}` }
   });
   const firstAlertCount = notificationsAfterFirst.body.data.filter((item) => item.type === 'STOCK').length;
-  assert.ok(firstAlertCount > 0);
+  assert.equal(firstAlertCount, stockCountBefore + 1);
+
+  const queuedLowStock = (store.read().subscribeMessages || [])
+    .filter((item) => item.templateId === 'stock_low_stock' && item.status === 'QUEUED');
+  assert.equal(queuedLowStock.length, 1);
 
   await api('/api/merchant/overview', { headers: merchantAuth });
   const notificationsAfterRepeat = await api('/api/my/notifications', {
@@ -2888,6 +2920,33 @@ test('low stock reaches merchants exactly once and clears after restocking', asy
   });
   assert.equal(reset.response.status, 200);
   assert.equal(reset.body.data.lowStockThreshold, 10);
+
+  store.update((data) => {
+    for (const item of data.products || []) {
+      if (item.id === 'prod_ebike_rent_001') {
+        item.stock = 5;
+        item.lowStockAlertedAt = '';
+        item.lowStockAlertStatus = '';
+      }
+    }
+  });
+  const refreshed = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.ok(refreshed.body.data.lowStockProducts.some((item) => item.id === 'prod_ebike_rent_001'));
+  const queuedForDispatch = (store.read().subscribeMessages || [])
+    .find((item) => item.templateId === 'stock_low_stock' && item.status === 'QUEUED');
+  assert.ok(queuedForDispatch);
+
+  const dispatch = await api('/api/admin/subscribe-messages/dispatch', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ limit: 100 })
+  });
+  assert.equal(dispatch.response.status, 200);
+  const sentLowStock = (store.read().subscribeMessages || [])
+    .find((item) => item.templateId === 'stock_low_stock' && item.status === 'SENT');
+  assert.ok(sentLowStock);
+  assert.ok(sentSubscribeMessages.some((message) => message.template_id === 'wx_test_low_stock'
+    && message.touser === 'openid_merchant_demo'
+    && message.page === 'pages/merchant/index'));
 });
 
 test('merchant score notifications require a persisted subscription', async () => {

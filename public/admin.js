@@ -614,6 +614,7 @@ function scoresView() {
     <label>申诉结果模板 ID<input id="scoreAppealResultTemplate" value="${esc(state.data.settings?.scoreAppealResultTemplateId || '')}"></label>
     <label>商品下架提醒模板 ID<input id="productAutoDelistTemplate" value="${esc(state.data.settings?.productAutoDelistTemplateId || '')}"></label>
     <label>商品恢复提醒模板 ID<input id="productComplianceRestoredTemplate" value="${esc(state.data.settings?.productComplianceRestoredTemplateId || '')}"></label>
+    <label>低库存提醒模板 ID<input id="stockLowStockTemplate" value="${esc(state.data.settings?.stockLowStockTemplateId || '')}"></label>
     <label>订单状态模板 ID<input id="orderStatusTemplate" value="${esc(state.data.settings?.orderStatusTemplateId || '')}"></label>
     <label>订单客服模板 ID<input id="orderServiceTemplate" value="${esc(state.data.settings?.orderServiceTemplateId || '')}"></label>
     <label>售后进度模板 ID<input id="afterSaleTemplate" value="${esc(state.data.settings?.afterSaleTemplateId || '')}"></label>
@@ -738,6 +739,7 @@ bindView = function () {
         scoreAppealResultTemplateId: document.querySelector('#scoreAppealResultTemplate').value.trim(),
         productAutoDelistTemplateId: document.querySelector('#productAutoDelistTemplate').value.trim(),
         productComplianceRestoredTemplateId: document.querySelector('#productComplianceRestoredTemplate').value.trim(),
+        stockLowStockTemplateId: document.querySelector('#stockLowStockTemplate').value.trim(),
         orderStatusTemplateId: document.querySelector('#orderStatusTemplate').value.trim(),
         orderServiceTemplateId: document.querySelector('#orderServiceTemplate').value.trim(),
         afterSaleTemplateId: document.querySelector('#afterSaleTemplate').value.trim()
