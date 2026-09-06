@@ -277,6 +277,7 @@ test('business rules configure public commitments and delivery fees', async () =
   assert.equal(config.body.data.deliveryFeeInCents, 0);
   assert.equal(config.body.data.deliveryResponseHours, 24);
   assert.equal(config.body.data.externalPlateFeeInCents, 4900);
+  assert.equal(config.body.data.leadResponseHours, 24);
   assert.equal(config.body.data.afterSaleResolutionHours, 72);
   assert.ok(config.body.data.deliveryTimeSlots.length > 0);
 
@@ -289,6 +290,13 @@ test('business rules configure public commitments and delivery fees', async () =
     body: JSON.stringify({ deliveryFeeInCents: 500 })
   });
   const session = await loginWeChat('fee_user');
+  const consultSession = await loginWeChat('consult_user');
+  const leadCreated = await api('/api/leads', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${consultSession.token}` },
+    body: JSON.stringify({ name: '咨询同学', phone: '15527111003', businessType: 'E_BIKE', interest: '校园牌照辅助' })
+  });
+  assert.equal(leadCreated.response.status, 201);
+  assert.equal(leadCreated.body.data.userId, 'wx_consult_user');
   const plateSession = await loginWeChat('plate_fee_user');
   await api('/api/admin/settings', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },

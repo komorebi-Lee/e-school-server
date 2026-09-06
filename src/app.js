@@ -52,8 +52,8 @@ function isTlsInterceptionError(error) {
     plateResponseHours: settings.plateResponseHours || 48,
     afterSaleResponseHours: settings.afterSaleResponseHours || 24,
     afterSaleResolutionHours: settings.afterSaleResolutionHours || 72,
-    afterSaleResolutionHours: settings.afterSaleResolutionHours || 72,
     externalPlateFeeInCents: settings.externalPlateFeeInCents ?? 4900,
+    leadResponseHours: Number.isInteger(settings.leadResponseHours) && settings.leadResponseHours >= 1 && settings.leadResponseHours <= 168 ? settings.leadResponseHours : 24,
     paymentTimeoutMinutes: settings.paymentTimeoutMinutes || 30,
     settlementPeriodDays: Number.isInteger(settings.settlementPeriodDays) ? settings.settlementPeriodDays : 7,
     deliveryTimeSlots: Array.isArray(settings.deliveryTimeSlots) && settings.deliveryTimeSlots.length ? settings.deliveryTimeSlots : ['尽快配送'],
@@ -3344,7 +3344,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const body = await readJson(request);
         const now = new Date();
-        const lead = { id:`lead_${randomUUID()}`, leadNo:`LS${Date.now().toString().slice(-8)}`, userId, name:requireString(body.name,'name',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), businessType:requireString(body.businessType,'businessType',{maxLength:40}), interest:requireString(body.interest || '未指定','interest',{maxLength:120}), expectedTime:(body.expectedTime||'尽快').toString().slice(0,40), deliveryNeed:(body.deliveryNeed||'无').toString().slice(0,120), note:(body.note||'').toString().slice(0,500), status:'SUBMITTED', assignee:'', followUps:[], createdAt:now.toISOString(), updatedAt:now.toISOString(), slaDueAt:new Date(now.getTime()+24*3600*1000).toISOString() };
+        const leadResponseHours = slaHours(store.read(), 'leadResponseHours', 24);
+        const lead = { id:`lead_${randomUUID()}`, leadNo:`LS${Date.now().toString().slice(-8)}`, userId, name:requireString(body.name,'name',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), businessType:requireString(body.businessType,'businessType',{maxLength:40}), interest:requireString(body.interest || '未指定','interest',{maxLength:120}), expectedTime:(body.expectedTime||'尽快').toString().slice(0,40), deliveryNeed:(body.deliveryNeed||'无').toString().slice(0,120), note:(body.note||'').toString().slice(0,500), status:'SUBMITTED', assignee:'', followUps:[], createdAt:now.toISOString(), updatedAt:now.toISOString(), slaDueAt:new Date(now.getTime()+leadResponseHours*3600*1000).toISOString() };
         store.update(data => { if (!Array.isArray(data.leads)) data.leads=[]; data.leads.unshift(lead); addAudit(data,'新增咨询线索',lead.leadNo); });
         return sendJson(response,201,{data:lead,requestId});
       }
