@@ -2324,21 +2324,32 @@ test('service score cases support appeal review, rectification and subscription 
   const merchantAfterAppeal = await api('/api/merchant/overview', { headers: merchantHeaders });
   assert.equal(merchantAfterAppeal.body.data.serviceScore.appealAdjustment, 3);
 
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_001');
+    product.active = false;
+    product.autoDelistRule = 'LOW_QUALITY';
+  });
+
   const rectify = await api('/api/merchant/score-cases', {
     method: 'POST', headers: merchantHeaders,
     body: JSON.stringify({
       type: 'RECTIFY',
       reason: '48 小时内清空超时工单，并完成售后回访。',
-      plan: '指定值班人员，每日检查履约预警。'
+      plan: '指定值班人员，每日检查履约预警。',
+      productId: 'prod_ebike_001'
     })
   });
   assert.equal(rectify.response.status, 201);
+  assert.equal(rectify.body.data.productId, 'prod_ebike_001');
+  assert.equal(rectify.body.data.productName, store.read().products.find((item) => item.id === 'prod_ebike_001').name);
 
   const rectifyReviewed = await api(`/api/admin/score-cases/${rectify.body.data.id}/review`, {
     method: 'POST', headers: adminHeaders,
     body: JSON.stringify({ decision: 'APPROVE', note: '整改计划可执行', adjustment: 0 })
   });
   assert.equal(rectifyReviewed.response.status, 200);
+  assert.deepEqual(rectifyReviewed.body.data.restoredProductIds, ['prod_ebike_001']);
+  assert.equal(store.read().products.find((item) => item.id === 'prod_ebike_001').active, true);
 
   const saveTemplate = await api('/api/admin/settings', {
     method: 'POST', headers: adminHeaders,
@@ -2373,10 +2384,18 @@ test('low quality products are auto delisted and can be restored after complianc
   });
   const merchantHeaders = { authorization: `Bearer ${merchantLogin.body.data.token}` };
 
+  const invalidRectifyLink = await api('/api/merchant/score-cases', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ type: 'RECTIFY', reason: '提交错误商品不应创建整改工单。', plan: '该商品不在自动下架清单中。', productId: 'prod_card_service_001' })
+  });
+  assert.equal(invalidRectifyLink.response.status, 404);
+
   store.update((data) => {
     const product = data.products.find((item) => item.id === 'prod_ebike_001');
     product.active = true;
     delete product.autoDelistRule;
+    delete product.autoDelistRestoredBy;
+    delete product.autoDelistRestoredCaseId;
     for (let index = 0; index < 3; index += 1) {
       data.productReviews.unshift({
         id: `review_auto_delist_${index}`, productId: 'prod_ebike_001', rating: 1,

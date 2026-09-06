@@ -2586,6 +2586,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const result = store.update((data) => {
           const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
           if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号不可用');
+          if (type === 'RECTIFY' && body.productId !== undefined) {
+            const productId = requireString(body.productId, 'productId', { maxLength: 80 });
+            const product = data.products.find((item) => item.id === productId
+              && item.merchantId === merchant.id
+              && item.autoDelistRule === 'LOW_QUALITY'
+              && item.active === false);
+            if (!product) throw new ApiError(404, 'DELISTED_PRODUCT_NOT_FOUND', '未找到待整改的自动下架商品');
+          }
           if ((data.serviceScoreCases || []).some((item) => item.merchantId === merchant.id
             && ['SUBMITTED', 'REVIEWING'].includes(item.status))) {
             throw new ApiError(409, 'SCORE_CASE_EXISTS', '已有一件申诉或整改工单在处理中');
@@ -2599,6 +2607,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             evidence,
             requestedAdjustment
           }, now);
+          if (type === 'RECTIFY' && body.productId) {
+            caseRecord.productId = requireString(body.productId, 'productId', { maxLength: 80 });
+            caseRecord.productName = (data.products.find((item) => item.id === caseRecord.productId) || {}).name || '';
+          }
           addAudit(data, '服务分工单待审核', `${merchant.name} ${caseRecord.caseNo}`);
           return caseRecord;
         });
@@ -3626,6 +3638,30 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               type: 'RECTIFY_APPROVED',
               note: `整改验收通过：${note}`
             }, now);
+          }
+          if (decision === 'APPROVE' && caseRecord.type === 'RECTIFY') {
+            const restoredProducts = (data.products || []).filter((item) => item.merchantId === merchant.id
+              && item.autoDelistRule === 'LOW_QUALITY' && item.active === false
+              && (!caseRecord.productId || item.id === caseRecord.productId))
+              .map((product) => {
+                product.active = true;
+                product.autoDelistRestoredAt = now;
+                product.autoDelistRestoredBy = 'SCORE_CASE';
+                product.autoDelistRestoredCaseId = caseRecord.id;
+                if (product.publishReviewStatus === 'REJECTED') {
+                  product.publishReviewStatus = 'AUTO';
+                  product.publishReviewNote = '';
+                }
+                addMerchantScoreLog(data, merchant, {
+                  type: 'SCORE_CASE_COMPLIANCE_RESTORED',
+                  note: `整改工单 ${caseRecord.caseNo} 验收通过，商品「${product.name}」恢复展示。`
+                }, now);
+                addAudit(data, '整改工单自动恢复上架', product.name);
+                notifyMerchant(data, merchant.id, 'SCORE', '商品已恢复上架',
+                  `商品「${product.name}」已随整改工单 ${caseRecord.caseNo} 验收通过恢复展示。`, now);
+                return product.id;
+              });
+            caseRecord.restoredProductIds = restoredProducts;
           }
           caseRecord.timeline.unshift({
             status: caseRecord.status,
