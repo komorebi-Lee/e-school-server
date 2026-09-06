@@ -16,6 +16,7 @@ class ApiError extends Error {
 const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
 const allowedLeadStatuses = new Set(['SUBMITTED', 'FOLLOW_UP', 'COMPLETED', 'INVALID']);
+const allowedScoreComplaintTypes = new Set(['REMOVED_NEGATIVE_REVIEW', 'DELAYED_DELIVERY', 'AFTER_SALE_ISSUE']);
 const openLeadStatuses = new Set(['SUBMITTED', 'FOLLOW_UP']);
 const allowedMerchantCategories = new Set(['E_BIKE', 'DIGITAL', 'FOOD', 'LIFE_SERVICE']);
 const allowedMerchantStatuses = new Set(['REVIEWING', 'APPROVED', 'REJECTED']);
@@ -37,7 +38,7 @@ function isTlsInterceptionError(error) {
   return tlsCodes.has(error.code) || /self-signed/i.test(error.message);
 }
 
-function publicSettings(settings = {}) {
+  function publicSettings(settings = {}) {
   return {
     brandName: settings.brandName || '狮山智生活',
     schoolName: settings.schoolName || '华中农业大学',
@@ -56,6 +57,29 @@ function publicSettings(settings = {}) {
     platformNotice: settings.platformNotice || '服务范围和办理结果以学校及合作方最终确认为准。'
   };
 }
+
+const scoreNotificationTemplates = {
+  SCORE_STAGE_WARNING: {
+    id: 'score_stage_warning',
+    keywords: ['店铺', '服务分', '整改'],
+    description: '服务分下降或进入整改阶段时提醒商家及时处理'
+  },
+  SCORE_RECTIFY_APPLY: {
+    id: 'score_rectify_apply',
+    keywords: ['整改', '申请', '审核'],
+    description: '商家提交服务分整改申请后提醒管理员审核'
+  },
+  SCORE_RECTIFY_RESULT: {
+    id: 'score_rectify_result',
+    keywords: ['整改', '审核结果', '服务分'],
+    description: '整改审核完成后通知商家处理结论'
+  },
+  SCORE_APPEAL_RESULT: {
+    id: 'score_appeal_result',
+    keywords: ['申诉', '审核结果', '服务分'],
+    description: '差评记录申诉审核完成后通知商家结论'
+  }
+};
 
 function normalizeTimeSlot(value) {
   return String(value || '').trim().slice(0, 40);
@@ -311,6 +335,16 @@ function appendCollaborationEvent(order, role, action, note) {
   order.collaboration.intervention.updatedAt = time;
 }
 
+const scoreComplaintTypeLabels = {
+  REMOVED_NEGATIVE_REVIEW: '差评记录有误',
+  DELAYED_DELIVERY: '履约延时有合理原因',
+  AFTER_SALE_ISSUE: '售后责任认定有异议'
+};
+
+function complaintDueAt(now) {
+  return new Date(new Date(now).getTime() + 48 * 3600 * 1000).toISOString();
+}
+
 function createApp({ store, wechatAuth = exchangeWeChatCode }) {
   const adminSessions = new Map();
   const merchantSessions = new Map();
@@ -355,9 +389,33 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     return notification;
   }
 
+  function sendScoreNotification(data, userId, templateKey, title, content, now = new Date().toISOString()) {
+    const notification = addNotification(data, userId, 'SCORE', title, content);
+    if (!notification) return null;
+    if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
+    data.subscribeMessages.unshift({
+      id: `sub_${randomUUID()}`,
+      userId,
+      templateId: scoreNotificationTemplates[templateKey]?.id || templateKey,
+      status: 'QUEUED',
+      title,
+      content,
+      error: '',
+      createdAt: now,
+      sentAt: ''
+    });
+    data.subscribeMessages = data.subscribeMessages.slice(0, 300);
+    return { notification, subscribeMessage: data.subscribeMessages[0] };
+  }
+
   function notifyMerchant(data, merchantId, type, title, content) {
     const merchant = (data.merchants || []).find((item) => item.id === merchantId);
     return addNotification(data, merchant?.userId, type, title, content);
+  }
+
+  function notifyMerchantScore(data, merchantId, templateKey, title, content, now = new Date().toISOString()) {
+    const merchant = (data.merchants || []).find((item) => item.id === merchantId);
+    return sendScoreNotification(data, merchant?.userId, templateKey, title, content, now);
   }
 
   function notifyOrderMerchant(data, order, type, title, content) {
@@ -1126,10 +1184,6 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
   }
 
   // 商家与运营看板需要当下的分数，读接口先重算一次再返回。
-  function refreshScoresNow() {
-    return store.update((data) => refreshMerchantScores(data, new Date().toISOString()));
-  }
-
   // ===== 商家服务分 =====
   // 分数只由平台已经记录的事实推导：交付是否按时、售后多不多、学生评价好不好、超时预警有没有堆积。
   const serviceScoreWeights = [
@@ -1237,7 +1291,8 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
     const totalWeight = serviceScoreWeights.reduce((sum, item) => sum + item.weight, 0);
     const weighted = serviceScoreWeights.reduce((sum, item) => sum + rawScores[item.key] * item.weight, 0) / totalWeight;
     const manualAdjustment = Math.max(-20, Math.min(20, Number(merchant.serviceScore?.manualAdjustment || 0)));
-    const score = clampScore(weighted + manualAdjustment);
+    const appealAdjustment = Math.max(-20, Math.min(20, Number(merchant.serviceScore?.appealAdjustment || 0)));
+    const score = clampScore(weighted + manualAdjustment + appealAdjustment);
     const thresholds = scoreThresholds(data);
     const stage = score >= thresholds.limited ? 'NORMAL' : (score >= thresholds.restricted ? 'LIMITED' : 'RESTRICTED');
     const gradeEntry = serviceScoreGrades.find((item) => score >= item.min) || serviceScoreGrades[serviceScoreGrades.length - 1];
@@ -1267,6 +1322,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
       exposureWeight: serviceScoreStages[stage].exposureWeight,
       autoPublish: serviceScoreStages[stage].autoPublish,
       manualAdjustment,
+      appealAdjustment,
       thresholds,
       breakdown: serviceScoreWeights.map((item) => ({
         key: item.key,
@@ -1332,9 +1388,14 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
           : toStage === 'LIMITED'
             ? '商品曝光已降权，新增商品需平台复核后才会上架'
             : '商品曝光与上新已恢复正常';
-        notifyMerchant(data, merchant.id, 'SCORE', improved ? '服务分已恢复' : '服务分下降', `${note}。${consequence}。`);
+        notifyMerchantScore(data, merchant.id, toStage === 'NORMAL' ? 'SCORE_RECTIFY_RESULT' : 'SCORE_STAGE_WARNING',
+          improved ? '服务分已恢复' : '服务分下降', `${note}。${consequence}。`, now);
       }
       changes.push({ merchantId: merchant.id, fromStage, toStage, score: merchant.serviceScore.score });
+    }
+    const complianceActions = enforceProductCompliance(data, now);
+    for (const action of complianceActions) {
+      changes.push({ merchantId: (data.products || []).find((item) => item.id === action.productId)?.merchantId || '', action: action.action });
     }
     return changes;
   }
@@ -1382,6 +1443,130 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
       limitedCount: byStage('LIMITED'),
       restrictedCount: byStage('RESTRICTED')
     };
+  }
+
+  function refreshScoresNow() {
+    return store.update((data) => refreshMerchantScores(data, new Date().toISOString()));
+  }
+
+  function productComplianceMetrics(product, data) {
+    const reviews = (data.productReviews || []).filter((review) => review.productId === product.id
+      && review.purchaseVerified !== false
+      && review.visibility !== 'HIDDEN');
+    const lowRatingCount = reviews.filter((review) => Number(review.rating) <= 2).length;
+    const averageRating = reviews.length
+      ? reviews.reduce((sum, review) => sum + Number(review.rating || 0), 0) / reviews.length
+      : 0;
+    const violationCount = lowRatingCount;
+    const violation = violationCount >= 3 || (reviews.length >= 3 && averageRating > 0 && averageRating < 3.5);
+    return {
+      reviewCount: reviews.length,
+      lowRatingCount,
+      averageRating: Math.round(averageRating * 10) / 10,
+      violationCount,
+      violation
+    };
+  }
+
+  function productComplianceReason(metrics) {
+    if (metrics.lowRatingCount >= 3) {
+      return `低分评价达到 ${metrics.lowRatingCount} 条`;
+    }
+    return `${metrics.reviewCount} 条已购评价均分 ${metrics.averageRating}，低于 3.5 分`;
+  }
+
+  function enforceProductCompliance(data, now = new Date().toISOString()) {
+    const actions = [];
+    for (const product of data.products || []) {
+      if (!product.merchantId) continue;
+      const metrics = productComplianceMetrics(product, data);
+      if (metrics.violation && product.active) {
+        product.active = false;
+        product.autoDelistRule = 'LOW_QUALITY';
+        product.autoDelistReason = productComplianceReason(metrics);
+        product.autoDelistEvidence = metrics;
+        product.autoDelistAt = now;
+        if (product.publishReviewStatus === 'PENDING_REVIEW') {
+          product.publishReviewStatus = 'REJECTED';
+          product.publishReviewNote = '自动风控已下架：' + product.autoDelistReason;
+        }
+        addMerchantScoreLog(data, { id: product.merchantId, name: '' }, {
+          type: 'AUTO_DELIST',
+          note: `商品「${product.name}」触发低质自动下架：${product.autoDelistReason}`
+        }, now);
+        addAudit(data, '商品自动下架', product.name);
+        notifyMerchantScore(data, product.merchantId, 'SCORE_STAGE_WARNING', '商品已自动下架',
+          `商品「${product.name}」触发低质规则：${product.autoDelistReason}。请完成整改后联系平台复核。`, now);
+        actions.push({ productId: product.id, action: 'DELIST', metrics });
+      } else if (!metrics.violation && product.autoDelistRule === 'LOW_QUALITY') {
+        product.active = true;
+        product.autoDelistRestoredAt = now;
+        if (product.publishReviewStatus === 'REJECTED') {
+          product.publishReviewStatus = 'AUTO';
+          product.publishReviewNote = '';
+        }
+        addMerchantScoreLog(data, { id: product.merchantId, name: '' }, {
+          type: 'COMPLIANCE_RESTORED',
+          note: `商品「${product.name}」整改数据达标，已自动恢复上架`
+        }, now);
+        addAudit(data, '低质商品自动恢复', product.name);
+        notifyMerchantScore(data, product.merchantId, 'SCORE_RECTIFY_RESULT', '商品已恢复上架',
+          `商品「${product.name}」整改数据达标，已自动恢复展示。`, now);
+        actions.push({ productId: product.id, action: 'RESTORE', metrics });
+      }
+    }
+    return actions;
+  }
+
+  function createServiceScoreCase(data, merchant, payload, now) {
+    const complaints = data.serviceScoreCases = data.serviceScoreCases || [];
+    const caseRecord = {
+      id: `case_${randomUUID()}`,
+      caseNo: `SC${Date.now().toString().slice(-8)}`,
+      merchantId: merchant.id,
+      merchantName: merchant.name,
+      userId: merchant.userId,
+      type: payload.type,
+      typeLabel: payload.type === 'APPEAL' ? '记录申诉' : '整改申请',
+      reasonType: payload.reasonType || '',
+      reasonTypeLabel: scoreComplaintTypeLabels[payload.reasonType] || '',
+      reason: payload.reason,
+      plan: payload.plan,
+      evidence: payload.evidence,
+      requestedAdjustment: payload.requestedAdjustment || 0,
+      score: merchant.serviceScore?.score || 0,
+      stage: merchant.serviceScore?.stage || 'NORMAL',
+      status: 'SUBMITTED',
+      adminNote: '',
+      appliedAdjustment: 0,
+      createdAt: now,
+      updatedAt: now,
+      dueAt: new Date(new Date(now).getTime() + 48 * 3600 * 1000).toISOString(),
+      timeline: [{ status: 'SUBMITTED', note: '商家已提交，等待平台复核', createdAt: now }]
+    };
+    complaints.unshift(caseRecord);
+    data.serviceScoreCases = complaints.slice(0, 200);
+    addMerchantScoreLog(data, merchant, {
+      type: 'SCORE_CASE_CREATED',
+      note: `${caseRecord.typeLabel}已提交：${payload.reason}`
+    }, now);
+    addAudit(data, '收到服务分申诉或整改申请', `${merchant.name} ${caseRecord.caseNo}`);
+    return caseRecord;
+  }
+
+  function applyServiceScoreCaseAdjustment(data, merchant, caseRecord, adjustment, now) {
+    if (!Number.isInteger(adjustment) || adjustment <= 0) return;
+    const previous = merchant.serviceScore || computeMerchantScore(data, merchant, now);
+    merchant.serviceScore = { ...previous, manualAdjustment: previous.manualAdjustment || 0 };
+    merchant.serviceScore = computeMerchantScore(data, merchant, now);
+    merchant.serviceScore.appealAdjustment = Math.min(20, (merchant.serviceScore.appealAdjustment || 0) + adjustment);
+    merchant.serviceScore = computeMerchantScore(data, merchant, now);
+    caseRecord.appliedAdjustment = adjustment;
+    addMerchantScoreLog(data, merchant, {
+      type: 'SCORE_APPEAL_APPROVED',
+      adjustment,
+      note: `申诉核实通过，人工补分 +${adjustment}`
+    }, now);
   }
 
 function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
@@ -1577,6 +1762,23 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: publicSettings(store.read().adminSettings), requestId });
       }
 
+      if (request.method === 'GET' && pathname === '/api/subscribe-templates') {
+        const settings = store.read().adminSettings || {};
+        const configuredIds = {
+          score_stage_warning: settings.scoreStageWarningTemplateId || '',
+          score_rectify_apply: settings.scoreRectifyApplyTemplateId || '',
+          score_rectify_result: settings.scoreRectifyResultTemplateId || '',
+          score_appeal_result: settings.scoreAppealResultTemplateId || ''
+        };
+        const data = Object.entries(scoreNotificationTemplates).map(([key, item]) => ({
+          key,
+          id: item.id,
+          description: item.description,
+          configuredId: configuredIds[item.id] || ''
+        }));
+        return sendJson(response, 200, { data, total: data.length, requestId });
+      }
+
       const productMatch = pathname.match(/^\/api\/products\/([^/]+)$/);
       if (request.method === 'GET' && productMatch) {
         sweepExpiredOrders();
@@ -1630,6 +1832,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           },
           requestId
         });
+      }
+
+      // 云托管网关会把未带尾斜杠的 /api/products 转发成 /api/products/，
+      // 这里统一归一化，避免商品列表和下单链路出现网关路径差异。
+      if (request.method === 'GET' && request.url.startsWith('/api/products/')) {
+        const normalized = new URL('/api/products' + (request.url.includes('?') ? request.url.slice(request.url.indexOf('?')) : ''), 'http://localhost');
+        request.url = normalized.pathname + normalized.search;
+        return handler(request, response);
       }
 
       if (request.method === 'POST' && pathname === '/api/product-reviews') {
@@ -1902,6 +2112,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           data: {
             merchant: merchantPublic(merchant),
             serviceScore: merchant.serviceScore || null,
+            scoreCases: (data.serviceScoreCases || []).filter((item) => item.merchantId === merchant.id),
             metrics: {
               revenueInCents,
               orderCount: orders.length,
@@ -1967,6 +2178,58 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           return createPayoutRequest(data, merchant, new Date().toISOString(), remark);
         });
         return sendJson(response, 201, { data: payoutRequest, requestId });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/merchant/score-cases') {
+        const body = await readJson(request);
+        const type = requireString(body.type, 'type', { maxLength: 20 });
+        if (!['APPEAL', 'RECTIFY'].includes(type)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported service score case type');
+        const reasonType = type === 'APPEAL' ? requireString(body.reasonType, 'reasonType', { maxLength: 40 }) : '';
+        if (reasonType && !allowedScoreComplaintTypes.has(reasonType)) {
+          throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported appeal reason type');
+        }
+        const reason = requireString(body.reason, 'reason', { maxLength: 500 });
+        const plan = type === 'RECTIFY' ? requireString(body.plan, 'plan', { maxLength: 500 }) : '';
+        if (!reason.trim()) throw new ApiError(400, 'VALIDATION_ERROR', '请填写申诉或整改说明');
+        if (type === 'RECTIFY' && !plan.trim()) throw new ApiError(400, 'VALIDATION_ERROR', '请填写整改计划');
+        const evidence = Array.isArray(body.evidence)
+          ? body.evidence.slice(0, 6).map((item) => String(item || '').trim()).filter(Boolean)
+          : [];
+        if (evidence.some((item) => !item.startsWith('/api/uploads/'))) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '材料图片必须来自平台上传目录');
+        }
+        const requestedAdjustment = Number(body.requestedAdjustment || 0);
+        if (!Number.isInteger(requestedAdjustment) || requestedAdjustment < 0 || requestedAdjustment > 20) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '申请补分需为 0-20 分的整数');
+        }
+        const result = store.update((data) => {
+          const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
+          if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号不可用');
+          if ((data.serviceScoreCases || []).some((item) => item.merchantId === merchant.id
+            && ['SUBMITTED', 'REVIEWING'].includes(item.status))) {
+            throw new ApiError(409, 'SCORE_CASE_EXISTS', '已有一件申诉或整改工单在处理中');
+          }
+          const now = new Date().toISOString();
+          const caseRecord = createServiceScoreCase(data, merchant, {
+            type,
+            reasonType,
+            reason: reason.trim(),
+            plan: plan.trim(),
+            evidence,
+            requestedAdjustment
+          }, now);
+          addAudit(data, '服务分工单待审核', `${merchant.name} ${caseRecord.caseNo}`);
+          return caseRecord;
+        });
+        return sendJson(response, 201, { data: result, requestId });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/merchant/score-cases') {
+        const data = store.read();
+        const items = (data.serviceScoreCases || [])
+          .filter((item) => item.merchantId === merchantSession.merchantId)
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/api/merchant/payout-requests') {
@@ -2289,6 +2552,18 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               .map((merchant) => ({ merchantId: merchant.id, merchantName: merchant.name, ...merchant.serviceScore })),
             merchantScoreSummary: serviceScoreSummary(data.merchants || []),
             merchantScoreLogs: (data.merchantScoreLogs || []).slice(0, 50),
+            serviceScoreCases: (data.serviceScoreCases || []).slice(0, 80),
+            autoDelistedProducts: (data.products || [])
+              .filter((product) => product.autoDelistRule === 'LOW_QUALITY' && !product.active)
+              .map((product) => ({
+                id: product.id,
+                name: product.name,
+                merchantId: product.merchantId,
+                merchantName: (data.merchants || []).find((merchant) => merchant.id === product.merchantId)?.name || '',
+                reason: product.autoDelistReason || '',
+                metrics: product.autoDelistEvidence || {},
+                restoredAt: product.autoDelistRestoredAt || ''
+              })),
             pendingPublishProducts: (data.products || [])
               .filter((product) => product.publishReviewStatus === 'PENDING_REVIEW')
               .map((product) => ({
@@ -2901,6 +3176,73 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: result, requestId });
       }
 
+      const adminScoreCaseMatch = pathname.match(/^\/api\/admin\/score-cases\/([^/]+)\/review$/);
+      if (request.method === 'POST' && adminScoreCaseMatch) {
+        const body = await readJson(request);
+        const decision = requireString(body.decision, 'decision', { maxLength: 20 });
+        if (!['APPROVE', 'REJECT'].includes(decision)) throw new ApiError(400, 'VALIDATION_ERROR', 'decision 需为 APPROVE 或 REJECT');
+        const note = requireString(body.note, 'note', { maxLength: 500 });
+        const adjustmentInput = Number(body.adjustment || 0);
+        if (!Number.isInteger(adjustmentInput) || adjustmentInput < 0 || adjustmentInput > 20) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '核定补分需为 0-20 分的整数');
+        }
+        const result = store.update((data) => {
+          const caseRecord = (data.serviceScoreCases || []).find((item) => item.id === adminScoreCaseMatch[1]);
+          if (!caseRecord) throw new ApiError(404, 'SCORE_CASE_NOT_FOUND', '工单不存在');
+          if (caseRecord.status !== 'SUBMITTED') throw new ApiError(409, 'SCORE_CASE_CLOSED', '工单已处理完成');
+          const merchant = data.merchants.find((item) => item.id === caseRecord.merchantId);
+          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          const now = new Date().toISOString();
+          caseRecord.status = decision === 'APPROVE' ? 'COMPLETED' : 'REJECTED';
+          caseRecord.adminNote = note.trim();
+          caseRecord.updatedAt = now;
+          if (decision === 'APPROVE' && caseRecord.type === 'APPEAL' && adjustmentInput > 0) {
+            applyServiceScoreCaseAdjustment(data, merchant, caseRecord, adjustmentInput, now);
+          }
+          if (decision === 'APPROVE' && caseRecord.type === 'RECTIFY') {
+            const previous = merchant.serviceScore || computeMerchantScore(data, merchant, now);
+            merchant.serviceScore = { ...previous, manualAdjustment: Math.max(-20, Math.min(20, (previous.manualAdjustment || 0) + 5)) };
+            merchant.serviceScore = computeMerchantScore(data, merchant, now);
+            addMerchantScoreLog(data, merchant, {
+              type: 'RECTIFY_APPROVED',
+              note: `整改验收通过：${note}`
+            }, now);
+          }
+          caseRecord.timeline.unshift({
+            status: caseRecord.status,
+            note: note.trim(),
+            createdAt: now
+          });
+          const outcome = caseRecord.status === 'COMPLETED'
+            ? (caseRecord.type === 'APPEAL' ? `申诉核实通过${caseRecord.appliedAdjustment ? `，核定补分 +${caseRecord.appliedAdjustment}` : ''}` : '整改验收通过')
+            : `${caseRecord.typeLabel}未通过：${note}`;
+          notifyMerchantScore(data, merchant.id,
+            caseRecord.type === 'APPEAL' ? 'SCORE_APPEAL_RESULT' : 'SCORE_RECTIFY_RESULT',
+            '服务分工单已处理', outcome, now);
+          addAudit(data, '处理服务分工单', `${merchant.name} ${caseRecord.caseNo}`);
+          return caseRecord;
+        });
+        return sendJson(response, 200, { data: result, requestId });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/admin/subscribe-templates') {
+        const data = store.read();
+        return sendJson(response, 200, {
+          data: Object.values(scoreNotificationTemplates).map((item) => ({
+            ...item,
+            keywords: item.keywords.join('；'),
+            configuredId: ({
+              score_stage_warning: data.adminSettings?.scoreStageWarningTemplateId || '',
+              score_rectify_apply: data.adminSettings?.scoreRectifyApplyTemplateId || '',
+              score_rectify_result: data.adminSettings?.scoreRectifyResultTemplateId || '',
+              score_appeal_result: data.adminSettings?.scoreAppealResultTemplateId || ''
+            })[item.id] || ''
+          })),
+          total: Object.keys(scoreNotificationTemplates).length,
+          requestId
+        });
+      }
+
       if (request.method === 'POST' && adminProductMatch) {
         const body = await readJson(request);
         const updated = store.update((data) => {
@@ -2918,6 +3260,35 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           return product;
         });
         return sendJson(response, 200, { data: updated, requestId });
+      }
+
+      const adminProductComplianceMatch = pathname.match(/^\/api\/admin\/products\/([^/]+)\/compliance-restore$/);
+      if (request.method === 'POST' && adminProductComplianceMatch) {
+        const body = await readJson(request);
+        const note = requireString(body.note, 'note', { maxLength: 300 });
+        const result = store.update((data) => {
+          const product = data.products.find((item) => item.id === adminProductComplianceMatch[1]);
+          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          if (product.autoDelistRule !== 'LOW_QUALITY') {
+            throw new ApiError(409, 'PRODUCT_NOT_AUTO_DELISTED', '仅低质规则自动下架的商品可以人工恢复');
+          }
+          const now = new Date().toISOString();
+          product.active = true;
+          product.autoDelistRestoredAt = now;
+          if (product.publishReviewStatus === 'REJECTED') {
+            product.publishReviewStatus = 'AUTO';
+            product.publishReviewNote = '';
+          }
+          addMerchantScoreLog(data, { id: product.merchantId, name: '' }, {
+            type: 'MANUAL_COMPLIANCE_RESTORED',
+            note: `商品「${product.name}」人工复核恢复上架：${note}`
+          }, now);
+          addAudit(data, '低质商品人工恢复上架', product.name);
+          notifyMerchant(data, product.merchantId, 'SCORE', '商品已恢复上架',
+            `商品「${product.name}」经平台复核后恢复展示：${note}。`, now);
+          return product;
+        });
+        return sendJson(response, 200, { data: result, requestId });
       }
 
       if (request.method === 'POST' && pathname === '/api/admin/recharge-promos') {
@@ -3000,6 +3371,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (restricted >= limited) throw new ApiError(400, 'VALIDATION_ERROR', '暂停上新阈值必须低于限流阈值');
             current.serviceScoreLimitedThreshold = limited;
             current.serviceScoreRestrictedThreshold = restricted;
+          }
+          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId']) {
+            if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);
           }
           if (body.paymentTimeoutMinutes !== undefined) {
             const minutes = Number(body.paymentTimeoutMinutes);

@@ -1,6 +1,6 @@
 const state={data:null,view:'dashboard',query:'',status:'ALL',token:localStorage.getItem('shishan_admin_token')||''};
 const titles={dashboard:'经营概览',merchants:'商家入驻',products:'商品中心',promos:'话费活动',reviews:'商品评价',orders:'电瓶车订单',payments:'支付单',phones:'电话卡订单',recharges:'话费权益',finance:'财务流水',broadband:'宽带资格',plates:'牌照辅助',afterSales:'售后工单',notifications:'站内通知',logs:'操作日志',settings:'运营设置',settlements:'商家结算',payouts:'商家提现',patrol:'超时预警',scores:'商家服务分'};
-const statuses={PENDING_PAYMENT:'待支付',PAID:'已支付',FULFILLING:'配送中',COMPLETED:'已完成',CANCELLED:'已取消',PENDING:'待支付',REFUNDED:'已退款',PENDING_REALNAME:'待实名',ACTIVATED:'已激活',PENDING_CREDIT:'待到账',CREDITED:'已到账',PENDING_VERIFY:'待核验',APPROVED:'已通过',REJECTED:'未通过',MATERIAL_PENDING:'待材料',REVIEWING:'处理中',SUBMITTED:'待处理',CLOSED:'已关闭',AFTER_SALE:'售后中',PUBLISHED:'已展示',HIDDEN:'已隐藏',PENDING_SETTLE:'可结算',SETTLED:'已结算',PENDING_DELIVERY:'待交付核验',IN_ACCOUNT_PERIOD:'账期中',FROZEN:'售后冻结',PAYOUT_REQUESTED:'提现待审核',PENDING_REVIEW:'待审核',OPEN:'待认领',ACKNOWLEDGED:'已认领',RESOLVED:'已关闭',OVERDUE:'已超时',WARNING:'即将超时',NORMAL:'正常经营',LIMITED:'限流整改',RESTRICTED:'暂停上新',EXCELLENT:'优秀',GOOD:'良好',WATCH:'观察',RISK:'高风险',AUTO:'自动上架'};
+const statuses={PENDING_PAYMENT:'待支付',PAID:'已支付',FULFILLING:'配送中',COMPLETED:'已完成',CANCELLED:'已取消',PENDING:'待支付',REFUNDED:'已退款',PENDING_REALNAME:'待实名',ACTIVATED:'已激活',PENDING_CREDIT:'待到账',CREDITED:'已到账',PENDING_VERIFY:'待核验',APPROVED:'已通过',REJECTED:'未通过',MATERIAL_PENDING:'待材料',REVIEWING:'处理中',SUBMITTED:'待审核',CLOSED:'已关闭',AFTER_SALE:'售后中',PUBLISHED:'已展示',HIDDEN:'已隐藏',PENDING_SETTLE:'可结算',SETTLED:'已结算',PENDING_DELIVERY:'待交付核验',IN_ACCOUNT_PERIOD:'账期中',FROZEN:'售后冻结',PAYOUT_REQUESTED:'提现待审核',PENDING_REVIEW:'待审核',OPEN:'待认领',ACKNOWLEDGED:'已认领',RESOLVED:'已关闭',OVERDUE:'已超时',WARNING:'即将超时',NORMAL:'正常经营',LIMITED:'限流整改',RESTRICTED:'暂停上新',EXCELLENT:'优秀',GOOD:'良好',WATCH:'观察',RISK:'高风险',AUTO:'自动上架'};
 const endpointTypes={orders:'orders',phones:'phone-card-orders',recharges:'recharge-orders',broadband:'broadband-applications',plates:'plate-applications',afterSales:'after-sales'};
 const collections={orders:'orders',payments:'paymentOrders',phones:'phoneCardOrders',recharges:'rechargeOrders',broadband:'broadbandApplications',plates:'plateApplications',afterSales:'afterSales',finance:'financeEvents',settlements:'settlements',payouts:'payoutRequests',patrol:'slaAlerts',scores:'merchantScores'};
 const financeTypeLabels={PAYMENT:'支付收入',REFUND:'退款支出',PAYOUT:'商家打款'};
@@ -475,6 +475,8 @@ function scoreBreakdownText(item) {
 function scoresView() {
   const summary = state.data.merchantScoreSummary || {};
   const pending = state.data.pendingPublishProducts || [];
+  const scoreCases = state.data.serviceScoreCases || [];
+  const autoDelisted = state.data.autoDelistedProducts || [];
   const logs = state.data.merchantScoreLogs || [];
   const items = (state.data.merchantScores || [])
     .filter(match)
@@ -485,6 +487,12 @@ function scoresView() {
     ${metric('限流整改', summary.limitedCount || 0, '曝光降权且上新需复核')}
     ${metric('暂停上新', summary.restrictedCount || 0, '需先处理超时与售后')}
   </div>`;
+  const templatePanel = `<section class="panel"><div class="panel-head"><h2>微信订阅消息模板</h2><span>用于服务分提醒</span></div><div class="form-grid" style="grid-template-columns:repeat(2,1fr)">
+    <label>服务分下降模板 ID<input id="scoreStageTemplate" value="${esc(state.data.settings?.scoreStageWarningTemplateId || '')}"></label>
+    <label>整改申请模板 ID<input id="scoreRectifyApplyTemplate" value="${esc(state.data.settings?.scoreRectifyApplyTemplateId || '')}"></label>
+    <label>整改结果模板 ID<input id="scoreRectifyResultTemplate" value="${esc(state.data.settings?.scoreRectifyResultTemplateId || '')}"></label>
+    <label>申诉结果模板 ID<input id="scoreAppealResultTemplate" value="${esc(state.data.settings?.scoreAppealResultTemplateId || '')}"></label>
+  </div><button class="primary" style="margin-top:12px" id="saveScoreTemplates">保存模板配置</button></section>`;
   const pendingPanel = pending.length
     ? `<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>商品复核</h2><span>限流商家新增的商品</span></div><div class="table-wrap"><table><thead><tr><th>商品</th><th>商家</th><th>价格</th><th>说明</th><th>操作</th></tr></thead><tbody>${pending.map((product) => `<tr>
         <td><strong>${esc(product.name)}</strong></td>
@@ -494,6 +502,20 @@ function scoresView() {
         <td><div class="row-actions"><button class="text-button review-publish" data-id="${esc(product.id)}" data-decision="APPROVED">通过上架</button><button class="text-button review-publish" data-id="${esc(product.id)}" data-decision="REJECTED">驳回</button></div></td>
       </tr>`).join('')}</tbody></table></div></section>`
     : '';
+  const casePanel = `<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>申诉与整改工单</h2><span>48 小时内处理</span></div><div class="table-wrap"><table><thead><tr><th>工单</th><th>商家</th><th>类型与说明</th><th>提交分</th><th>状态</th><th>操作</th></tr></thead><tbody>${scoreCases.map((item) => `<tr>
+      <td><strong>${esc(item.caseNo)}</strong><small>${fmtDate(item.createdAt)}</small></td>
+      <td>${esc(item.merchantName)}</td>
+      <td>${esc(item.typeLabel)}${item.reasonTypeLabel ? ` · ${esc(item.reasonTypeLabel)}` : ''}<small>${esc(item.reason)}</small>${item.plan ? `<small>计划：${esc(item.plan)}</small>` : ''}</td>
+      <td>${item.score}<small>${esc(label(item.stage))}</small></td>
+      <td><span class="badge ${item.status === 'COMPLETED' ? 'green' : item.status === 'REJECTED' ? 'red' : 'orange'}">${esc(label(item.status))}</span>${item.appliedAdjustment ? `<small>补分 +${item.appliedAdjustment}</small>` : ''}${item.adminNote ? `<small>${esc(item.adminNote)}</small>` : ''}</td>
+      <td>${item.status === 'SUBMITTED' ? `<div class="row-actions"><button class="text-button review-score-case" data-id="${esc(item.id)}" data-decision="APPROVE">通过</button><button class="text-button review-score-case" data-id="${esc(item.id)}" data-decision="REJECT">驳回</button></div>` : '已处理'}</td>
+    </tr>`).join('') || `<tr><td colspan="6" class="empty">暂无申诉或整改工单</td></tr>`}</tbody></table></div></section>`;
+  const autoDelistPanel = `<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>低质自动下架</h2><span>复核后可恢复展示</span></div><div class="table-wrap"><table><thead><tr><th>商品</th><th>商家</th><th>触发依据</th><th>操作</th></tr></thead><tbody>${autoDelisted.map((item) => `<tr>
+      <td><strong>${esc(item.name)}</strong><small>${esc(item.id)}</small></td>
+      <td>${esc(item.merchantName || '')}</td>
+      <td>${esc(item.reason)}<small>低分 ${item.metrics?.lowRatingCount || 0} 条 · 均分 ${item.metrics?.averageRating || 0} · 认定记录 ${item.metrics?.complaintCount || 0} 条</small></td>
+      <td><button class="text-button restore-compliance" data-id="${esc(item.id)}">复核恢复</button></td>
+    </tr>`).join('') || `<tr><td colspan="4" class="empty">暂无自动下架商品</td></tr>`}</tbody></table></div></section>`;
   const rows = items.map((item) => `<tr>
     <td><strong>${esc(item.merchantName)}</strong><small>${esc(item.merchantId)}</small></td>
     <td><strong>${item.score}</strong><small>${esc(label(item.grade))}${item.manualAdjustment ? ` · 人工 ${item.manualAdjustment > 0 ? '+' : ''}${item.manualAdjustment}` : ''}</small></td>
@@ -504,9 +526,12 @@ function scoresView() {
   </tr>`);
   const logPanel = `<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>服务分变更记录</h2><span>仅记录分档变化与人工调整</span></div><div class="log-list">${logs.slice(0, 8).map((log) => `<div class="log-item"><div><strong>${esc(log.merchantName)}</strong><p>${esc(log.note || '')}</p></div><small>${fmtDate(log.createdAt)}</small></div>`).join('') || '<p class="muted-empty">暂无变更记录</p>'}</div></section>`;
   return cards
+    + templatePanel
     + toolbar(items.length, { statusesList: ['NORMAL', 'LIMITED', 'RESTRICTED'] })
     + table(['商家', '服务分', '维度得分', '履约与售后', '平台处置', '操作'], rows, items.length)
     + pendingPanel
+    + casePanel
+    + autoDelistPanel
     + logPanel;
 }
 
@@ -544,4 +569,42 @@ bindView = function () {
     showToast(decision === 'APPROVED' ? '商品已上架' : '已驳回该商品');
     await load();
   }));
+  document.querySelectorAll('.review-score-case').forEach((button) => button.addEventListener('click', async () => {
+    const decision = button.dataset.decision;
+    const note = prompt(decision === 'APPROVE' ? '填写通过原因或核定结论' : '填写驳回原因', decision === 'APPROVE' ? '证据材料已核实' : '证据不足，维持原分');
+    if (note === null) return;
+    if (!note.trim()) return showToast('请填写处理结论');
+    const adjustment = decision === 'APPROVE' ? Number(prompt('核定补分（0-20 的整数）', '5') || 0) : 0;
+    if (decision === 'APPROVE' && (!Number.isInteger(adjustment) || adjustment < 0 || adjustment > 20)) return showToast('补分需为 0-20 的整数');
+    await api(`/api/admin/score-cases/${button.dataset.id}/review`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ decision, note: note.trim(), adjustment })
+    });
+    showToast('工单已处理');
+    await load();
+  }));
+  document.querySelectorAll('.restore-compliance').forEach((button) => button.addEventListener('click', async () => {
+    const note = prompt('填写复核结论', '整改完成，允许恢复展示');
+    if (note === null) return;
+    if (!note.trim()) return showToast('请填写复核结论');
+    await api(`/api/admin/products/${button.dataset.id}/compliance-restore`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ note: note.trim() })
+    });
+    showToast('商品已恢复上架');
+    await load();
+  }));
+  document.querySelector('#saveScoreTemplates')?.addEventListener('click', async () => {
+    await api('/api/admin/settings', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        scoreStageWarningTemplateId: document.querySelector('#scoreStageTemplate').value.trim(),
+        scoreRectifyApplyTemplateId: document.querySelector('#scoreRectifyApplyTemplate').value.trim(),
+        scoreRectifyResultTemplateId: document.querySelector('#scoreRectifyResultTemplate').value.trim(),
+        scoreAppealResultTemplateId: document.querySelector('#scoreAppealResultTemplate').value.trim()
+      })
+    });
+    showToast('订阅模板已保存');
+    await load();
+  });
 };

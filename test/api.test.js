@@ -226,6 +226,20 @@ test('admin can adjust service score and review a limited merchant product', asy
     body: JSON.stringify({ adjustment: 0, reason: '测试数据恢复' })
   });
   assert.equal(resetAdjustment.response.status, 200);
+
+  // 低分评价只服务本用例；不移除会触发后续自动下架风控，影响订单链路测试。
+  store.update((data) => {
+    data.productReviews = data.productReviews.filter((item) => item.id !== 'review_service_score_negative');
+    const product = data.products.find((item) => item.id === 'prod_ebike_001');
+    if (product) {
+      product.active = true;
+      delete product.autoDelistRule;
+      delete product.autoDelistReason;
+      delete product.autoDelistEvidence;
+      delete product.autoDelistAt;
+      delete product.autoDelistRestoredAt;
+    }
+  });
 });
 
 test('business rules configure public commitments and delivery fees', async () => {
@@ -2144,4 +2158,157 @@ test('operations patrol raises overdue alerts and closes them when work moves on
     body: JSON.stringify({ deliveryResponseHours: 24, phoneCardActivationHours: 24, patrolIntervalMinutes: 10 })
   });
   assert.equal(restored.response.status, 200);
+});
+
+test('service score cases support appeal review, rectification and subscription queue', async () => {
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const appeal = await api('/api/merchant/score-cases', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({
+      type: 'APPEAL',
+      reasonType: 'REMOVED_NEGATIVE_REVIEW',
+      reason: '这条差评来自未完成交易的账号，已有平台沟通记录。',
+      requestedAdjustment: 3
+    })
+  });
+  assert.equal(appeal.response.status, 201);
+  assert.equal(appeal.body.data.status, 'SUBMITTED');
+  assert.equal(appeal.body.data.reasonTypeLabel, '差评记录有误');
+
+  const duplicate = await api('/api/merchant/score-cases', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ type: 'APPEAL', reasonType: 'DELAYED_DELIVERY', reason: '重复提交应被拒绝。' })
+  });
+  assert.equal(duplicate.response.status, 409);
+
+  const merchantCases = await api('/api/merchant/score-cases', { headers: merchantHeaders });
+  assert.ok(merchantCases.body.data.some((item) => item.id === appeal.body.data.id));
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  const adminOverview = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.ok(adminOverview.body.data.serviceScoreCases.some((item) => item.id === appeal.body.data.id));
+
+  const invalidAdjustment = await api(`/api/admin/score-cases/${appeal.body.data.id}/review`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ decision: 'APPROVE', note: '证据核实通过', adjustment: 25 })
+  });
+  assert.equal(invalidAdjustment.response.status, 400);
+
+  const reviewed = await api(`/api/admin/score-cases/${appeal.body.data.id}/review`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ decision: 'APPROVE', note: '证据核实通过', adjustment: 3 })
+  });
+  assert.equal(reviewed.response.status, 200);
+  assert.equal(reviewed.body.data.status, 'COMPLETED');
+  assert.equal(reviewed.body.data.appliedAdjustment, 3);
+
+  const merchantAfterAppeal = await api('/api/merchant/overview', { headers: merchantHeaders });
+  assert.equal(merchantAfterAppeal.body.data.serviceScore.appealAdjustment, 3);
+
+  const rectify = await api('/api/merchant/score-cases', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({
+      type: 'RECTIFY',
+      reason: '48 小时内清空超时工单，并完成售后回访。',
+      plan: '指定值班人员，每日检查履约预警。'
+    })
+  });
+  assert.equal(rectify.response.status, 201);
+
+  const rectifyReviewed = await api(`/api/admin/score-cases/${rectify.body.data.id}/review`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ decision: 'APPROVE', note: '整改计划可执行', adjustment: 0 })
+  });
+  assert.equal(rectifyReviewed.response.status, 200);
+
+  const saveTemplate = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ scoreAppealResultTemplateId: 'wx_test_appeal_template' })
+  });
+  assert.equal(saveTemplate.response.status, 200);
+  const configuredTemplates = await api('/api/admin/subscribe-templates', { headers: adminHeaders });
+  assert.equal(configuredTemplates.response.status, 200);
+  assert.ok(configuredTemplates.body.data.some((item) => item.id === 'score_appeal_result' && item.configuredId === 'wx_test_appeal_template'));
+
+  const subscribeMessages = store.read().subscribeMessages || [];
+  assert.ok(subscribeMessages.some((item) => item.templateId === 'score_appeal_result' && item.status === 'QUEUED'));
+  assert.ok(subscribeMessages.some((item) => item.templateId === 'score_rectify_result' && item.status === 'QUEUED'));
+});
+
+test('low quality products are auto delisted and can be restored after compliance review', async () => {
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const merchantHeaders = { authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_001');
+    product.active = true;
+    delete product.autoDelistRule;
+    for (let index = 0; index < 3; index += 1) {
+      data.productReviews.unshift({
+        id: `review_auto_delist_${index}`, productId: 'prod_ebike_001', rating: 1,
+        content: `自动下架风控测试差评 ${index}`, customerName: '风控同学', purchaseVerified: true,
+        visibility: 'PUBLISHED', reply: null, createdAt: new Date().toISOString()
+      });
+    }
+  });
+
+  const products = await api('/api/products?category=E_BIKE_NEW');
+  assert.equal(products.response.status, 200);
+  const merchantOverview = await api('/api/merchant/overview', { headers: merchantHeaders });
+  const delisted = merchantOverview.body.data.products.find((item) => item.id === 'prod_ebike_001');
+  assert.equal(delisted.active, false);
+  assert.equal(delisted.autoDelistRule, 'LOW_QUALITY');
+  assert.ok(delisted.autoDelistEvidence.lowRatingCount >= 3);
+
+  // 清理测试注入的低分评价，避免恢复后再次触发同一条风控规则。
+  store.update((data) => {
+    data.productReviews = data.productReviews.filter((item) => !item.id.startsWith('review_auto_delist_'));
+  });
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_001');
+    product.active = false;
+    product.autoDelistRestoredAt = '';
+    data.productReviews.unshift({
+      id: 'review_auto_delist_hold', productId: 'prod_ebike_001', rating: 1,
+      content: '自动下架复核保留评价', customerName: '风控同学', purchaseVerified: true,
+      visibility: 'PUBLISHED', reply: null, createdAt: new Date().toISOString()
+    });
+  });
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  const adminOverview = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.ok(adminOverview.body.data.autoDelistedProducts.some((item) => item.id === 'prod_ebike_001'));
+
+  const restored = await api('/api/admin/products/prod_ebike_001/compliance-restore', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ note: '整改完成，平台复核通过' })
+  });
+  assert.equal(restored.response.status, 200);
+  assert.equal(restored.body.data.active, true);
+
+  store.update((data) => {
+    data.productReviews = data.productReviews.filter((item) => item.id !== 'review_auto_delist_hold');
+  });
+
+  const refreshed = await api('/api/products?category=E_BIKE_NEW');
+  assert.equal(refreshed.response.status, 200);
+  assert.ok(refreshed.body.data.some((item) => item.id === 'prod_ebike_001'));
 });
