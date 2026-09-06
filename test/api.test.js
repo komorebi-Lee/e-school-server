@@ -252,6 +252,7 @@ test('business rules configure public commitments and delivery fees', async () =
   assert.equal(config.response.status, 200);
   assert.equal(config.body.data.deliveryFeeInCents, 0);
   assert.equal(config.body.data.deliveryResponseHours, 24);
+  assert.equal(config.body.data.afterSaleResolutionHours, 72);
   assert.ok(config.body.data.deliveryTimeSlots.length > 0);
 
   const adminLogin = await api('/api/admin/login', {

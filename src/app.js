@@ -52,6 +52,7 @@ function isTlsInterceptionError(error) {
     plateResponseHours: settings.plateResponseHours || 48,
     afterSaleResponseHours: settings.afterSaleResponseHours || 24,
     afterSaleResolutionHours: settings.afterSaleResolutionHours || 72,
+    afterSaleResolutionHours: settings.afterSaleResolutionHours || 72,
     paymentTimeoutMinutes: settings.paymentTimeoutMinutes || 30,
     settlementPeriodDays: Number.isInteger(settings.settlementPeriodDays) ? settings.settlementPeriodDays : 7,
     deliveryTimeSlots: Array.isArray(settings.deliveryTimeSlots) && settings.deliveryTimeSlots.length ? settings.deliveryTimeSlots : ['尽快配送'],
