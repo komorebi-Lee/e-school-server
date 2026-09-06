@@ -398,6 +398,28 @@ function appendCollaborationEvent(order, role, action, note) {
   order.collaboration.intervention.updatedAt = time;
 }
 
+function serviceRecordOwner(data, recordId) {
+  const collections = [
+    { key: 'phoneCardOrders', type: 'PHONE_PLAN', label: '电话卡订单' },
+    { key: 'rechargeOrders', type: 'RECHARGE', label: '话费权益' },
+    { key: 'broadbandApplications', type: 'BROADBAND', label: '宽带资格' },
+    { key: 'plateApplications', type: 'PLATE', label: '校园牌照' }
+  ];
+  for (const collection of collections) {
+    const item = (data[collection.key] || []).find((row) => row.id === recordId);
+    if (item) return { ...collection, item };
+  }
+  return null;
+}
+
+function appendServiceRecordEvent(record, role, action, note) {
+  const time = new Date().toISOString();
+  record.collaboration ||= { handoffs: [], roleActions: { MERCHANT: [], USER: [], PLATFORM: [] }, intervention: { status: 'NONE', note: '', updatedAt: '' }, messages: [] };
+  record.collaboration.handoffs.unshift({ role, action, note, createdAt: time });
+  record.collaboration.messages.unshift({ id: `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`, role, text: note, createdAt: time });
+  record.collaboration.intervention.updatedAt = time;
+}
+
 const scoreComplaintTypeLabels = {
   REMOVED_NEGATIVE_REVIEW: '差评记录有误',
   DELAYED_DELIVERY: '履约延时有合理原因',
@@ -2204,6 +2226,37 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const adminToken=(request.headers.authorization||'').replace(/^Bearer\s+/i,'');
           if (!adminSessions.get(adminToken)) throw new ApiError(401,'ADMIN_UNAUTHORIZED','请重新登录管理端');
         }
+        const serviceRecordMatch = serviceRecordOwner(store.read(), orderId);
+        if (serviceRecordMatch && ['USER', 'PLATFORM'].includes(role)) {
+          const serviceResult = store.update((data) => {
+            const match = serviceRecordOwner(data, orderId);
+            const item = match?.item;
+            if (!item) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+            if (role === 'USER' && item.userId !== userSession.userId) throw new ApiError(403, 'ORDER_FORBIDDEN', '无权操作该服务单');
+            if (role === 'USER' && !['NOTE', 'APPEAL'].includes(action)) {
+              throw new ApiError(409, 'ACTION_NOT_ALLOWED', '当前服务单不支持该用户动作');
+            }
+            if (role === 'PLATFORM' && !['NOTE', 'INTERVENE', 'RESOLVE'].includes(action)) {
+              throw new ApiError(409, 'ACTION_NOT_ALLOWED', '当前服务单不支持该平台动作');
+            }
+            appendServiceRecordEvent(item, role, action, note);
+            if (action === 'APPEAL' || (role === 'PLATFORM' && action === 'INTERVENE')) {
+              item.collaboration.intervention = { status: 'REQUESTED', note, updatedAt: new Date().toISOString() };
+              addAudit(data, role === 'USER' ? '用户申请平台协助服务单' : '平台介入服务单', item.id);
+            } else if (role === 'PLATFORM' && action === 'RESOLVE') {
+              item.collaboration.intervention = { status: 'RESOLVED', note, updatedAt: new Date().toISOString() };
+              sendOrderNotification(data, item.userId, 'ORDER_SERVICE', '平台已处理服务单', note);
+              addAudit(data, '平台处理服务单', item.id);
+            } else if (role === 'PLATFORM') {
+              sendOrderNotification(data, item.userId, 'ORDER_SERVICE', '平台已回复服务单', note);
+              addAudit(data, '平台回复服务单', item.id);
+            } else {
+              addAudit(data, '用户提交服务单咨询', item.id);
+            }
+            return item;
+          });
+          return sendJson(response, 200, { data: serviceResult, requestId });
+        }
         const order = store.update((data) => {
           const item = data.orders.find((row) => row.id === orderId);
           if (!item) throw new ApiError(404,'ORDER_NOT_FOUND','Order not found');
@@ -2982,10 +3035,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const merchants = data.merchants || [];
           const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, statusLabel:statusLabels[order.status]||order.status, collaboration:order.collaboration || createCollaboration(order, order.items?.[0]?.merchantId || ''), merchantName:merchants.find(merchant=>merchant.id===order.collaboration?.merchantId)?.name || '平台自营', plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '' }));
         const serviceRecords = (() => {
-          const phoneCardOrders=(data.phoneCardOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.amountInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
-          const rechargeOrders=(data.rechargeOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents||0)/100).toFixed(0)}送${((item.receiveInCents||0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.paidInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
-          const broadbandApplications=(data.broadbandApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'BROADBAND', typeLabel:'宽带', title:'双人购卡宽带', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:0, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
-          const plateApplications=(data.plateApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel||'校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.feeInCents||0, paymentOrderId:item.paymentOrderId||'', paymentStatus:item.paymentStatus||'', studentNo:item.studentNo||'', materialCount:(item.materials||[]).length, relatedIds:item.relatedIds||{}, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const phoneCardOrders=(data.phoneCardOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.amountInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const rechargeOrders=(data.rechargeOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents||0)/100).toFixed(0)}送${((item.receiveInCents||0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.paidInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const broadbandApplications=(data.broadbandApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'BROADBAND', typeLabel:'宽带', title:'双人购卡宽带', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:0, relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
+          const plateApplications=(data.plateApplications||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PLATE', typeLabel:'校园牌照', title:item.vehicleModel||'校园牌照辅助', status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.feeInCents||0, paymentOrderId:item.paymentOrderId||'', paymentStatus:item.paymentStatus||'', studentNo:item.studentNo||'', materialCount:(item.materials||[]).length, relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           return [...phoneCardOrders,...rechargeOrders,...broadbandApplications,...plateApplications];
         })();
         return sendJson(response,200,{data:{ebikeOrders,serviceRecords},requestId});

@@ -771,6 +771,14 @@ test('phone card service record can apply for broadband once', async () => {
   await confirmPayment(created.body.paymentOrder.id, session.token);
   const recordId = created.body.data.id;
 
+  const consult = await api('/api/order-collab', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ role: 'USER', orderId: recordId, action: 'NOTE', note: '实名审核需要多久？' })
+  });
+  assert.equal(consult.response.status, 200);
+  assert.equal(consult.body.data.collaboration.messages[0].role, 'USER');
+  assert.equal(consult.body.data.collaboration.messages[0].text, '实名审核需要多久？');
+
   const notEligible = await api('/api/broadband-applications', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({ ownerPhone: '15527111396', companionPhone: '15527111496' })
@@ -791,11 +799,22 @@ test('phone card service record can apply for broadband once', async () => {
   });
   assert.equal(companionCard.response.status, 201);
   await confirmPayment(companionCard.body.paymentOrder.id, companionSession.token);
+
+  const spoofed = await api('/api/order-collab', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${companionSession.token}` },
+    body: JSON.stringify({ role: 'USER', orderId: recordId, action: 'NOTE', note: '尝试操作别人的服务单' })
+  });
+  assert.equal(spoofed.response.status, 403);
   const adminActivate = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
   });
   assert.equal(adminActivate.response.status, 200);
+  const adminOverview = await api('/api/admin/overview', {
+    headers: { authorization: `Bearer ${adminActivate.body.data.token}` }
+  });
+  const adminServiceRecord = adminOverview.body.data.phoneCardOrders.find((item) => item.id === recordId);
+  assert.equal(adminServiceRecord.collaboration.messages[0].text, '实名审核需要多久？');
   await api(`/api/admin/phone-card-orders/${created.body.data.id}/status`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminActivate.body.data.token}` },
     body: JSON.stringify({ status: 'ACTIVATED' })
@@ -804,6 +823,12 @@ test('phone card service record can apply for broadband once', async () => {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminActivate.body.data.token}` },
     body: JSON.stringify({ status: 'ACTIVATED' })
   });
+  const platformReply = await api('/api/order-collab', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminActivate.body.data.token}` },
+    body: JSON.stringify({ role: 'PLATFORM', orderId: recordId, action: 'NOTE', note: '实名审核一般 24 小时内完成。' })
+  });
+  assert.equal(platformReply.response.status, 200);
+  assert.equal(platformReply.body.data.collaboration.messages[0].role, 'PLATFORM');
 
   const first = await api(`/api/service-records/${recordId}/actions`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
