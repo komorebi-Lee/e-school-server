@@ -3632,7 +3632,51 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const updated = store.update((data) => {
           const item = data[collectionMap[adminStatusMatch[1]]].find((record) => record.id === adminStatusMatch[2]);
           if (!item) throw new ApiError(404, 'ADMIN_RECORD_NOT_FOUND', 'Record not found');
+          const isOrder = adminStatusMatch[1] === 'orders';
+          if (isOrder) {
+            if (status === 'PAID') throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '已支付状态必须通过支付单确认，不能人工设置');
+            if (status === 'FULFILLING' && item.status !== 'PAID') throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '仅已支付订单可以进入履约');
+            if (status === 'COMPLETED' && !['PAID', 'FULFILLING'].includes(item.status)) throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '仅未完成订单可以标记完成');
+            if (status === 'CANCELLED' && item.status !== 'PENDING_PAYMENT') throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '已支付订单请先走售后退款，不能直接取消');
+          }
           item.status = status; item.updatedAt = new Date().toISOString(); addAudit(data, `更新${adminStatusMatch[1]}状态为${status}`, item.id);
+          if (isOrder && status === 'CANCELLED') {
+            releaseOrderStock(data, item);
+            const paymentOrder = (data.paymentOrders || []).find((row) => row.id === item.paymentOrderId);
+            if (paymentOrder && paymentOrder.status === 'PENDING') {
+              paymentOrder.status = 'CANCELLED';
+              paymentOrder.updatedAt = item.updatedAt;
+            }
+            item.cancelReason = 'PLATFORM_CANCELLED';
+            item.collaboration ||= createCollaboration(item, item.items[0]?.merchantId || '');
+            appendCollaborationEvent(item, 'PLATFORM', 'CANCELLED', '平台已取消待支付订单，库存已释放');
+            addAudit(data, '平台取消待支付订单并释放库存', item.orderNo);
+          }
+          if (isOrder && status === 'FULFILLING') {
+            item.collaboration ||= createCollaboration(item, item.items[0]?.merchantId || '');
+            issueDeliveryCode(item, item.updatedAt);
+            appendCollaborationEvent(item, 'PLATFORM', 'ACCEPT', '平台已确认履约，校内配送将按约定执行');
+            notifyOrderMerchant(data, item, 'ORDER', '平台已确认履约', `订单 ${item.orderNo} 已由平台确认履约，请尽快安排校内配送。`);
+          }
+          if (isOrder && status === 'COMPLETED') {
+            const providedCode = typeof body.deliveryCode === 'string' ? requireString(body.deliveryCode, 'deliveryCode', { maxLength: 6 }) : '';
+            const completionNote = String(body.completionNote || '').trim();
+            if (!providedCode && completionNote.length < 8) {
+              throw new ApiError(400, 'VALIDATION_ERROR', '未提供交付码时，请填写至少 8 字的平台核验依据');
+            }
+            if (!item.deliveryCode) issueDeliveryCode(item, item.updatedAt);
+            if (providedCode && item.deliveryCode !== providedCode) {
+              throw new ApiError(409, 'DELIVERY_CODE_INVALID', '交付码不正确，请与用户确认后完成订单');
+            }
+            item.collaboration ||= createCollaboration(item, item.items[0]?.merchantId || '');
+            appendCollaborationEvent(
+              item,
+              'PLATFORM',
+              'COMPLETE',
+              providedCode ? '平台已核验交付码，订单已完成' : `平台代履约完成：${completionNote}`
+            );
+            addAudit(data, providedCode ? '平台核验交付码完成订单' : '平台代履约完成订单', item.orderNo);
+          }
           if (adminStatusMatch[1] === 'after-sales' && status === 'CLOSED') {
             const order = (data.orders || []).find((row) => row.id === item.orderId);
             if (order && item.type === 'REFUND') applyOrderRefund(data, order, item.updatedAt);

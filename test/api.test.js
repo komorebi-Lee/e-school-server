@@ -1123,6 +1123,71 @@ test('admin order status update rejects unsupported status', async () => {
   assert.equal(response.body.error.code, 'VALIDATION_ERROR');
 });
 
+test('admin order control preserves delivery verification and stock truth', async () => {
+  const session = await loginWeChat('admin_order_control');
+  const product = await api('/api/products/prod_ebike_001');
+  assert.equal(product.response.status, 200);
+  const stockBefore = product.body.data.availableStock;
+
+  const order = await api('/api/orders', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(order.response.status, 201);
+
+  const admin = await api('/api/admin/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(admin.response.status, 200);
+  const adminAuth = { 'content-type': 'application/json', authorization: `Bearer ${admin.body.data.token}` };
+
+  const cancelled = await api(`/api/admin/orders/${order.body.data.id}/status`, {
+    method: 'POST', headers: adminAuth,
+    body: JSON.stringify({ status: 'CANCELLED' })
+  });
+  assert.equal(cancelled.response.status, 200);
+  assert.equal(cancelled.body.data.status, 'CANCELLED');
+  assert.equal(cancelled.body.data.paymentStatus, 'UNPAID');
+  assert.equal(cancelled.body.data.stockReservation, 'RELEASED');
+  assert.equal(cancelled.body.data.collaboration.handoffs[0].role, 'PLATFORM');
+
+  const afterCancel = await api('/api/products/prod_ebike_001');
+  assert.equal(afterCancel.response.status, 200);
+  assert.equal(afterCancel.body.data.availableStock, stockBefore);
+
+  const replay = await api('/api/orders', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(replay.response.status, 201);
+  await confirmPayment(replay.body.paymentOrder.id, session.token);
+
+  const manualPaid = await api(`/api/admin/orders/${replay.body.data.id}/status`, {
+    method: 'POST', headers: adminAuth,
+    body: JSON.stringify({ status: 'PAID' })
+  });
+  assert.equal(manualPaid.response.status, 409);
+
+  const insufficientNote = await api(`/api/admin/orders/${replay.body.data.id}/status`, {
+    method: 'POST', headers: adminAuth,
+    body: JSON.stringify({ status: 'COMPLETED', completionNote: '太短' })
+  });
+  assert.equal(insufficientNote.response.status, 400);
+
+  const proxyCompleted = await api(`/api/admin/orders/${replay.body.data.id}/status`, {
+    method: 'POST', headers: adminAuth,
+    body: JSON.stringify({ status: 'COMPLETED', completionNote: '平台线下核验，已确认学生收车并核对车辆编号' })
+  });
+  assert.equal(proxyCompleted.response.status, 200);
+  assert.equal(proxyCompleted.body.data.status, 'COMPLETED');
+  assert.equal(proxyCompleted.body.data.collaboration.handoffs[0].role, 'PLATFORM');
+  assert.ok(proxyCompleted.body.data.collaboration.handoffs[0].note.includes('平台代履约完成'));
+});
+
 test('payment lifecycle creates notifications and supports cancel or refund', async () => {
   const session = await loginWeChat('payment_lifecycle');
 
