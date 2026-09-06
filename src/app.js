@@ -773,6 +773,90 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
     };
   }
 
+  function merchantStatementStatuses(data) {
+    return {
+      ...statusLabels,
+      PENDING_SETTLE: '待结算',
+      PAYOUT_REQUESTED: '提现待审核',
+      SETTLED: '已结算',
+      REFUNDED: '已冲销'
+    };
+  }
+
+  function buildMerchantStatement(data, merchant, monthInput = '') {
+    const month = /^\d{4}-\d{2}$/.test(monthInput) ? monthInput : new Date().toISOString().slice(0, 7);
+    const [year, monthNumber] = month.split('-').map(Number);
+    const startDateIso = new Date(Date.UTC(year, monthNumber - 1, 1)).toISOString();
+    const endDate = new Date(Date.UTC(year, monthNumber, 1)).toISOString();
+    const statusMap = merchantStatementStatuses(data);
+    const settlements = (data.settlements || [])
+      .filter((item) => item.merchantId === merchant.id
+        && item.createdAt >= startDateIso
+        && item.createdAt < endDate)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    const payouts = (data.payoutRequests || [])
+      .filter((item) => item.merchantId === merchant.id
+        && item.createdAt >= startDateIso
+        && item.createdAt < endDate)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    const refundInCents = settlements
+      .filter((item) => item.settlementStatus === 'REFUNDED')
+      .reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0);
+    const businessGrossInCents = settlements
+      .filter((item) => item.settlementStatus !== 'REFUNDED')
+      .reduce((sum, item) => sum + (item.amountInCents || 0), 0);
+    const commissionInCents = settlements
+      .filter((item) => item.settlementStatus !== 'REFUNDED')
+      .reduce((sum, item) => sum + (item.platformFeeInCents || 0), 0);
+    const businessPayableInCents = settlements
+      .filter((item) => item.settlementStatus !== 'REFUNDED')
+      .reduce((sum, item) => sum + (item.payableAmountInCents || 0), 0);
+    const payoutPaidInCents = payouts
+      .filter((item) => item.status === 'SETTLED')
+      .reduce((sum, item) => sum + (item.paidAmountInCents || item.amountInCents || 0), 0);
+    return {
+      month,
+      generatedAt: new Date().toISOString(),
+      merchant: { id: merchant.id, name: merchant.name },
+      settlements: settlements.map((item) => ({
+        id: item.id,
+        settlementNo: item.id,
+        orderNo: item.orderNo,
+        status: item.settlementStatus,
+        statusLabel: statusMap[item.settlementStatus] || item.settlementStatus,
+        amountInCents: item.amountInCents || 0,
+        commissionRatePercent: item.commissionRatePercent || 0,
+        platformFeeInCents: item.platformFeeInCents || 0,
+        payableInCents: item.payableAmountInCents || 0,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+        availableAt: item.availableAt || '',
+        settlementReference: item.settlementReference || ''
+      })),
+      payouts: payouts.map((item) => ({
+        id: item.id,
+        requestNo: item.requestNo,
+        status: item.status,
+        statusLabel: ({ PENDING_REVIEW: '待审核', SETTLED: '已打款', REJECTED: '已驳回', CANCELLED: '已关闭' })[item.status] || item.status,
+        amountInCents: item.amountInCents || 0,
+        paidAmountInCents: item.paidAmountInCents || 0,
+        settlementCount: item.settlementCount || 0,
+        settlementReference: item.settlementReference || '',
+        remark: item.remark || '',
+        createdAt: item.createdAt,
+        reviewedAt: item.reviewedAt || ''
+      })),
+      totals: {
+        businessGrossInCents,
+        commissionInCents,
+        businessPayableInCents,
+        refundInCents,
+        payoutPaidInCents,
+        netInCents: businessPayableInCents - refundInCents - payoutPaidInCents
+      }
+    };
+  }
+
   function payoutMinimumInCents(data) {
     const value = Number(data?.adminSettings?.payoutMinimumInCents);
     return Number.isInteger(value) && value >= 0 && value <= 1000000 ? value : 10000;
@@ -2755,6 +2839,55 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           },
           requestId
         });
+      }
+
+      if (pathname.startsWith('/api/merchant/settlement-statement')) {
+        const merchant = (store.read().merchants || []).find((item) => item.id === merchantSession.merchantId);
+        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        const monthQuery = url.searchParams.get('month') || '';
+        if (monthQuery && !/^\d{4}-\d{2}$/.test(monthQuery)) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '账单月份需为 YYYY-MM');
+        }
+        const statement = buildMerchantStatement(store.read(), merchant, monthQuery);
+
+        if (request.method === 'GET' && pathname === '/api/merchant/settlement-statement') {
+          return sendJson(response, 200, { data: statement, requestId });
+        }
+
+        if (request.method === 'GET' && pathname === '/api/merchant/settlement-statement/export') {
+          const money = (value) => ((Number(value) || 0) / 100).toFixed(2);
+          const headers = ['记录类型', '单据号', '状态', '金额(元)', '服务费率', '平台佣金(元)', '商家应收(元)', '时间', '打款凭证'];
+          const rows = statement.settlements.map((item) => [
+            '收入分账', item.orderNo, item.statusLabel, money(item.amountInCents),
+            `${item.commissionRatePercent}%`, money(item.platformFeeInCents), money(item.payableInCents),
+            item.createdAt, item.settlementReference
+          ]);
+          for (const item of statement.payouts) {
+            const paid = item.paidAmountInCents || (item.status === 'SETTLED' ? item.amountInCents : 0);
+            rows.push([
+              '提现出账', item.requestNo, item.statusLabel, `-${money(paid)}`, '', '', `-${money(paid)}`,
+              item.reviewedAt || item.createdAt, item.settlementReference
+            ]);
+          }
+          rows.push([
+            '本月汇总', '', '', money(statement.totals.businessGrossInCents), '',
+            money(statement.totals.commissionInCents),
+            money(statement.totals.netInCents), statement.generatedAt, ''
+          ]);
+          const csv = [headers, ...rows].map((row) => row.map((value) => {
+            const text = String(value ?? '');
+            return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+          }).join(',')).join('\r\n');
+          const fileName = `shishan-merchant-statement-${merchant.id}-${statement.month}.csv`;
+          response.writeHead(200, {
+            'content-type': 'text/csv; charset=utf-8',
+            'content-disposition': `attachment; filename="${fileName}"`,
+            'access-control-allow-origin': '*',
+            'cache-control': 'no-store'
+          });
+          response.end(`\ufeff${csv}`);
+          return;
+        }
       }
 
       if (request.method === 'GET' && pathname === '/api/merchant/notifications') {

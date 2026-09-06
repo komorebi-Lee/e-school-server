@@ -691,6 +691,37 @@ test('merchant can be approved and manage its own products and orders', async ()
   const settledOverview = await api('/api/merchant/overview', { headers: merchantAuth });
   assert.equal(settledOverview.body.data.metrics.settlementMetrics.payableInCents, 0);
   assert.equal(settledOverview.body.data.metrics.settlementMetrics.settledInCents, 2300);
+
+  // 商家要能确认“这个月到底收了多少、平台扣了多少、已经打了多少”，不然运营容易扯皮。
+  const statement = await api('/api/merchant/settlement-statement', { headers: merchantAuth });
+  assert.equal(statement.response.status, 200);
+  assert.equal(statement.body.data.settlements.length, 1);
+  assert.equal(statement.body.data.settlements[0].status, 'SETTLED');
+  assert.equal(statement.body.data.settlements[0].payableInCents, 2300);
+  assert.equal(statement.body.data.totals.businessGrossInCents, 2500);
+  assert.equal(statement.body.data.totals.commissionInCents, 200);
+  assert.equal(statement.body.data.totals.payoutPaidInCents, 2300);
+  assert.equal(statement.body.data.totals.netInCents, 0);
+
+  const statementExport = await fetch(`${baseUrl}/api/merchant/settlement-statement/export`, {
+    headers: merchantAuth
+  });
+  assert.equal(statementExport.status, 200);
+  assert.equal(statementExport.headers.get('content-type'), 'text/csv; charset=utf-8');
+  const statementBytes = new Uint8Array(await statementExport.arrayBuffer());
+  assert.deepEqual([...statementBytes.slice(0, 3)], [0xef, 0xbb, 0xbf]);
+  const statementCsv = new TextDecoder('utf-8').decode(statementBytes);
+  assert.ok(statementCsv.includes('收入分账'));
+  assert.ok(statementCsv.includes('提现出账'));
+  assert.ok(statementCsv.includes('TEST-PAYOUT-001'));
+  assert.ok(statementCsv.includes('本月汇总'));
+
+  const statementUnauthorized = await fetch(`${baseUrl}/api/merchant/settlement-statement`);
+  assert.equal(statementUnauthorized.status, 401);
+  const invalidStatementMonth = await api('/api/merchant/settlement-statement?month=202501', {
+    headers: merchantAuth
+  });
+  assert.equal(invalidStatementMonth.response.status, 400);
   const payoutOverview = await api('/api/admin/overview', { headers: { authorization: `Bearer ${adminLogin.body.data.token}` } });
   const payoutFinanceEvent = payoutOverview.body.data.financeEvents.find((event) => event.eventType === 'PAYOUT' && event.settlementReference === 'TEST-PAYOUT-001');
   assert.ok(payoutFinanceEvent);
