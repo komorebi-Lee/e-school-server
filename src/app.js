@@ -1759,6 +1759,43 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       .map((entry) => entry.product);
   }
 
+  // 列表排序统一放在后端，客户端、商家端和后台看到的转化口径保持一致。
+  function withProductSales(product, salesCounts) {
+    return { ...product, salesCount: salesCounts.get(product.id) || 0 };
+  }
+
+  function orderProductsForList(data, products, sort = 'recommend') {
+    const salesCounts = new Map();
+    for (const order of data.orders || []) {
+      if (!['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(order.status)) continue;
+      for (const item of order.items || []) {
+        salesCounts.set(item.productId, (salesCounts.get(item.productId) || 0) + Number(item.quantity || 1));
+      }
+    }
+    for (const order of data.phoneCardOrders || []) {
+      if (!['PENDING_REALNAME', 'ACTIVATED'].includes(order.status) || !order.productId) continue;
+      salesCounts.set(order.productId, (salesCounts.get(order.productId) || 0) + 1);
+    }
+    const entries = products.map((product, index) => {
+      const salesCount = salesCounts.get(product.id) || 0;
+      const rating = product.ratingSummary?.average || 0.1;
+      return {
+        product,
+        index,
+        salesCount,
+        ratingWeight: rating * 100 + Math.min(salesCount, 50)
+      };
+    });
+    const sorters = {
+      rating: (a, b) => b.ratingWeight - a.ratingWeight || a.index - b.index,
+      price_asc: (a, b) => Number(a.product.priceInCents || 0) - Number(b.product.priceInCents || 0) || a.index - b.index,
+      price_desc: (a, b) => Number(b.product.priceInCents || 0) - Number(a.product.priceInCents || 0) || a.index - b.index,
+      stock: (a, b) => availableStock(a.product) - availableStock(b.product) || a.index - b.index
+    };
+    const ranked = sorters[sort] ? entries.sort(sorters[sort]) : entries;
+    return ranked.map((entry) => withProductSales(entry.product, salesCounts));
+  }
+
   function serviceScoreSummary(merchants = []) {
     const scored = merchants.filter((item) => item.status === 'APPROVED' && item.serviceScore);
     const byStage = (stage) => scored.filter((item) => item.serviceScore.stage === stage).length;
@@ -2145,8 +2182,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .filter((product) => !campusId || product.campusIds.includes(campusId))
           .filter((product) => !query || `${product.name} ${product.description}`.toLowerCase().includes(query));
         // 服务分低的商家整体后置，让好服务真的能换到曝光。
-        const ranked = orderProductsByExposure(data, items);
-        return sendJson(response, 200, { data: ranked.map((product) => withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])), data.merchants || [])), total: ranked.length, requestId });
+        const sort = url.searchParams.get('sort') || 'recommend';
+        if (!['recommend', 'rating', 'price_asc', 'price_desc', 'stock'].includes(sort)) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '排序方式不支持');
+        }
+        const summarized = items.map((product) => withProductReviewSummary(
+          withMerchantName(product, data.merchants || []), data.productReviews || []
+        ));
+        const ranked = sort === 'recommend'
+          ? orderProductsByExposure(data, summarized)
+          : orderProductsForList(data, summarized, sort);
+        return sendJson(response, 200, { data: ranked.map((product) => withMerchantScore(withAvailableStock(product), data.merchants || [])), total: ranked.length, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/api/recharge-promos') {

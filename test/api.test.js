@@ -102,6 +102,23 @@ test('health and product list are available', async () => {
   assert.equal(products.body.data.filter((item) => item.category === 'PHONE_PLAN').length, 3);
 });
 
+test('product list supports commerce sorting and sales metrics', async () => {
+  const rating = await api('/api/products?campusId=campus_demo&sort=rating');
+  assert.equal(rating.response.status, 200);
+  assert.ok(rating.body.data.every((item) => Number.isInteger(item.salesCount)));
+  assert.equal(rating.body.data[0].id, 'prod_ebike_001');
+  assert.ok(rating.body.data[0].ratingSummary.average >= 4);
+
+  const price = await api('/api/products?campusId=campus_demo&sort=price_asc');
+  assert.equal(price.response.status, 200);
+  const prices = price.body.data.map((item) => item.priceInCents);
+  assert.deepEqual(prices, [...prices].sort((a, b) => a - b));
+
+  const invalid = await api('/api/products?campusId=campus_demo&sort=bad_sort');
+  assert.equal(invalid.response.status, 400);
+  assert.equal(invalid.body.error.code, 'VALIDATION_ERROR');
+});
+
 test('active product detail exposes merchant and stock', async () => {
   const result = await api('/api/products/prod_ebike_001');
   assert.equal(result.response.status, 200);
