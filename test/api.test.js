@@ -2378,6 +2378,9 @@ test('service score cases support appeal review, rectification and subscription 
   assert.equal(rectify.body.data.productId, 'prod_ebike_001');
   assert.equal(rectify.body.data.productName, store.read().products.find((item) => item.id === 'prod_ebike_001').name);
   assert.deepEqual(rectify.body.data.evidence, [evidenceUpload.body.data.url]);
+  const productAfterSubmission = store.read().products.find((item) => item.id === 'prod_ebike_001');
+  assert.equal(productAfterSubmission.autoDelistStatus, 'REVIEW_PENDING');
+  assert.equal(productAfterSubmission.autoDelistCaseId, rectify.body.data.id);
 
   const rectifyReviewed = await api(`/api/admin/score-cases/${rectify.body.data.id}/review`, {
     method: 'POST', headers: adminHeaders,
@@ -2386,6 +2389,10 @@ test('service score cases support appeal review, rectification and subscription 
   assert.equal(rectifyReviewed.response.status, 200);
   assert.deepEqual(rectifyReviewed.body.data.restoredProductIds, ['prod_ebike_001']);
   assert.equal(store.read().products.find((item) => item.id === 'prod_ebike_001').active, true);
+  const productAfterReview = store.read().products.find((item) => item.id === 'prod_ebike_001');
+  assert.equal(productAfterReview.autoDelistStatus, 'SCORE_CASE_RESTORED');
+  assert.equal(productAfterReview.autoDelistRestoredCaseId, rectify.body.data.id);
+  assert.ok(productAfterReview.autoDelistReviewNote.includes(rectify.body.data.caseNo));
 
   const saveTemplate = await api('/api/admin/settings', {
     method: 'POST', headers: adminHeaders,
@@ -2473,6 +2480,7 @@ test('low quality products are auto delisted and can be restored after complianc
 
   const adminOverview = await api('/api/admin/overview', { headers: adminHeaders });
   assert.ok(adminOverview.body.data.autoDelistedProducts.some((item) => item.id === 'prod_ebike_001'));
+  assert.equal(adminOverview.body.data.autoDelistedProducts.find((item) => item.id === 'prod_ebike_001').status, 'DELISTED');
 
   const restored = await api('/api/admin/products/prod_ebike_001/compliance-restore', {
     method: 'POST', headers: adminHeaders,
@@ -2480,6 +2488,7 @@ test('low quality products are auto delisted and can be restored after complianc
   });
   assert.equal(restored.response.status, 200);
   assert.equal(restored.body.data.active, true);
+  assert.equal(restored.body.data.autoDelistStatus, 'MANUAL_RESTORED');
 
   store.update((data) => {
     data.productReviews = data.productReviews.filter((item) => item.id !== 'review_auto_delist_hold');

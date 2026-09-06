@@ -1768,6 +1768,9 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
         product.autoDelistReason = productComplianceReason(metrics);
         product.autoDelistEvidence = metrics;
         product.autoDelistAt = now;
+        product.autoDelistStatus = 'DELISTED';
+        product.autoDelistReviewNote = '请提交整改申请，等待平台复核';
+        product.autoDelistReviewUpdatedAt = now;
         if (product.publishReviewStatus === 'PENDING_REVIEW') {
           product.publishReviewStatus = 'REJECTED';
           product.publishReviewNote = '自动风控已下架：' + product.autoDelistReason;
@@ -1783,6 +1786,9 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       } else if (!metrics.violation && product.autoDelistRule === 'LOW_QUALITY') {
         product.active = true;
         product.autoDelistRestoredAt = now;
+        product.autoDelistStatus = 'AUTO_RESTORED';
+        product.autoDelistReviewNote = '整改数据达标，系统已自动恢复上架';
+        product.autoDelistReviewUpdatedAt = now;
         if (product.publishReviewStatus === 'REJECTED') {
           product.publishReviewStatus = 'AUTO';
           product.publishReviewNote = '';
@@ -1838,6 +1844,28 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
         `${caseRecord.caseNo} 已进入平台审核，处理时限 48 小时。请同步准备整改过程材料。`);
     }
     return caseRecord;
+  }
+
+  function restoreAutoDelistedProduct(data, product, merchant, caseRecord, note, now) {
+    product.active = true;
+    product.autoDelistRestoredAt = now;
+    product.autoDelistRestoredBy = caseRecord ? 'SCORE_CASE' : 'MANUAL_REVIEW';
+    if (caseRecord) product.autoDelistRestoredCaseId = caseRecord.id;
+    product.autoDelistStatus = caseRecord ? 'SCORE_CASE_RESTORED' : 'MANUAL_RESTORED';
+    product.autoDelistReviewNote = caseRecord
+      ? `整改工单 ${caseRecord.caseNo} 验收通过：${note}`
+      : `平台人工复核通过：${note}`;
+    product.autoDelistReviewUpdatedAt = now;
+    if (product.publishReviewStatus === 'REJECTED') {
+      product.publishReviewStatus = 'AUTO';
+      product.publishReviewNote = '';
+    }
+    addMerchantScoreLog(data, merchant, {
+      type: caseRecord ? 'SCORE_CASE_COMPLIANCE_RESTORED' : 'MANUAL_COMPLIANCE_RESTORED',
+      note: product.autoDelistReviewNote
+    }, now);
+    addAudit(data, caseRecord ? '整改工单自动恢复上架' : '低质商品人工恢复上架', product.name);
+    return product.id;
   }
 
   function applyServiceScoreCaseAdjustment(data, merchant, caseRecord, adjustment, now) {
@@ -2423,6 +2451,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
             if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
         const products = data.products.filter((item) => item.merchantId === merchant.id);
+        const complianceCases = (data.serviceScoreCases || [])
+          .filter((item) => item.merchantId === merchant.id && item.productId);
         const merchantProductIds = new Set(products.map((product) => product.id));
         const reviews = (data.productReviews || [])
           .filter((review) => merchantProductIds.has(review.productId))
@@ -2488,7 +2518,24 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               slaOverdueCount: slaAlerts.filter((alert) => alert.level === 'OVERDUE').length,
               settlementMetrics
             },
-            products: products.map(withAvailableStock),
+            products: products.map((product) => {
+              const complianceCase = complianceCases.find((item) => item.productId === product.id
+                && item.id === product.autoDelistCaseId);
+              return withAvailableStock({
+                ...product,
+                complianceCase: product.autoDelistRule === 'LOW_QUALITY' && complianceCase ? {
+                  id: complianceCase.id,
+                  caseNo: complianceCase.caseNo,
+                  status: complianceCase.status,
+                  statusLabel: complianceCase.status === 'SUBMITTED' ? '整改待平台复核'
+                    : complianceCase.status === 'REVIEWING' ? '平台正在复核'
+                    : complianceCase.status === 'COMPLETED' ? '整改验收通过'
+                    : complianceCase.status === 'REJECTED' ? '整改未通过' : '处理中',
+                  adminNote: complianceCase.adminNote || '',
+                  updatedAt: complianceCase.updatedAt
+                } : null
+              });
+            }),
             orders: enrichedOrders,
             afterSales,
             reviews,
@@ -2619,7 +2666,15 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }, now);
           if (type === 'RECTIFY' && body.productId) {
             caseRecord.productId = requireString(body.productId, 'productId', { maxLength: 80 });
-            caseRecord.productName = (data.products.find((item) => item.id === caseRecord.productId) || {}).name || '';
+            const product = data.products.find((item) => item.id === caseRecord.productId);
+            caseRecord.productName = product?.name || '';
+            if (product) {
+              product.autoDelistCaseId = caseRecord.id;
+              product.autoDelistCaseNo = caseRecord.caseNo;
+              product.autoDelistStatus = 'REVIEW_PENDING';
+              product.autoDelistReviewNote = `整改工单 ${caseRecord.caseNo} 已提交，等待平台复核`;
+              product.autoDelistReviewUpdatedAt = now;
+            }
           }
           addAudit(data, '服务分工单待审核', `${merchant.name} ${caseRecord.caseNo}`);
           return caseRecord;
@@ -2967,6 +3022,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 merchantName: (data.merchants || []).find((merchant) => merchant.id === product.merchantId)?.name || '',
                 reason: product.autoDelistReason || '',
                 metrics: product.autoDelistEvidence || {},
+                status: product.autoDelistStatus || 'DELISTED',
+                caseNo: product.autoDelistCaseNo || '',
+                reviewNote: product.autoDelistReviewNote || '',
                 restoredAt: product.autoDelistRestoredAt || ''
               })),
             pendingPublishProducts: (data.products || [])
@@ -3637,6 +3695,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           caseRecord.status = decision === 'APPROVE' ? 'COMPLETED' : 'REJECTED';
           caseRecord.adminNote = note.trim();
           caseRecord.updatedAt = now;
+          (data.products || []).filter((item) => item.autoDelistCaseId === caseRecord.id).forEach((product) => {
+            product.autoDelistReviewNote = caseRecord.type === 'RECTIFY'
+              ? `整改工单 ${caseRecord.caseNo} ${decision === 'APPROVE' ? '验收通过' : '未通过'}：${note.trim()}`
+              : `工单 ${caseRecord.caseNo} 已处理：${note.trim()}`;
+            product.autoDelistReviewUpdatedAt = now;
+            if (decision !== 'APPROVE') product.autoDelistStatus = 'REVIEW_REJECTED';
+          });
           if (decision === 'APPROVE' && caseRecord.type === 'APPEAL' && adjustmentInput > 0) {
             applyServiceScoreCaseAdjustment(data, merchant, caseRecord, adjustmentInput, now);
           }
@@ -3653,24 +3718,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const restoredProducts = (data.products || []).filter((item) => item.merchantId === merchant.id
               && item.autoDelistRule === 'LOW_QUALITY' && item.active === false
               && (!caseRecord.productId || item.id === caseRecord.productId))
-              .map((product) => {
-                product.active = true;
-                product.autoDelistRestoredAt = now;
-                product.autoDelistRestoredBy = 'SCORE_CASE';
-                product.autoDelistRestoredCaseId = caseRecord.id;
-                if (product.publishReviewStatus === 'REJECTED') {
-                  product.publishReviewStatus = 'AUTO';
-                  product.publishReviewNote = '';
-                }
-                addMerchantScoreLog(data, merchant, {
-                  type: 'SCORE_CASE_COMPLIANCE_RESTORED',
-                  note: `整改工单 ${caseRecord.caseNo} 验收通过，商品「${product.name}」恢复展示。`
-                }, now);
-                addAudit(data, '整改工单自动恢复上架', product.name);
-                notifyMerchant(data, merchant.id, 'SCORE', '商品已恢复上架',
-                  `商品「${product.name}」已随整改工单 ${caseRecord.caseNo} 验收通过恢复展示。`, now);
-                return product.id;
-              });
+              .map((product) => restoreAutoDelistedProduct(data, product, merchant, caseRecord, note.trim(), now));
             caseRecord.restoredProductIds = restoredProducts;
           }
           caseRecord.timeline.unshift({
@@ -3825,19 +3873,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             throw new ApiError(409, 'PRODUCT_NOT_AUTO_DELISTED', '仅低质规则自动下架的商品可以人工恢复');
           }
           const now = new Date().toISOString();
-          product.active = true;
-          product.autoDelistRestoredAt = now;
-          if (product.publishReviewStatus === 'REJECTED') {
-            product.publishReviewStatus = 'AUTO';
-            product.publishReviewNote = '';
-          }
-          addMerchantScoreLog(data, { id: product.merchantId, name: '' }, {
-            type: 'MANUAL_COMPLIANCE_RESTORED',
-            note: `商品「${product.name}」人工复核恢复上架：${note}`
-          }, now);
-          addAudit(data, '低质商品人工恢复上架', product.name);
+          const merchant = (data.merchants || []).find((item) => item.id === product.merchantId);
+          restoreAutoDelistedProduct(data, product, merchant || { id: product.merchantId, name: '' }, null, note, now);
           notifyMerchant(data, product.merchantId, 'SCORE', '商品已恢复上架',
-            `商品「${product.name}」经平台复核后恢复展示：${note}。`, now);
+            product.autoDelistReviewNote, now);
           return product;
         });
         return sendJson(response, 200, { data: result, requestId });
