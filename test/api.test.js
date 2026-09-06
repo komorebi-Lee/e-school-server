@@ -168,6 +168,10 @@ test('admin can adjust service score and review a limited merchant product', asy
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
   });
+  await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({ phoneCardActivationHours: 31, afterSaleResponseHours: 25 })
+  });
   const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
 
   const scoreList = await api('/api/admin/merchant-scores', { headers: adminHeaders });
@@ -452,6 +456,8 @@ test('after-sale request checks order ownership and prevents duplicates', async 
   assert.equal(created.body.data.typeLabel, '申请退款');
   assert.ok(created.body.data.responseDueAt);
   assert.ok(created.body.data.resolutionDueAt);
+  const afterSaleNotifications = await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.ok(afterSaleNotifications.body.data.some((item) => item.type === 'AFTER_SALE' && item.title === '售后已受理' && item.content.includes('25 小时内')));
 
   const duplicate = await api('/api/after-sales', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
@@ -1378,6 +1384,8 @@ test('phone card payments enter real-name activation and support refunds', async
   assert.equal(confirmed.response.status, 200);
   assert.equal(confirmed.body.data.phoneCardOrder.status, 'PENDING_REALNAME');
   assert.equal(confirmed.body.data.phoneCardOrder.paymentStatus, 'PAID');
+  const cardNotifications = await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.ok(cardNotifications.body.data.some((item) => item.type === 'PHONE_PLAN' && item.title === '电话卡支付成功' && item.content.includes('31 小时内')));
   assert.equal(confirmed.body.data.paymentOrder.status, 'PAID');
 
   const tamperedPlan = await api('/api/phone-card-orders', {

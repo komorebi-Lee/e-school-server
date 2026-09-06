@@ -54,6 +54,7 @@ function isTlsInterceptionError(error) {
     afterSaleResolutionHours: settings.afterSaleResolutionHours || 72,
     externalPlateFeeInCents: settings.externalPlateFeeInCents ?? 4900,
     leadResponseHours: Number.isInteger(settings.leadResponseHours) && settings.leadResponseHours >= 1 && settings.leadResponseHours <= 168 ? settings.leadResponseHours : 24,
+    phoneCardActivationHours: Number.isInteger(settings.phoneCardActivationHours) && settings.phoneCardActivationHours >= 1 && settings.phoneCardActivationHours <= 168 ? settings.phoneCardActivationHours : 24,
     paymentTimeoutMinutes: settings.paymentTimeoutMinutes || 30,
     settlementPeriodDays: Number.isInteger(settings.settlementPeriodDays) ? settings.settlementPeriodDays : 7,
     deliveryTimeSlots: Array.isArray(settings.deliveryTimeSlots) && settings.deliveryTimeSlots.length ? settings.deliveryTimeSlots : ['尽快配送'],
@@ -3819,7 +3820,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           if (template && item.userId) {
             const detail = item.planName || item.vehicleModel || item.reason || item.orderNo || item.id;
-            sendOrderNotification(data, item.userId, adminStatusMatch[1] === 'after-sales' ? 'AFTER_SALE' : 'ORDER_STATUS', template[1], `${detail}：${template[2]}`);
+            const message = adminStatusMatch[1] === 'after-sales' && status === 'SUBMITTED'
+              ? `您的售后请求已受理，预计 ${publicSettings(data.adminSettings).afterSaleResponseHours} 小时内响应。`
+              : template[2];
+            sendOrderNotification(data, item.userId, adminStatusMatch[1] === 'after-sales' ? 'AFTER_SALE' : 'ORDER_STATUS', template[1], `${detail}：${message}`);
           }
           return item;
         });
@@ -4529,11 +4533,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               phoneCardOrder.status = 'PENDING_REALNAME';
               phoneCardOrder.paymentStatus = 'PAID';
               phoneCardOrder.updatedAt = now;
+              const activationHours = publicSettings(data.adminSettings).phoneCardActivationHours;
               addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
                 userId, paymentNo: paymentOrder.paymentNo, businessType: 'PHONE_PLAN'
               }, now);
               addAudit(data, '电话卡支付成功', phoneCardOrder.id);
-            addNotification(data, userId, 'PHONE_PLAN', '电话卡支付成功', `${phoneCardOrder.planName} 已支付，运营将在 24 小时内联系实名激活。`);
+            addNotification(data, userId, 'PHONE_PLAN', '电话卡支付成功', `${phoneCardOrder.planName} 已支付，运营将在 ${activationHours} 小时内联系实名激活。`);
             return { phoneCardOrder, paymentOrder };
           }
           if (plateApplication) {
@@ -4727,7 +4732,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           order.updatedAt = now;
           freezeOrderSettlements(data, order, now, `${record.typeLabel}：${reason}`);
           notifyOrderMerchant(data, order, 'AFTER_SALE', '收到新的售后申请', `订单 ${order.orderNo}：${record.typeLabel}，${reason}`);
-          sendOrderNotification(data, userId, 'AFTER_SALE', '售后已受理', `${order.orderNo}：已受理，预计 24 小时内响应。`);
+          sendOrderNotification(data, userId, 'AFTER_SALE', '售后已受理', `${order.orderNo}：已受理，预计 ${settings.afterSaleResponseHours} 小时内响应。`);
           addAudit(data, '用户提交售后申请', order.orderNo);
           return record;
         });
