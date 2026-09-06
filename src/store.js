@@ -190,6 +190,7 @@ function initialData() {
       payoutReviewHours: 48,
       leadResponseHours: 24,
       patrolIntervalMinutes: 10,
+      lowStockThreshold: 10,
       serviceScoreLimitedThreshold: 80,
       serviceScoreRestrictedThreshold: 60,
       paymentTimeoutMinutes: 30,

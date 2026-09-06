@@ -148,34 +148,94 @@ function withAvailableStock(product) {
   return { ...product, reservedStock: Number(product.reservedStock || 0), availableStock: availableStock(product) };
 }
 
+function lowStockThreshold(data) {
+  const value = Number(data?.adminSettings?.lowStockThreshold ?? 10);
+  return Number.isInteger(value) && value >= 0 && value <= 999 ? value : 10;
+}
+
+function evaluateLowStockAlert(data, product, now = new Date().toISOString()) {
+  if (!product?.id || !product.merchantId || product.active === false) return false;
+  const threshold = lowStockThreshold(data);
+  const stock = availableStock(product);
+  if (stock > threshold) {
+    if (product.lowStockAlertedAt) {
+      product.lowStockAlertedAt = '';
+      product.lowStockAlertStatus = '';
+    }
+    return false;
+  }
+  if (product.lowStockAlertedAt) return false;
+  const merchant = (data.merchants || []).find((item) => item.id === product.merchantId);
+  product.lowStockAlertedAt = now;
+  product.lowStockAlertStatus = 'OPEN';
+  if (merchant?.userId) {
+    if (!Array.isArray(data.notifications)) data.notifications = [];
+    data.notifications.unshift({
+      id: `ntf_${randomUUID()}`,
+      userId: merchant.userId,
+      type: 'STOCK',
+      title: '商品库存偏低',
+      content: `「${product.name}」可售库存 ${stock} 件，已达到补货阈值 ${threshold} 件。`,
+      read: false,
+      createdAt: now
+    });
+    data.notifications = data.notifications.slice(0, 500);
+  }
+  if (merchant?.id) {
+    if (!Array.isArray(data.auditLogs)) data.auditLogs = [];
+    data.auditLogs.unshift({
+      id: `log_${randomUUID()}`,
+      operator: '系统',
+      action: '触发低库存提醒',
+      target: product.name,
+      createdAt: now
+    });
+    data.auditLogs = data.auditLogs.slice(0, 200);
+  }
+  return true;
+}
+
 function reserveOrderStock(data, order) {
+  const affectedProducts = [];
   for (const orderItem of order.items || []) {
     const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
-    if (product) product.reservedStock = Number(product.reservedStock || 0) + Number(orderItem.quantity || 0);
+    if (product) {
+      product.reservedStock = Number(product.reservedStock || 0) + Number(orderItem.quantity || 0);
+      affectedProducts.push(product);
+    }
   }
   order.stockReservation = 'HELD';
+  affectedProducts.forEach((product) => evaluateLowStockAlert(data, product, new Date().toISOString()));
 }
 
 function releaseOrderStock(data, order) {
   if (order.stockReservation !== 'HELD') return false;
+  const affectedProducts = [];
   for (const orderItem of order.items || []) {
     const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
-    if (product) product.reservedStock = Math.max(0, Number(product.reservedStock || 0) - Number(orderItem.quantity || 0));
+    if (product) {
+      product.reservedStock = Math.max(0, Number(product.reservedStock || 0) - Number(orderItem.quantity || 0));
+      affectedProducts.push(product);
+    }
   }
   order.stockReservation = 'RELEASED';
+  affectedProducts.forEach((product) => evaluateLowStockAlert(data, product, new Date().toISOString()));
   return true;
 }
 
 function consumeOrderStock(data, order) {
   if (order.stockReservation === 'CONSUMED') return false;
   const held = order.stockReservation === 'HELD';
+  const affectedProducts = [];
   for (const orderItem of order.items || []) {
     const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
     if (!product) continue;
     if (held) product.reservedStock = Math.max(0, Number(product.reservedStock || 0) - Number(orderItem.quantity || 0));
     product.stock = Math.max(0, Number(product.stock || 0) - Number(orderItem.quantity || 0));
+    affectedProducts.push(product);
   }
   order.stockReservation = 'CONSUMED';
+  affectedProducts.forEach((product) => evaluateLowStockAlert(data, product, new Date().toISOString()));
   return true;
 }
 
@@ -183,11 +243,16 @@ function consumeOrderStock(data, order) {
 function restoreOrderStock(data, order) {
   if (order.stockReservation === 'HELD') return releaseOrderStock(data, order);
   if (order.stockReservation === 'RESTORED') return false;
+  const affectedProducts = [];
   for (const orderItem of order.items || []) {
     const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
-    if (product) product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
+    if (product) {
+      product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
+      affectedProducts.push(product);
+    }
   }
   order.stockReservation = 'RESTORED';
+  affectedProducts.forEach((product) => evaluateLowStockAlert(data, product, new Date().toISOString()));
   return true;
 }
 
@@ -594,6 +659,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
     const merchant = (data.merchants || []).find((item) => item.id === merchantId);
     return addNotification(data, merchant?.userId, type, title, content);
   }
+
 
   function notifyMerchantScore(data, merchantId, templateKey, title, content, now = new Date().toISOString()) {
     const merchant = (data.merchants || []).find((item) => item.id === merchantId);
@@ -1880,8 +1946,9 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
     if (leadsOverdue) alerts.push({ level: 'HIGH', message: `有 ${leadsOverdue} 条咨询线索超过跟进时限。` });
     const openPatrol = (data.slaAlerts || []).filter((item) => item.status !== 'RESOLVED').length;
     if (openPatrol) alerts.push({ level: 'MEDIUM', message: `有 ${openPatrol} 条运营巡检预警未闭环。` });
-    const lowStock = (data.products || []).filter((item) => item.active !== false && availableStock(item) < 10).length;
-    if (lowStock) alerts.push({ level: 'MEDIUM', message: `有 ${lowStock} 个在售商品库存低于 10 件。` });
+    const stockThreshold = lowStockThreshold(data);
+    const lowStock = (data.products || []).filter((item) => item.active !== false && availableStock(item) <= stockThreshold).length;
+    if (lowStock) alerts.push({ level: 'MEDIUM', message: `有 ${lowStock} 个在售商品库存已达到 ${stockThreshold} 件补货阈值。` });
     const afterSaleRate = total(current) ? Math.round((current.afterSalesCreated / total(current)) * 1000) / 10 : 0;
     if (afterSaleRate >= 20) alerts.push({ level: 'MEDIUM', message: `近 7 天售后率为 ${afterSaleRate}%，建议复核商品质量与履约。` });
     if (current.paymentTimeouts >= 3) {
@@ -2742,6 +2809,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
             if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
         const products = data.products.filter((item) => item.merchantId === merchant.id);
+        const stockThreshold = lowStockThreshold(data);
         const complianceCases = (data.serviceScoreCases || [])
           .filter((item) => item.merchantId === merchant.id && item.productId);
         const merchantProductIds = new Set(products.map((product) => product.id));
@@ -2794,6 +2862,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           data: {
             merchant: merchantPublic(merchant),
             serviceScore: merchant.serviceScore || null,
+            lowStockThreshold: stockThreshold,
             scoreCases: (data.serviceScoreCases || []).filter((item) => item.merchantId === merchant.id),
             metrics: {
               revenueInCents,
@@ -2801,7 +2870,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               pendingCount: orders.filter((order) => ['PAID', 'FULFILLING'].includes(order.status)).length,
               afterSaleCount: afterSales.filter((record) => record.status !== 'CLOSED').length,
               productCount: products.length,
-              lowStockCount: products.filter((product) => availableStock(product) < 10).length,
+              lowStockCount: products.filter((product) => product.active !== false && availableStock(product) <= stockThreshold).length,
               afterSaleOverdueCount: afterSales.filter((record) => record.status !== 'CLOSED' && record.responseDueAt && record.responseDueAt < new Date().toISOString()).length,
               reviewCount: reviews.length,
               pendingReplyCount: reviews.filter((review) => !review.reply).length,
@@ -2827,6 +2896,19 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 } : null
               });
             }),
+            lowStockProducts: products
+              .filter((product) => product.active !== false && availableStock(product) <= stockThreshold)
+              .sort((a, b) => availableStock(a) - availableStock(b))
+              .map((product) => ({
+                id: product.id,
+                name: product.name,
+                availableStock: availableStock(product),
+                reservedStock: Number(product.reservedStock || 0),
+                stock: Number(product.stock || 0),
+                threshold: stockThreshold,
+                alertedAt: product.lowStockAlertedAt || '',
+                status: product.lowStockAlertStatus || ''
+              })),
             orders: enrichedOrders,
             afterSales,
             reviews,
@@ -3068,6 +3150,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             publishReviewNote: autoPublish ? '' : '商家服务分处于限流整改，商品需平台复核后上架'
           };
           data.products.unshift(item);
+          evaluateLowStockAlert(data, item, item.createdAt);
           addAudit(data, autoPublish ? '商家新增商品' : '商家新增商品待复核', item.name);
           return item;
         });
@@ -3097,6 +3180,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (body.stock !== undefined) item.stock = requirePositiveInteger(body.stock, 'stock', { max: 999999 });
           if (body.active !== undefined) item.active = Boolean(body.active);
           item.updatedAt = new Date().toISOString();
+          evaluateLowStockAlert(data, item, item.updatedAt);
           addAudit(data, '商家更新商品', item.name);
           return item;
         });
@@ -3329,7 +3413,21 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         };
         return sendJson(response, 200, {
           data: {
-            metrics: { revenueInCents, paidOrders, pending, lowStock: data.products.filter((item) => availableStock(item) < 10).length, paymentTimeouts, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length, afterSaleOverdue: (data.afterSales || []).filter((item) => item.status !== 'CLOSED' && item.responseDueAt && item.responseDueAt < new Date().toISOString()).length },
+            metrics: { revenueInCents, paidOrders, pending, lowStock: data.products.filter((item) => item.active !== false && availableStock(item) <= lowStockThreshold(data)).length, paymentTimeouts, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length, afterSaleOverdue: (data.afterSales || []).filter((item) => item.status !== 'CLOSED' && item.responseDueAt && item.responseDueAt < new Date().toISOString()).length },
+            lowStockProducts: data.products
+              .filter((item) => item.active !== false && availableStock(item) <= lowStockThreshold(data))
+              .sort((a, b) => availableStock(a) - availableStock(b))
+              .map((item) => ({
+                id: item.id,
+                name: item.name,
+                merchantId: item.merchantId || '',
+                merchantName: (data.merchants || []).find((merchant) => merchant.id === item.merchantId)?.name || '平台自营',
+                availableStock: availableStock(item),
+                reservedStock: Number(item.reservedStock || 0),
+                threshold: lowStockThreshold(data),
+                alertedAt: item.lowStockAlertedAt || '',
+                status: item.lowStockAlertStatus || ''
+              })),
             products: data.products.map(withAvailableStock),
             rechargePromos: data.rechargePromos || [],
             merchants: data.merchants,
@@ -4403,6 +4501,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const minimum = Number(body.payoutMinimumInCents);
             if (!Number.isInteger(minimum) || minimum < 0 || minimum > 1000000) throw new ApiError(400, 'VALIDATION_ERROR', '起提金额需为 0-1000000 分');
             current.payoutMinimumInCents = minimum;
+          }
+          if (body.lowStockThreshold !== undefined) {
+            const threshold = Number(body.lowStockThreshold);
+            if (!Number.isInteger(threshold) || threshold < 0 || threshold > 999) throw new ApiError(400, 'VALIDATION_ERROR', '低库存阈值需为 0-999 的整数');
+            current.lowStockThreshold = threshold;
           }
           if (body.deliveryTimeSlots !== undefined) {
             if (!Array.isArray(body.deliveryTimeSlots) || body.deliveryTimeSlots.length < 1 || body.deliveryTimeSlots.length > 8) throw new ApiError(400, 'VALIDATION_ERROR', '配送时段需为 1-8 个');

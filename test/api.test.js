@@ -2831,6 +2831,65 @@ test('order notifications queue and dispatch to subscribed users', async () => {
     && message.page === 'pages/orders/orders'));
 });
 
+test('low stock reaches merchants exactly once and clears after restocking', async () => {
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  const configured = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ lowStockThreshold: 25 })
+  });
+  assert.equal(configured.response.status, 200);
+  assert.equal(configured.body.data.lowStockThreshold, 25);
+
+  const firstOverview = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(firstOverview.response.status, 200);
+  assert.equal(firstOverview.body.data.lowStockThreshold, 25);
+  assert.ok(firstOverview.body.data.metrics.lowStockCount > 0);
+  assert.ok(firstOverview.body.data.lowStockProducts.some((item) => item.id === 'prod_ebike_001'));
+  assert.equal(firstOverview.body.data.lowStockProducts.find((item) => item.id === 'prod_ebike_001').status, 'OPEN');
+
+  const notificationsAfterFirst = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${merchantSession.token}` }
+  });
+  const firstAlertCount = notificationsAfterFirst.body.data.filter((item) => item.type === 'STOCK').length;
+  assert.ok(firstAlertCount > 0);
+
+  await api('/api/merchant/overview', { headers: merchantAuth });
+  const notificationsAfterRepeat = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${merchantSession.token}` }
+  });
+  assert.equal(notificationsAfterRepeat.body.data.filter((item) => item.type === 'STOCK').length, firstAlertCount);
+
+  const restocked = await api('/api/merchant/products/prod_ebike_001', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ stock: 80 })
+  });
+  assert.equal(restocked.response.status, 200);
+
+  const restoredOverview = await api('/api/merchant/overview', { headers: merchantAuth });
+  const restoredProduct = restoredOverview.body.data.lowStockProducts.find((item) => item.id === 'prod_ebike_001');
+  assert.equal(restoredProduct, undefined);
+  assert.equal(restoredOverview.body.data.products.find((item) => item.id === 'prod_ebike_001').stock, 80);
+
+  const reset = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ lowStockThreshold: 10 })
+  });
+  assert.equal(reset.response.status, 200);
+  assert.equal(reset.body.data.lowStockThreshold, 10);
+});
+
 test('merchant score notifications require a persisted subscription', async () => {
   const merchantSession = await loginWeChat('merchant_demo');
   const merchantLogin = await api('/api/merchant/login', {
