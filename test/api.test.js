@@ -1449,7 +1449,7 @@ test('merchant workspace receives operational notifications and metrics', async 
     body: JSON.stringify({ merchantId: 'merchant_001' })
   });
   assert.equal(merchantLogin.response.status, 200);
-  const merchantHeaders = { authorization: `Bearer ${merchantLogin.body.data.token}` };
+  const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
 
   const adminLogin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -2198,7 +2198,37 @@ test('operations patrol raises overdue alerts and closes them when work moves on
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
     body: JSON.stringify({ merchantId: 'merchant_001' })
   });
-  const merchantHeaders = { authorization: `Bearer ${merchantLogin.body.data.token}` };
+  const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const merchantSubscription = await api('/api/merchant/message-subscriptions', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ accepted: true })
+  });
+  assert.equal(merchantSubscription.response.status, 200);
+  assert.equal(merchantSubscription.body.data.subscribed, true);
+
+  const complianceConfig = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({
+      productComplianceLowReviewThreshold: 2,
+      productComplianceReviewSampleThreshold: 2,
+      productComplianceAverageRatingThreshold: 4
+    })
+  });
+  assert.equal(complianceConfig.response.status, 200);
+  assert.equal(complianceConfig.body.data.productComplianceLowReviewThreshold, 2);
+  assert.equal(complianceConfig.body.data.productComplianceAverageRatingThreshold, 4);
+
+  const templateConfig = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({
+      productAutoDelistTemplateId: 'wx_test_product_delist',
+      productComplianceRestoredTemplateId: 'wx_test_product_restore'
+    })
+  });
+  assert.equal(templateConfig.response.status, 200);
+  assert.equal(templateConfig.body.data.productAutoDelistTemplateId, 'wx_test_product_delist');
+  assert.equal(templateConfig.body.data.productComplianceRestoredTemplateId, 'wx_test_product_restore');
   const merchantOverview = await api('/api/merchant/overview', { headers: merchantHeaders });
   assert.ok(merchantOverview.body.data.slaAlerts.some((item) => item.businessId === order.body.data.id));
   assert.ok(merchantOverview.body.data.slaAlerts.every((item) => item.ownerRole === 'MERCHANT'));
@@ -2266,6 +2296,12 @@ test('service score cases support appeal review, rectification and subscription 
     body: JSON.stringify({ merchantId: 'merchant_001' })
   });
   const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const resetSubscription = await api('/api/merchant/message-subscriptions', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ accepted: false })
+  });
+  assert.equal(resetSubscription.response.status, 200);
 
   const subscriptionBefore = await api('/api/merchant/message-subscriptions', { headers: merchantHeaders });
   assert.equal(subscriptionBefore.response.status, 200);
@@ -2462,6 +2498,7 @@ test('low quality products are auto delisted and can be restored after complianc
   assert.equal(delisted.autoDelistRule, 'LOW_QUALITY');
   assert.equal(delisted.autoDelistEvidence.lowRatingCount, 2);
   assert.equal(delisted.autoDelistEvidence.thresholds.lowReviewLimit, 2);
+  assert.ok((store.read().subscribeMessages || []).some((item) => item.templateId === 'product_auto_delist' && item.status === 'QUEUED'));
 
   // 清理测试注入的低分评价，避免恢复后再次触发同一条风控规则。
   store.update((data) => {
@@ -2481,6 +2518,7 @@ test('low quality products are auto delisted and can be restored after complianc
   const adminOverview = await api('/api/admin/overview', { headers: adminHeaders });
   assert.ok(adminOverview.body.data.autoDelistedProducts.some((item) => item.id === 'prod_ebike_001'));
   assert.equal(adminOverview.body.data.autoDelistedProducts.find((item) => item.id === 'prod_ebike_001').status, 'DELISTED');
+  assert.ok((store.read().subscribeMessages || []).some((item) => item.templateId === 'product_auto_delist' && item.status === 'QUEUED'));
 
   const restored = await api('/api/admin/products/prod_ebike_001/compliance-restore', {
     method: 'POST', headers: adminHeaders,
@@ -2489,6 +2527,8 @@ test('low quality products are auto delisted and can be restored after complianc
   assert.equal(restored.response.status, 200);
   assert.equal(restored.body.data.active, true);
   assert.equal(restored.body.data.autoDelistStatus, 'MANUAL_RESTORED');
+  assert.ok((store.read().subscribeMessages || []).some((item) => item.templateId === 'product_compliance_restored' && item.status === 'QUEUED'));
+  assert.ok((store.read().subscribeMessages || []).some((item) => item.templateId === 'product_compliance_restored' && item.status === 'QUEUED'));
 
   store.update((data) => {
     data.productReviews = data.productReviews.filter((item) => item.id !== 'review_auto_delist_hold');

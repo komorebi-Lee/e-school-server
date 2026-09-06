@@ -79,6 +79,16 @@ const scoreNotificationTemplates = {
     id: 'score_appeal_result',
     keywords: ['申诉', '审核结果', '服务分'],
     description: '差评记录申诉审核完成后通知商家结论'
+  },
+  PRODUCT_AUTO_DELIST: {
+    id: 'product_auto_delist',
+    keywords: ['商品', '自动下架', '整改'],
+    description: '商品触发低质风控自动下架时提醒商家整改'
+  },
+  PRODUCT_COMPLIANCE_RESTORED: {
+    id: 'product_compliance_restored',
+    keywords: ['商品', '复核', '恢复上架'],
+    description: '商品通过平台复核或整改验收后提醒商家'
   }
 };
 
@@ -1780,7 +1790,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
           note: `商品「${product.name}」触发低质自动下架：${product.autoDelistReason}`
         }, now);
         addAudit(data, '商品自动下架', product.name);
-        notifyMerchantScore(data, product.merchantId, 'SCORE_STAGE_WARNING', '商品已自动下架',
+        notifyMerchantScore(data, product.merchantId, 'PRODUCT_AUTO_DELIST', '商品已自动下架',
           `商品「${product.name}」触发低质规则：${product.autoDelistReason}。请完成整改后联系平台复核。`, now);
         actions.push({ productId: product.id, action: 'DELIST', metrics });
       } else if (!metrics.violation && product.autoDelistRule === 'LOW_QUALITY') {
@@ -1798,7 +1808,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
           note: `商品「${product.name}」整改数据达标，已自动恢复上架`
         }, now);
         addAudit(data, '低质商品自动恢复', product.name);
-        notifyMerchantScore(data, product.merchantId, 'SCORE_RECTIFY_RESULT', '商品已恢复上架',
+        notifyMerchantScore(data, product.merchantId, 'PRODUCT_COMPLIANCE_RESTORED', '商品已恢复上架',
           `商品「${product.name}」整改数据达标，已自动恢复展示。`, now);
         actions.push({ productId: product.id, action: 'RESTORE', metrics });
       }
@@ -2109,6 +2119,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           score_rectify_apply: settings.scoreRectifyApplyTemplateId || '',
           score_rectify_result: settings.scoreRectifyResultTemplateId || '',
           score_appeal_result: settings.scoreAppealResultTemplateId || ''
+          ,product_auto_delist: settings.productAutoDelistTemplateId || '',
+          product_compliance_restored: settings.productComplianceRestoredTemplateId || ''
         };
         const configuredUserIds = {
           order_status: settings.orderStatusTemplateId || '',
@@ -3751,7 +3763,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 score_stage_warning: data.adminSettings?.scoreStageWarningTemplateId || '',
                 score_rectify_apply: data.adminSettings?.scoreRectifyApplyTemplateId || '',
                 score_rectify_result: data.adminSettings?.scoreRectifyResultTemplateId || '',
-                score_appeal_result: data.adminSettings?.scoreAppealResultTemplateId || ''
+                score_appeal_result: data.adminSettings?.scoreAppealResultTemplateId || '',
+                product_auto_delist: data.adminSettings?.productAutoDelistTemplateId || '',
+                product_compliance_restored: data.adminSettings?.productComplianceRestoredTemplateId || ''
               })[item.id] || ''
             })),
             ...Object.entries(orderNotificationTemplates).map(([key, item]) => ({
@@ -3790,6 +3804,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           score_rectify_apply: settings.scoreRectifyApplyTemplateId || '',
           score_rectify_result: settings.scoreRectifyResultTemplateId || '',
           score_appeal_result: settings.scoreAppealResultTemplateId || ''
+          ,product_auto_delist: settings.productAutoDelistTemplateId || '',
+          product_compliance_restored: settings.productComplianceRestoredTemplateId || ''
           ,order_status: settings.orderStatusTemplateId || '',
           order_service: settings.orderServiceTemplateId || '',
           after_sale: settings.afterSaleTemplateId || ''
@@ -3875,7 +3891,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const now = new Date().toISOString();
           const merchant = (data.merchants || []).find((item) => item.id === product.merchantId);
           restoreAutoDelistedProduct(data, product, merchant || { id: product.merchantId, name: '' }, null, note, now);
-          notifyMerchant(data, product.merchantId, 'SCORE', '商品已恢复上架',
+          notifyMerchantScore(data, product.merchantId, 'PRODUCT_COMPLIANCE_RESTORED', '商品已恢复上架',
             product.autoDelistReviewNote, now);
           return product;
         });
@@ -3978,7 +3994,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isFinite(value) || value < 1 || value > 4.5) throw new ApiError(400, 'VALIDATION_ERROR', '均分下架阈值需为 1-4.5 分');
             current.productComplianceAverageRatingThreshold = Math.round(value * 10) / 10;
           }
-          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'afterSaleTemplateId']) {
+          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'afterSaleTemplateId']) {
             if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);
           }
           if (body.paymentTimeoutMinutes !== undefined) {

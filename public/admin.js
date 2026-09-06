@@ -592,6 +592,8 @@ function scoresView() {
     <label>整改申请模板 ID<input id="scoreRectifyApplyTemplate" value="${esc(state.data.settings?.scoreRectifyApplyTemplateId || '')}"></label>
     <label>整改结果模板 ID<input id="scoreRectifyResultTemplate" value="${esc(state.data.settings?.scoreRectifyResultTemplateId || '')}"></label>
     <label>申诉结果模板 ID<input id="scoreAppealResultTemplate" value="${esc(state.data.settings?.scoreAppealResultTemplateId || '')}"></label>
+    <label>商品下架提醒模板 ID<input id="productAutoDelistTemplate" value="${esc(state.data.settings?.productAutoDelistTemplateId || '')}"></label>
+    <label>商品恢复提醒模板 ID<input id="productComplianceRestoredTemplate" value="${esc(state.data.settings?.productComplianceRestoredTemplateId || '')}"></label>
     <label>订单状态模板 ID<input id="orderStatusTemplate" value="${esc(state.data.settings?.orderStatusTemplateId || '')}"></label>
     <label>订单客服模板 ID<input id="orderServiceTemplate" value="${esc(state.data.settings?.orderServiceTemplateId || '')}"></label>
     <label>售后进度模板 ID<input id="afterSaleTemplate" value="${esc(state.data.settings?.afterSaleTemplateId || '')}"></label>
@@ -714,6 +716,8 @@ bindView = function () {
         scoreRectifyApplyTemplateId: document.querySelector('#scoreRectifyApplyTemplate').value.trim(),
         scoreRectifyResultTemplateId: document.querySelector('#scoreRectifyResultTemplate').value.trim(),
         scoreAppealResultTemplateId: document.querySelector('#scoreAppealResultTemplate').value.trim(),
+        productAutoDelistTemplateId: document.querySelector('#productAutoDelistTemplate').value.trim(),
+        productComplianceRestoredTemplateId: document.querySelector('#productComplianceRestoredTemplate').value.trim(),
         orderStatusTemplateId: document.querySelector('#orderStatusTemplate').value.trim(),
         orderServiceTemplateId: document.querySelector('#orderServiceTemplate').value.trim(),
         afterSaleTemplateId: document.querySelector('#afterSaleTemplate').value.trim()
