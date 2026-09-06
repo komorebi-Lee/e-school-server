@@ -2250,6 +2250,17 @@ test('service score cases support appeal review, rectification and subscription 
   });
   const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
 
+  const subscriptionBefore = await api('/api/merchant/message-subscriptions', { headers: merchantHeaders });
+  assert.equal(subscriptionBefore.response.status, 200);
+  assert.equal(subscriptionBefore.body.data.subscribed, false);
+
+  const subscribeNotice = await api('/api/merchant/message-subscriptions', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ accepted: true })
+  });
+  assert.equal(subscribeNotice.response.status, 200);
+  assert.equal(subscribeNotice.body.data.subscribed, true);
+
   const appeal = await api('/api/merchant/score-cases', {
     method: 'POST', headers: merchantHeaders,
     body: JSON.stringify({
@@ -2468,4 +2479,79 @@ test('order notifications queue and dispatch to subscribed users', async () => {
   assert.ok(sentSubscribeMessages.some((message) => message.template_id === 'wx_test_order_status'
     && message.touser === 'openid_message_user'
     && message.page === 'pages/orders/orders'));
+});
+
+test('merchant score notifications require a persisted subscription', async () => {
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const unsubscribe = await api('/api/merchant/message-subscriptions', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ accepted: false })
+  });
+  assert.equal(unsubscribe.response.status, 200);
+  assert.equal(unsubscribe.body.data.subscribed, false);
+
+  store.update((data) => {
+    data.subscribeMessages = (data.subscribeMessages || []).filter((item) => !(
+      item.userId === 'openid_merchant_demo' && item.templateId === 'score_rectify_apply'
+    ));
+  });
+
+  const caseBeforeGate = await api('/api/merchant/score-cases', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ type: 'RECTIFY', reason: '先关闭提醒验证消息授权门槛，再恢复整改流程。', plan: '按承诺完成逾期事项处理。' })
+  });
+  assert.equal(caseBeforeGate.response.status, 201);
+  assert.ok(!(store.read().subscribeMessages || [])
+    .some((item) => item.userId === 'openid_merchant_demo' && item.templateId === 'score_rectify_apply'));
+
+  const subscribe = await api('/api/merchant/message-subscriptions', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ accepted: true })
+  });
+  assert.equal(subscribe.response.status, 200);
+  assert.equal(subscribe.body.data.subscribed, true);
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  const settings = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ scoreRectifyApplyTemplateId: 'wx_test_rectify_gate' })
+  });
+  assert.equal(settings.response.status, 200);
+
+  await api(`/api/admin/score-cases/${caseBeforeGate.body.data.id}/review`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ decision: 'APPROVE', note: '测试流程通过，用于验证订阅后的整改通知。', adjustment: 0 })
+  });
+
+  const caseAfterGate = await api('/api/merchant/score-cases', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ type: 'RECTIFY', reason: '已开启商家提醒，验证整改申请会进入消息队列。', plan: '完成剩余超时事项并回访用户。' })
+  });
+  assert.equal(caseAfterGate.response.status, 201);
+
+  const queuedMessage = (store.read().subscribeMessages || [])
+    .find((item) => item.userId === 'wx_merchant_demo' && item.templateId === 'score_rectify_apply');
+  assert.ok(queuedMessage && queuedMessage.status === 'QUEUED');
+
+  const dispatch = await api('/api/admin/subscribe-messages/dispatch', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ limit: 100 })
+  });
+  assert.equal(dispatch.response.status, 200);
+  const sentMessage = (store.read().subscribeMessages || [])
+    .find((item) => item.userId === 'wx_merchant_demo' && item.templateId === 'score_rectify_apply');
+  assert.equal(sentMessage.status, 'SENT');
+  assert.ok(sentSubscribeMessages.some((message) => message.template_id === 'wx_test_rectify_gate'
+    && message.touser === 'openid_merchant_demo'
+    && message.page === 'pages/merchant/index'));
 });

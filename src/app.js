@@ -492,6 +492,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
   function sendScoreNotification(data, userId, templateKey, title, content, now = new Date().toISOString()) {
     const notification = addNotification(data, userId, 'SCORE', title, content);
     if (!notification) return null;
+    if (!(data.serviceMessageSubscribers || []).includes(userId)) return { notification, subscribeMessage: null };
     if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
     data.subscribeMessages.unshift({
       id: `sub_${randomUUID()}`,
@@ -1822,6 +1823,10 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       note: `${caseRecord.typeLabel}已提交：${payload.reason}`
     }, now);
     addAudit(data, '收到服务分申诉或整改申请', `${merchant.name} ${caseRecord.caseNo}`);
+    if (payload.type === 'RECTIFY') {
+      notifyMerchantScore(data, merchant.id, 'SCORE_RECTIFY_APPLY', '整改申请已提交',
+        `${caseRecord.caseNo} 已进入平台审核，处理时限 48 小时。请同步准备整改过程材料。`);
+    }
     return caseRecord;
   }
 
@@ -2514,6 +2519,36 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: updated, requestId });
       }
 
+      if (pathname === '/api/merchant/message-subscriptions') {
+        const dataStore = store.read();
+        const merchant = dataStore.merchants.find((item) => item.id === merchantSession.merchantId);
+        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        if (request.method === 'GET') {
+          return sendJson(response, 200, {
+            data: { subscribed: (dataStore.serviceMessageSubscribers || []).includes(merchant.userId) },
+            requestId
+          });
+        }
+        if (request.method === 'POST') {
+          const body = await readJson(request);
+          const result = store.update((current) => {
+            if (body.accepted === false) {
+              current.serviceMessageSubscribers = (current.serviceMessageSubscribers || [])
+                .filter((item) => item !== merchant.userId);
+              return { subscribed: false };
+            }
+            current.serviceMessageSubscribers = Array.isArray(current.serviceMessageSubscribers)
+              ? current.serviceMessageSubscribers
+              : [];
+            if (!current.serviceMessageSubscribers.includes(merchant.userId)) {
+              current.serviceMessageSubscribers.unshift(merchant.userId);
+            }
+            return { subscribed: true };
+          });
+          return sendJson(response, 200, { data: result, requestId });
+        }
+      }
+
       // 商家只能发起提现申请，实际打款由平台在管理端审核后确认。
       if (request.method === 'POST' && pathname === '/api/merchant/payout-requests') {
         const body = await readJson(request);
@@ -2924,6 +2959,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               })),
             subscribeMessages: (data.subscribeMessages || []).slice(0, 120),
             orderMessageSubscribers: (data.orderMessageSubscribers || []).length,
+            serviceMessageSubscribers: (data.serviceMessageSubscribers || []).length,
             subscribeStats: {
               queued: (data.subscribeMessages || []).filter((item) => item.status === 'QUEUED').length,
               sent: (data.subscribeMessages || []).filter((item) => item.status === 'SENT').length,
@@ -3670,6 +3706,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           try {
             const wechatIdentity = identityByUserId.get(message.userId);
             if (!wechatIdentity) throw Object.assign(new Error('缺少微信身份'), { code: 'WECHAT_IDENTITY_MISSING' });
+            if (message.templateId.startsWith('score_')
+              && !(store.read().serviceMessageSubscribers || []).includes(message.userId)) {
+              throw Object.assign(new Error('商家未开启服务分提醒'), { code: 'MERCHANT_SUBSCRIPTION_MISSING' });
+            }
             const templateId = templateIdByKey[message.templateId];
             if (!templateId) throw Object.assign(new Error('订阅模板未配置'), { code: 'SUBSCRIBE_TEMPLATE_NOT_CONFIGURED' });
             const payload = {

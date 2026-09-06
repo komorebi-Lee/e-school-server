@@ -121,7 +121,7 @@ function notifications(){
   const stats=state.data.subscribeStats||{queued:0,sent:0,failed:0};
   const messages=(state.data.subscribeMessages||[]).filter(match).slice(0,50);
   const queueRows=messages.map(x=>`<tr><td><strong>${esc(x.title)}</strong><small>${esc(x.templateId)}</small></td><td>${esc(x.content)}</td><td><span class="badge ${x.status==='SENT'?'green':x.status==='FAILED'?'red':'orange'}">${x.status==='SENT'?'已发送':x.status==='FAILED'?'发送失败':'待发送'}</span>${x.error?`<small>${esc(x.error)}</small>`:''}</td><td>${fmtDate(x.createdAt)}</td><td>${fmtDate(x.sentAt)}</td></tr>`).join('');
-  return `<div class="metric-grid">${metric('待发送',stats.queued||0,'商家与用户提醒队列')}${metric('已发送',stats.sent||0,'微信已确认')}${metric('失败',stats.failed||0,'可修正配置后重试')}${metric('订阅用户',state.data.orderMessageSubscribers||0,'已开启订单提醒')}</div>
+  return `<div class="metric-grid">${metric('待发送',stats.queued||0,'商家与用户提醒队列')}${metric('已发送',stats.sent||0,'微信已确认')}${metric('失败',stats.failed||0,'可修正配置后重试')}${metric('订阅用户',(state.data.orderMessageSubscribers||0)+(state.data.serviceMessageSubscribers||0),'订单与服务分提醒')}</div>
   <section class="panel"><div class="panel-head"><h2>订阅消息队列</h2><span>服务分与订单进度提醒</span></div>
     <div class="page-actions"><p>仅发送已配置模板的消息，失败原因会保留在队列中。</p><div><button id="dispatchSubscribe" class="primary">派发前 20 条</button></div></div>
     <div class="table-wrap"><table><thead><tr><th>消息</th><th>内容</th><th>发送状态</th><th>创建时间</th><th>发送时间</th></tr></thead><tbody>${queueRows||'<tr><td colspan="5" class="empty">暂无订阅消息</td></tr>'}</tbody></table></div>
