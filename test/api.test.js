@@ -1364,6 +1364,22 @@ test('admin after-sale closure refunds paid orders and notifies users', async ()
   assert.ok(notifications.body.data.some((item) => item.type === 'ORDER' && item.title === '订单已退款'));
 });
 
+test('admin overview includes a seven day operations report', async () => {
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const overview = await api('/api/admin/overview', {
+    headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
+  });
+  assert.equal(overview.response.status, 200);
+  const report = overview.body.data.operationsReport;
+  assert.equal(report.reports.length, 7);
+  assert.equal(report.reports[0].date, new Date().toISOString().slice(0, 10));
+  assert.ok(report.totals.ebikeOrders >= 1);
+  assert.ok(report.totals.paymentInCents > 0);
+});
+
 test('merchant workspace receives operational notifications and metrics', async () => {
   const userSession = await loginWeChat('merchant_notify_user');
   const merchantSession = await loginWeChat('merchant_demo');

@@ -1488,6 +1488,77 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
     return serviceScoreStages[merchantServiceStage(data, merchantId)].exposureWeight;
   }
 
+  function dailyOperationsReports(data, days = 7) {
+    const count = Number.isInteger(days) && days >= 1 && days <= 90 ? days : 7;
+    const dayOf = (value) => String(value || '').slice(0, 10);
+    const now = new Date().toISOString().slice(0, 10);
+    const byDate = new Map();
+    for (let index = 0; index < count; index += 1) {
+      const date = new Date(`${now}T00:00:00.000Z`);
+      date.setUTCDate(date.getUTCDate() - index);
+      const key = date.toISOString().slice(0, 10);
+      byDate.set(key, {
+        date: key,
+        ebikeOrders: 0,
+        phoneCardOrders: 0,
+        rechargeOrders: 0,
+        plateApplications: 0,
+        completedEbikeOrders: 0,
+        afterSalesCreated: 0,
+        afterSalesClosed: 0,
+        reviewsCreated: 0,
+        paymentInCents: 0,
+        refundOutCents: 0,
+        payoutOutCents: 0,
+        netInCents: 0
+      });
+    }
+    const add = (value, field, amount = 1) => {
+      const report = byDate.get(dayOf(value));
+      if (report) report[field] += amount;
+    };
+    for (const item of data.orders || []) {
+      add(item.createdAt, 'ebikeOrders');
+      if (item.status === 'COMPLETED') add(orderCompletedAt(item), 'completedEbikeOrders');
+    }
+    for (const item of data.phoneCardOrders || []) add(item.createdAt, 'phoneCardOrders');
+    for (const item of data.rechargeOrders || []) add(item.createdAt, 'rechargeOrders');
+    for (const item of data.plateApplications || []) add(item.createdAt, 'plateApplications');
+    for (const item of data.afterSales || []) {
+      add(item.createdAt, 'afterSalesCreated');
+      if (item.status === 'CLOSED') add(item.updatedAt, 'afterSalesClosed');
+    }
+    for (const item of data.productReviews || []) add(item.createdAt, 'reviewsCreated');
+    for (const item of data.financeEvents || []) {
+      if (item.eventType === 'PAYMENT') add(item.createdAt, 'paymentInCents', item.amountInCents);
+      if (item.eventType === 'REFUND') add(item.createdAt, 'refundOutCents', Math.abs(item.amountInCents));
+      if (item.eventType === 'PAYOUT') add(item.createdAt, 'payoutOutCents', Math.abs(item.amountInCents));
+      add(item.createdAt, 'netInCents', item.amountInCents);
+    }
+    const reports = [...byDate.values()];
+    return {
+      reports,
+      totals: reports.reduce((sum, item) => ({
+        ebikeOrders: sum.ebikeOrders + item.ebikeOrders,
+        phoneCardOrders: sum.phoneCardOrders + item.phoneCardOrders,
+        rechargeOrders: sum.rechargeOrders + item.rechargeOrders,
+        plateApplications: sum.plateApplications + item.plateApplications,
+        completedEbikeOrders: sum.completedEbikeOrders + item.completedEbikeOrders,
+        afterSalesCreated: sum.afterSalesCreated + item.afterSalesCreated,
+        afterSalesClosed: sum.afterSalesClosed + item.afterSalesClosed,
+        reviewsCreated: sum.reviewsCreated + item.reviewsCreated,
+        paymentInCents: sum.paymentInCents + item.paymentInCents,
+        refundOutCents: sum.refundOutCents + item.refundOutCents,
+        payoutOutCents: sum.payoutOutCents + item.payoutOutCents,
+        netInCents: sum.netInCents + item.netInCents
+      }), {
+        ebikeOrders: 0, phoneCardOrders: 0, rechargeOrders: 0, plateApplications: 0,
+        completedEbikeOrders: 0, afterSalesCreated: 0, afterSalesClosed: 0, reviewsCreated: 0,
+        paymentInCents: 0, refundOutCents: 0, payoutOutCents: 0, netInCents: 0
+      })
+    };
+  }
+
   // 学生也要看得到店铺服务分，否则分数只是内部指标。
   function withMerchantScore(product, merchants = []) {
     const merchant = merchants.find((item) => item.id === product.merchantId);
@@ -2625,6 +2696,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             slaAlerts: data.slaAlerts || [],
             slaSummary: slaSummary(data.slaAlerts || []),
             patrolState: data.patrolState || {},
+            operationsReport: dailyOperationsReports(data, 7),
             merchantScores: (data.merchants || [])
               .filter((merchant) => merchant.status === 'APPROVED' && merchant.serviceScore)
               .sort((a, b) => a.serviceScore.score - b.serviceScore.score)
