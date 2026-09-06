@@ -1451,6 +1451,23 @@ test('merchant workspace receives operational notifications and metrics', async 
   assert.equal(merchantLogin.response.status, 200);
   const merchantHeaders = { authorization: `Bearer ${merchantLogin.body.data.token}` };
 
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  const complianceConfig = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({
+      productComplianceLowReviewThreshold: 2,
+      productComplianceReviewSampleThreshold: 2,
+      productComplianceAverageRatingThreshold: 4
+    })
+  });
+  assert.equal(complianceConfig.response.status, 200);
+  assert.equal(complianceConfig.body.data.productComplianceLowReviewThreshold, 2);
+  assert.equal(complianceConfig.body.data.productComplianceAverageRatingThreshold, 4);
+
   const before = await api('/api/merchant/notifications', { headers: merchantHeaders });
   assert.equal(before.response.status, 200);
 
@@ -2396,6 +2413,12 @@ test('service score cases support appeal review, rectification and subscription 
 });
 
 test('low quality products are auto delisted and can be restored after compliance review', async () => {
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+
   const merchantSession = await loginWeChat('merchant_demo');
   const merchantLogin = await api('/api/merchant/login', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
@@ -2415,7 +2438,7 @@ test('low quality products are auto delisted and can be restored after complianc
     delete product.autoDelistRule;
     delete product.autoDelistRestoredBy;
     delete product.autoDelistRestoredCaseId;
-    for (let index = 0; index < 3; index += 1) {
+    for (let index = 0; index < 2; index += 1) {
       data.productReviews.unshift({
         id: `review_auto_delist_${index}`, productId: 'prod_ebike_001', rating: 1,
         content: `自动下架风控测试差评 ${index}`, customerName: '风控同学', purchaseVerified: true,
@@ -2430,7 +2453,8 @@ test('low quality products are auto delisted and can be restored after complianc
   const delisted = merchantOverview.body.data.products.find((item) => item.id === 'prod_ebike_001');
   assert.equal(delisted.active, false);
   assert.equal(delisted.autoDelistRule, 'LOW_QUALITY');
-  assert.ok(delisted.autoDelistEvidence.lowRatingCount >= 3);
+  assert.equal(delisted.autoDelistEvidence.lowRatingCount, 2);
+  assert.equal(delisted.autoDelistEvidence.thresholds.lowReviewLimit, 2);
 
   // 清理测试注入的低分评价，避免恢复后再次触发同一条风控规则。
   store.update((data) => {
@@ -2447,11 +2471,6 @@ test('low quality products are auto delisted and can be restored after complianc
     });
   });
 
-  const adminLogin = await api('/api/admin/login', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
-  });
-  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
   const adminOverview = await api('/api/admin/overview', { headers: adminHeaders });
   assert.ok(adminOverview.body.data.autoDelistedProducts.some((item) => item.id === 'prod_ebike_001'));
 
@@ -2464,6 +2483,22 @@ test('low quality products are auto delisted and can be restored after complianc
 
   store.update((data) => {
     data.productReviews = data.productReviews.filter((item) => item.id !== 'review_auto_delist_hold');
+  });
+
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({
+      productComplianceLowReviewThreshold: 3,
+      productComplianceReviewSampleThreshold: 3,
+      productComplianceAverageRatingThreshold: 3.5
+    })
+  });
+
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_001');
+    product.active = true;
+    product.stock = 8;
+    product.reservedStock = 0;
   });
 
   const refreshed = await api('/api/products?category=E_BIKE_NEW');

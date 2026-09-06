@@ -1730,10 +1730,19 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       ? reviews.reduce((sum, review) => sum + Number(review.rating || 0), 0) / reviews.length
       : 0;
     const violationCount = lowRatingCount;
-    const violation = violationCount >= 3 || (reviews.length >= 3 && averageRating > 0 && averageRating < 3.5);
+    const lowReviewLimit = Math.max(1, Number(data?.adminSettings?.productComplianceLowReviewThreshold ?? 3));
+    const reviewSampleLimit = Math.max(2, Number(data?.adminSettings?.productComplianceReviewSampleThreshold ?? 3));
+    const averageLimit = Math.max(1, Math.min(4.5, Number(data?.adminSettings?.productComplianceAverageRatingThreshold ?? 3.5)));
+    const violation = violationCount >= lowReviewLimit
+      || (reviews.length >= reviewSampleLimit && averageRating > 0 && averageRating < averageLimit);
     return {
       reviewCount: reviews.length,
       lowRatingCount,
+      thresholds: {
+        lowReviewLimit,
+        reviewSampleLimit,
+        averageLimit
+      },
       averageRating: Math.round(averageRating * 10) / 10,
       violationCount,
       violation
@@ -1741,10 +1750,11 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
   }
 
   function productComplianceReason(metrics) {
-    if (metrics.lowRatingCount >= 3) {
+    const thresholds = metrics.thresholds || {};
+    if (metrics.lowRatingCount >= (thresholds.lowReviewLimit || 3)) {
       return `低分评价达到 ${metrics.lowRatingCount} 条`;
     }
-    return `${metrics.reviewCount} 条已购评价均分 ${metrics.averageRating}，低于 3.5 分`;
+    return `${metrics.reviewCount} 条已购评价均分 ${metrics.averageRating}，低于 ${thresholds.averageLimit || 3.5} 分`;
   }
 
   function enforceProductCompliance(data, now = new Date().toISOString()) {
@@ -3913,6 +3923,21 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (restricted >= limited) throw new ApiError(400, 'VALIDATION_ERROR', '暂停上新阈值必须低于限流阈值');
             current.serviceScoreLimitedThreshold = limited;
             current.serviceScoreRestrictedThreshold = restricted;
+          }
+          if (body.productComplianceLowReviewThreshold !== undefined) {
+            const value = Number(body.productComplianceLowReviewThreshold);
+            if (!Number.isInteger(value) || value < 1 || value > 20) throw new ApiError(400, 'VALIDATION_ERROR', '低分下架阈值需为 1-20 条');
+            current.productComplianceLowReviewThreshold = value;
+          }
+          if (body.productComplianceReviewSampleThreshold !== undefined) {
+            const value = Number(body.productComplianceReviewSampleThreshold);
+            if (!Number.isInteger(value) || value < 2 || value > 20) throw new ApiError(400, 'VALIDATION_ERROR', '均分评价样本量需为 2-20 条');
+            current.productComplianceReviewSampleThreshold = value;
+          }
+          if (body.productComplianceAverageRatingThreshold !== undefined) {
+            const value = Number(body.productComplianceAverageRatingThreshold);
+            if (!Number.isFinite(value) || value < 1 || value > 4.5) throw new ApiError(400, 'VALIDATION_ERROR', '均分下架阈值需为 1-4.5 分');
+            current.productComplianceAverageRatingThreshold = Math.round(value * 10) / 10;
           }
           for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'afterSaleTemplateId']) {
             if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);
