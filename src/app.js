@@ -1076,10 +1076,13 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
       lastResolved: resolved.length,
       lastOpen: stillOpen.length
     };
+    // 预警变化会直接影响服务分，所以巡检末尾统一重算一次分档。
+    const scoreChanges = refreshMerchantScores(data, now);
+    data.patrolState.lastScoreChanges = scoreChanges.length;
     if (created.length || resolved.length || escalated.length) {
       addAudit(data, '运营巡检执行', `新增 ${created.length} · 升级 ${escalated.length} · 关闭 ${resolved.length}`);
     }
-    return { created, escalated, resolved, open: stillOpen.length };
+    return { created, escalated, resolved, open: stillOpen.length, scoreChanges };
   }
 
   function notifySlaAlert(data, alert) {
@@ -1119,6 +1122,248 @@ function createApp({ store, wechatAuth = exchangeWeChatCode }) {
       merchantOwnedCount: open.filter((alert) => alert.ownerRole === 'MERCHANT').length,
       platformOwnedCount: open.filter((alert) => alert.ownerRole === 'PLATFORM').length,
       resolvedCount: alerts.length - open.length
+    };
+  }
+
+  // 商家与运营看板需要当下的分数，读接口先重算一次再返回。
+  function refreshScoresNow() {
+    return store.update((data) => refreshMerchantScores(data, new Date().toISOString()));
+  }
+
+  // ===== 商家服务分 =====
+  // 分数只由平台已经记录的事实推导：交付是否按时、售后多不多、学生评价好不好、超时预警有没有堆积。
+  const serviceScoreWeights = [
+    { key: 'DELIVERY', label: '履约及时', weight: 30 },
+    { key: 'AFTER_SALE', label: '售后表现', weight: 25 },
+    { key: 'REVIEW', label: '学生评价', weight: 30 },
+    { key: 'SLA', label: '超时预警', weight: 15 }
+  ];
+
+  // 分档不是标签，而是真实处置：曝光权重影响商品排序，是否自动上架影响商家上新。
+  const serviceScoreStages = {
+    NORMAL: { label: '正常经营', exposureWeight: 1, autoPublish: true },
+    LIMITED: { label: '限流整改', exposureWeight: 0.6, autoPublish: false },
+    RESTRICTED: { label: '暂停上新', exposureWeight: 0.2, autoPublish: false }
+  };
+
+  const serviceScoreGrades = [
+    { grade: 'EXCELLENT', label: '优秀', min: 90 },
+    { grade: 'GOOD', label: '良好', min: 80 },
+    { grade: 'WATCH', label: '观察', min: 70 },
+    { grade: 'WARNING', label: '预警', min: 60 },
+    { grade: 'RISK', label: '高风险', min: 0 }
+  ];
+
+  function scoreThresholds(data) {
+    const limitedRaw = Number(data?.adminSettings?.serviceScoreLimitedThreshold);
+    const limited = Number.isInteger(limitedRaw) && limitedRaw >= 50 && limitedRaw <= 100 ? limitedRaw : 80;
+    const restrictedRaw = Number(data?.adminSettings?.serviceScoreRestrictedThreshold);
+    const restricted = Number.isInteger(restrictedRaw) && restrictedRaw >= 0 && restrictedRaw < limited ? restrictedRaw : Math.min(60, limited - 1);
+    return { limited, restricted };
+  }
+
+  function clampScore(value) {
+    return Math.max(0, Math.min(100, Math.round(value)));
+  }
+
+  function resolveOrderMerchantId(data, order) {
+    return order.collaboration?.merchantId
+      || order.items?.[0]?.merchantId
+      || (data.products || []).find((product) => product.id === order.items?.[0]?.productId)?.merchantId
+      || '';
+  }
+
+  // 交付时间优先取协作流水里的完成事件，避免后续改单把履约时长算宽。
+  function orderCompletedAt(order) {
+    const events = [...(order.collaboration?.handoffs || [])].reverse();
+    const done = events.find((event) => event.action === 'COMPLETE' || event.action === 'AFTER_SALE_CLOSED');
+    return done?.createdAt || order.updatedAt || order.createdAt;
+  }
+
+  function computeMerchantScore(data, merchant, now = new Date().toISOString()) {
+    const deliveryHours = slaHours(data, 'deliveryResponseHours', 24);
+    const productIds = new Set((data.products || []).filter((item) => item.merchantId === merchant.id).map((item) => item.id));
+    const orders = (data.orders || []).filter((order) => resolveOrderMerchantId(data, order) === merchant.id
+      || (order.items || []).some((item) => productIds.has(item.productId)));
+    const paidOrders = orders.filter((order) => ['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(order.status));
+    const completedOrders = orders.filter((order) => order.status === 'COMPLETED' && order.paidAt);
+    let onTimeCount = 0;
+    let lateCount = 0;
+    for (const order of completedOrders) {
+      const usedHours = (new Date(orderCompletedAt(order)).getTime() - new Date(order.paidAt).getTime()) / 3600000;
+      if (Number.isFinite(usedHours) && usedHours <= deliveryHours) onTimeCount += 1;
+      else lateCount += 1;
+    }
+
+    const openAlerts = (data.slaAlerts || []).filter((alert) => alert.status !== 'RESOLVED'
+      && alert.ownerRole === 'MERCHANT' && alert.merchantId === merchant.id);
+    const overdueAlerts = openAlerts.filter((alert) => alert.level === 'OVERDUE');
+    const overdueDeliveryAlerts = overdueAlerts.filter((alert) => alert.ruleKey === 'ORDER_DELIVERY').length;
+
+    // 没有成交记录的新商家给 92 分起步，不用零分把新店直接压死。
+    const deliveryBase = completedOrders.length ? (onTimeCount / completedOrders.length) * 100 : 92;
+    const deliveryScore = clampScore(deliveryBase - overdueDeliveryAlerts * 8);
+
+    const afterSales = (data.afterSales || []).filter((record) => orders.some((order) => order.id === record.orderId));
+    const openAfterSales = afterSales.filter((record) => record.status !== 'CLOSED');
+    const overdueAfterSales = afterSales.filter((record) => record.status !== 'CLOSED'
+      && record.responseDueAt && record.responseDueAt < now);
+    const afterSaleRate = paidOrders.length ? afterSales.length / paidOrders.length : 0;
+    const afterSaleScore = clampScore(100 - afterSaleRate * 120 - overdueAfterSales.length * 12 - openAfterSales.length * 4);
+
+    const reviews = (data.productReviews || []).filter((review) => productIds.has(review.productId)
+      && review.visibility !== 'HIDDEN' && review.purchaseVerified !== false);
+    const averageRating = reviews.length
+      ? reviews.reduce((sum, review) => sum + (Number(review.rating) || 0), 0) / reviews.length
+      : 0;
+    const lowRatings = reviews.filter((review) => Number(review.rating) <= 2).length;
+    const reviewScore = reviews.length ? clampScore((averageRating / 5) * 100 - lowRatings * 5) : 85;
+
+    const slaScore = clampScore(100 - overdueAlerts.length * 20 - (openAlerts.length - overdueAlerts.length) * 8);
+
+    const rawScores = { DELIVERY: deliveryScore, AFTER_SALE: afterSaleScore, REVIEW: reviewScore, SLA: slaScore };
+    const totalWeight = serviceScoreWeights.reduce((sum, item) => sum + item.weight, 0);
+    const weighted = serviceScoreWeights.reduce((sum, item) => sum + rawScores[item.key] * item.weight, 0) / totalWeight;
+    const manualAdjustment = Math.max(-20, Math.min(20, Number(merchant.serviceScore?.manualAdjustment || 0)));
+    const score = clampScore(weighted + manualAdjustment);
+    const thresholds = scoreThresholds(data);
+    const stage = score >= thresholds.limited ? 'NORMAL' : (score >= thresholds.restricted ? 'LIMITED' : 'RESTRICTED');
+    const gradeEntry = serviceScoreGrades.find((item) => score >= item.min) || serviceScoreGrades[serviceScoreGrades.length - 1];
+    const details = {
+      DELIVERY: completedOrders.length
+        ? `已完成 ${completedOrders.length} 单，按时 ${onTimeCount} 单、超时 ${lateCount} 单`
+        : '暂无完成订单，按新商家基准计分',
+      AFTER_SALE: afterSales.length
+        ? `售后 ${afterSales.length} 单，未关闭 ${openAfterSales.length} 单、响应逾期 ${overdueAfterSales.length} 单`
+        : '暂无售后工单',
+      REVIEW: reviews.length
+        ? `${reviews.length} 条已购评价，均分 ${(Math.round(averageRating * 10) / 10).toFixed(1)}，低分 ${lowRatings} 条`
+        : '暂无已购评价，按中性基准计分',
+      SLA: openAlerts.length
+        ? `未关闭预警 ${openAlerts.length} 条，其中已超时 ${overdueAlerts.length} 条`
+        : '无未关闭的履约预警'
+    };
+    return {
+      score,
+      grade: gradeEntry.grade,
+      gradeLabel: gradeEntry.label,
+      stage,
+      stageLabel: serviceScoreStages[stage].label,
+      exposureWeight: serviceScoreStages[stage].exposureWeight,
+      autoPublish: serviceScoreStages[stage].autoPublish,
+      manualAdjustment,
+      thresholds,
+      breakdown: serviceScoreWeights.map((item) => ({
+        key: item.key,
+        label: item.label,
+        weight: item.weight,
+        score: rawScores[item.key],
+        detail: details[item.key]
+      })),
+      metrics: {
+        paidOrderCount: paidOrders.length,
+        completedOrderCount: completedOrders.length,
+        onTimeCount,
+        lateCount,
+        afterSaleCount: afterSales.length,
+        openAfterSaleCount: openAfterSales.length,
+        overdueAfterSaleCount: overdueAfterSales.length,
+        reviewCount: reviews.length,
+        averageRating: Math.round(averageRating * 10) / 10,
+        lowRatingCount: lowRatings,
+        openAlertCount: openAlerts.length,
+        overdueAlertCount: overdueAlerts.length
+      },
+      updatedAt: now
+    };
+  }
+
+  function addMerchantScoreLog(data, merchant, entry, now) {
+    if (!Array.isArray(data.merchantScoreLogs)) data.merchantScoreLogs = [];
+    const log = {
+      id: `msl_${randomUUID()}`,
+      merchantId: merchant.id,
+      merchantName: merchant.name,
+      score: merchant.serviceScore?.score ?? 0,
+      stage: merchant.serviceScore?.stage || 'NORMAL',
+      createdAt: now,
+      ...entry
+    };
+    data.merchantScoreLogs.unshift(log);
+    data.merchantScoreLogs = data.merchantScoreLogs.slice(0, 300);
+    return log;
+  }
+
+  // 分档变化才通知和留痕，避免每轮巡检都刷一遍相同结论。
+  function refreshMerchantScores(data, now = new Date().toISOString()) {
+    const changes = [];
+    for (const merchant of data.merchants || []) {
+      if (merchant.status !== 'APPROVED') continue;
+      const previous = merchant.serviceScore || null;
+      merchant.serviceScore = computeMerchantScore(data, merchant, now);
+      if (previous && previous.stage === merchant.serviceScore.stage) continue;
+      const fromStage = previous?.stage || '';
+      const toStage = merchant.serviceScore.stage;
+      const improved = Boolean(previous) && serviceScoreStages[toStage].exposureWeight > serviceScoreStages[fromStage]?.exposureWeight;
+      const note = !previous
+        ? `服务分初始化为 ${merchant.serviceScore.score} 分（${merchant.serviceScore.stageLabel}）`
+        : `服务分 ${previous.score} → ${merchant.serviceScore.score}，处置从${serviceScoreStages[fromStage]?.label || fromStage}调整为${merchant.serviceScore.stageLabel}`;
+      addMerchantScoreLog(data, merchant, { type: 'STAGE_CHANGE', fromStage, toStage, note }, now);
+      if (previous) {
+        const consequence = toStage === 'RESTRICTED'
+          ? '已暂停新增商品，商品曝光大幅降低，请尽快处理超时与售后工单'
+          : toStage === 'LIMITED'
+            ? '商品曝光已降权，新增商品需平台复核后才会上架'
+            : '商品曝光与上新已恢复正常';
+        notifyMerchant(data, merchant.id, 'SCORE', improved ? '服务分已恢复' : '服务分下降', `${note}。${consequence}。`);
+      }
+      changes.push({ merchantId: merchant.id, fromStage, toStage, score: merchant.serviceScore.score });
+    }
+    return changes;
+  }
+
+  function merchantServiceStage(data, merchantId) {
+    if (!merchantId) return 'NORMAL';
+    const merchant = (data.merchants || []).find((item) => item.id === merchantId);
+    const stage = merchant?.serviceScore?.stage;
+    return serviceScoreStages[stage] ? stage : 'NORMAL';
+  }
+
+  function merchantExposureWeight(data, merchantId) {
+    return serviceScoreStages[merchantServiceStage(data, merchantId)].exposureWeight;
+  }
+
+  // 学生也要看得到店铺服务分，否则分数只是内部指标。
+  function withMerchantScore(product, merchants = []) {
+    const merchant = merchants.find((item) => item.id === product.merchantId);
+    const serviceScore = merchant?.serviceScore;
+    return {
+      ...product,
+      merchantScore: serviceScore
+        ? { score: serviceScore.score, grade: serviceScore.grade, gradeLabel: serviceScore.gradeLabel, stage: serviceScore.stage }
+        : null
+    };
+  }
+
+  // 低分商家的商品整体后置，但同档内保持原有顺序，排序结果可预期。
+  function orderProductsByExposure(data, products) {
+    return products
+      .map((product, index) => ({ product, index, weight: merchantExposureWeight(data, product.merchantId) }))
+      .sort((a, b) => b.weight - a.weight || a.index - b.index)
+      .map((entry) => entry.product);
+  }
+
+  function serviceScoreSummary(merchants = []) {
+    const scored = merchants.filter((item) => item.status === 'APPROVED' && item.serviceScore);
+    const byStage = (stage) => scored.filter((item) => item.serviceScore.stage === stage).length;
+    return {
+      scoredCount: scored.length,
+      averageScore: scored.length
+        ? Math.round(scored.reduce((sum, item) => sum + item.serviceScore.score, 0) / scored.length)
+        : 0,
+      normalCount: byStage('NORMAL'),
+      limitedCount: byStage('LIMITED'),
+      restrictedCount: byStage('RESTRICTED')
     };
   }
 
@@ -1290,6 +1535,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (request.method === 'GET' && pathname === '/api/products') {
         sweepExpiredOrders();
+        sweepOperationsPatrol();
+        refreshScoresNow();
         const data = store.read();
         const products = data.products;
         const category = url.searchParams.get('category');
@@ -1299,7 +1546,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .filter((product) => !category || product.category === category)
           .filter((product) => !campusId || product.campusIds.includes(campusId))
           .filter((product) => !query || `${product.name} ${product.description}`.toLowerCase().includes(query));
-        return sendJson(response, 200, { data: items.map((product) => withAvailableStock(withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || []))), total: items.length, requestId });
+        // 服务分低的商家整体后置，让好服务真的能换到曝光。
+        const ranked = orderProductsByExposure(data, items);
+        return sendJson(response, 200, { data: ranked.map((product) => withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])), data.merchants || [])), total: ranked.length, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/api/recharge-promos') {
@@ -1314,17 +1563,34 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       const productMatch = pathname.match(/^\/api\/products\/([^/]+)$/);
       if (request.method === 'GET' && productMatch) {
         sweepExpiredOrders();
+        refreshScoresNow();
         const data = store.read();
         const product = data.products.find((item) => item.id === productMatch[1] && item.active);
         if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
         const settings = publicSettings(data.adminSettings);
-        const relatedProducts = data.products
+        const relatedProducts = orderProductsByExposure(data, data.products
           .filter((item) => item.active && item.id !== product.id && item.category === product.category)
+        )
           .slice(0, 3)
-          .map((item) => withAvailableStock(withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || [])));
+          .map((item) => withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || [])), data.merchants || []));
+        const productMerchant = (data.merchants || []).find((item) => item.id === product.merchantId);
         return sendJson(response, 200, {
           data: {
-            ...withAvailableStock(withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])),
+            ...withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])), data.merchants || []),
+            merchantServiceScore: productMerchant?.serviceScore
+              ? {
+                score: productMerchant.serviceScore.score,
+                grade: productMerchant.serviceScore.grade,
+                gradeLabel: productMerchant.serviceScore.gradeLabel,
+                stage: productMerchant.serviceScore.stage,
+                stageLabel: productMerchant.serviceScore.stageLabel,
+                onTimeRate: productMerchant.serviceScore.metrics?.completedOrderCount
+                  ? Math.round((productMerchant.serviceScore.metrics.onTimeCount / productMerchant.serviceScore.metrics.completedOrderCount) * 100)
+                  : null,
+                reviewCount: productMerchant.serviceScore.metrics?.reviewCount || 0,
+                averageRating: productMerchant.serviceScore.metrics?.averageRating || 0
+              }
+              : null,
             reviews: (data.productReviews || [])
               .filter((review) => review.productId === product.id && review.visibility !== 'HIDDEN')
               .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -1564,6 +1830,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         sweepExpiredOrders();
         sweepMaturedSettlements();
         sweepOperationsPatrol();
+        refreshScoresNow();
         const data = store.read();
             const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
             if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
@@ -1617,6 +1884,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, {
           data: {
             merchant: merchantPublic(merchant),
+            serviceScore: merchant.serviceScore || null,
             metrics: {
               revenueInCents,
               orderCount: orders.length,
@@ -1637,7 +1905,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             reviews,
             settlements,
             payoutRequests,
-            slaAlerts
+            slaAlerts,
+            pendingPublishProducts: products
+              .filter((product) => product.publishReviewStatus === 'PENDING_REVIEW')
+              .map((product) => ({ id: product.id, name: product.name, publishReviewNote: product.publishReviewNote || '' }))
           },
           requestId
         });
@@ -1694,10 +1965,16 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const product = store.update((data) => {
           const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
           if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号不可用');
+          const stage = merchantServiceStage(data, merchant.id);
+          if (stage === 'RESTRICTED') {
+            throw new ApiError(409, 'MERCHANT_SCORE_RESTRICTED', `服务分 ${merchant.serviceScore?.score ?? 0} 分已触发暂停上新，请先处理超时与售后工单`);
+          }
           const priceInCents = requirePositiveInteger(body.priceInCents, 'priceInCents');
           const stock = requirePositiveInteger(body.stock, 'stock', { max: 999999 });
           const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : '';
           if (imageUrl && !imageUrl.startsWith('/api/uploads/')) throw new ApiError(400, 'VALIDATION_ERROR', '商品图片必须来自平台上传目录');
+          // 限流整改期间新增商品先进入待复核，避免低分商家继续放量。
+          const autoPublish = serviceScoreStages[stage].autoPublish;
           const item = {
             id: `prod_${randomUUID()}`,
             name: requireString(body.name, 'name', { maxLength: 80 }),
@@ -1708,10 +1985,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             campusIds: ['campus_demo'],
             imageUrl,
             merchantId: merchant.id,
-            active: body.active !== false
+            active: autoPublish ? body.active !== false : false,
+            publishReviewStatus: autoPublish ? 'AUTO' : 'PENDING_REVIEW',
+            publishReviewNote: autoPublish ? '' : '商家服务分处于限流整改，商品需平台复核后上架'
           };
           data.products.unshift(item);
-          addAudit(data, '商家新增商品', item.name);
+          addAudit(data, autoPublish ? '商家新增商品' : '商家新增商品待复核', item.name);
           return item;
         });
         return sendJson(response, 201, { data: product, requestId });
@@ -1723,6 +2002,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const product = store.update((data) => {
           const item = data.products.find((row) => row.id === merchantProductMatch[1] && row.merchantId === merchantSession.merchantId);
           if (!item) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          const stage = merchantServiceStage(data, merchantSession.merchantId);
+          // 待复核和暂停上新期间商家不能自己把商品重新挂上架。
+          if (body.active === true && item.active === false) {
+            if (item.publishReviewStatus === 'PENDING_REVIEW') throw new ApiError(409, 'PRODUCT_REVIEW_PENDING', '该商品正在平台复核，通过后会自动上架');
+            if (stage === 'RESTRICTED') throw new ApiError(409, 'MERCHANT_SCORE_RESTRICTED', '服务分过低已暂停上新，请先完成整改');
+          }
           if (body.name !== undefined) item.name = requireString(body.name, 'name', { maxLength: 80 });
           if (body.description !== undefined) item.description = requireString(body.description, 'description', { maxLength: 300 });
           if (body.imageUrl !== undefined) {
@@ -1935,6 +2220,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         sweepExpiredOrders();
         sweepMaturedSettlements();
         sweepOperationsPatrol();
+        refreshScoresNow();
         const data = store.read();
         const leads = data.leads || [];
         const revenueInCents = data.orders.filter((item) => item.status !== 'PENDING_PAYMENT' && item.status !== 'CANCELLED').reduce((sum, order) => sum + (order.totalInCents || 0), 0)
@@ -1980,6 +2266,22 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             slaAlerts: data.slaAlerts || [],
             slaSummary: slaSummary(data.slaAlerts || []),
             patrolState: data.patrolState || {},
+            merchantScores: (data.merchants || [])
+              .filter((merchant) => merchant.status === 'APPROVED' && merchant.serviceScore)
+              .sort((a, b) => a.serviceScore.score - b.serviceScore.score)
+              .map((merchant) => ({ merchantId: merchant.id, merchantName: merchant.name, ...merchant.serviceScore })),
+            merchantScoreSummary: serviceScoreSummary(data.merchants || []),
+            merchantScoreLogs: (data.merchantScoreLogs || []).slice(0, 50),
+            pendingPublishProducts: (data.products || [])
+              .filter((product) => product.publishReviewStatus === 'PENDING_REVIEW')
+              .map((product) => ({
+                id: product.id,
+                name: product.name,
+                merchantId: product.merchantId,
+                merchantName: (data.merchants || []).find((item) => item.id === product.merchantId)?.name || '',
+                priceInCents: product.priceInCents,
+                publishReviewNote: product.publishReviewNote || ''
+              })),
             settings: data.adminSettings,
             auditLogs: data.auditLogs
             ,leads
@@ -2485,6 +2787,101 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       const adminProductMatch = pathname.match(/^\/api\/admin\/products\/([^/]+)$/);
+
+      // 平台复核限流商家的新商品：通过即上架，驳回保持下架并给出原因。
+      const adminProductReviewMatch = pathname.match(/^\/api\/admin\/products\/([^/]+)\/publish-review$/);
+      if (request.method === 'POST' && adminProductReviewMatch) {
+        const body = await readJson(request);
+        const decision = requireString(body.decision, 'decision', { maxLength: 20 });
+        if (!['APPROVED', 'REJECTED'].includes(decision)) throw new ApiError(400, 'VALIDATION_ERROR', 'decision 需为 APPROVED 或 REJECTED');
+        const note = typeof body.note === 'string' ? body.note.trim().slice(0, 200) : '';
+        if (decision === 'REJECTED' && !note) throw new ApiError(400, 'VALIDATION_ERROR', '驳回需要填写原因');
+        const updated = store.update((data) => {
+          const product = data.products.find((item) => item.id === adminProductReviewMatch[1]);
+          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          if (product.publishReviewStatus !== 'PENDING_REVIEW') throw new ApiError(409, 'PRODUCT_REVIEW_NOT_PENDING', '该商品不在待复核状态');
+          const now = new Date().toISOString();
+          product.publishReviewStatus = decision;
+          product.publishReviewNote = note || (decision === 'APPROVED' ? '平台复核通过' : '');
+          product.active = decision === 'APPROVED';
+          product.updatedAt = now;
+          addAudit(data, decision === 'APPROVED' ? '复核通过商家商品' : '复核驳回商家商品', product.name);
+          notifyMerchant(data, product.merchantId, 'SCORE', decision === 'APPROVED' ? '商品复核通过' : '商品复核未通过',
+            `${product.name}${decision === 'APPROVED' ? ' 已上架。' : ` 未通过复核：${note}`}`);
+          return product;
+        });
+        return sendJson(response, 200, { data: updated, requestId });
+      }
+
+      // 服务分列表让运营一眼看到谁在被限流、限流原因是什么。
+      if (request.method === 'GET' && pathname === '/api/admin/merchant-scores') {
+        sweepOperationsPatrol();
+        const refreshed = store.update((data) => {
+          refreshMerchantScores(data, new Date().toISOString());
+          return data.merchants || [];
+        });
+        const data = store.read();
+        const stageFilter = url.searchParams.get('stage');
+        const items = refreshed
+          .filter((merchant) => merchant.status === 'APPROVED')
+          .filter((merchant) => !stageFilter || merchant.serviceScore?.stage === stageFilter)
+          .sort((a, b) => (a.serviceScore?.score ?? 0) - (b.serviceScore?.score ?? 0))
+          .map((merchant) => ({
+            merchantId: merchant.id,
+            merchantName: merchant.name,
+            category: merchant.category,
+            ...merchant.serviceScore
+          }));
+        return sendJson(response, 200, {
+          data: items,
+          total: items.length,
+          summary: serviceScoreSummary(data.merchants || []),
+          scoreLogs: (data.merchantScoreLogs || []).slice(0, 50),
+          pendingProducts: (data.products || [])
+            .filter((product) => product.publishReviewStatus === 'PENDING_REVIEW')
+            .map((product) => ({
+              id: product.id,
+              name: product.name,
+              merchantId: product.merchantId,
+              merchantName: (data.merchants || []).find((item) => item.id === product.merchantId)?.name || '',
+              priceInCents: product.priceInCents,
+              publishReviewNote: product.publishReviewNote || ''
+            })),
+          requestId
+        });
+      }
+
+      // 人工加减分用于处理线下事实（例如学校投诉、商家整改验收），并限制在 ±20 分内。
+      const adminScoreAdjustMatch = pathname.match(/^\/api\/admin\/merchant-scores\/([^/]+)\/adjust$/);
+      if (request.method === 'POST' && adminScoreAdjustMatch) {
+        const body = await readJson(request);
+        const adjustment = Number(body.adjustment);
+        if (!Number.isInteger(adjustment) || adjustment < -20 || adjustment > 20) throw new ApiError(400, 'VALIDATION_ERROR', '人工调整需为 -20 到 20 的整数');
+        const reason = requireString(body.reason, 'reason', { maxLength: 200 });
+        const result = store.update((data) => {
+          const merchant = (data.merchants || []).find((item) => item.id === adminScoreAdjustMatch[1]);
+          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          if (merchant.status !== 'APPROVED') throw new ApiError(409, 'MERCHANT_NOT_APPROVED', '只能为已通过审核的商家调整服务分');
+          const now = new Date().toISOString();
+          const previous = merchant.serviceScore || computeMerchantScore(data, merchant, now);
+          merchant.serviceScore = { ...previous, manualAdjustment: adjustment };
+          merchant.serviceScore = computeMerchantScore(data, merchant, now);
+          merchant.updatedAt = now;
+          addMerchantScoreLog(data, merchant, {
+            type: 'MANUAL_ADJUST',
+            fromStage: previous.stage,
+            toStage: merchant.serviceScore.stage,
+            adjustment,
+            note: `人工调整 ${adjustment > 0 ? '+' : ''}${adjustment} 分：${reason}`
+          }, now);
+          addAudit(data, '调整商家服务分', `${merchant.name} ${adjustment > 0 ? '+' : ''}${adjustment}`);
+          notifyMerchant(data, merchant.id, 'SCORE', '服务分已人工调整',
+            `平台调整 ${adjustment > 0 ? '+' : ''}${adjustment} 分：${reason}。当前 ${merchant.serviceScore.score} 分（${merchant.serviceScore.stageLabel}）。`);
+          return { merchantId: merchant.id, merchantName: merchant.name, serviceScore: merchant.serviceScore };
+        });
+        return sendJson(response, 200, { data: result, requestId });
+      }
+
       if (request.method === 'POST' && adminProductMatch) {
         const body = await readJson(request);
         const updated = store.update((data) => {
@@ -2570,6 +2967,20 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const minutes = Number(body.patrolIntervalMinutes);
             if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) throw new ApiError(400, 'VALIDATION_ERROR', '巡检间隔需为 1-1440 分钟');
             current.patrolIntervalMinutes = minutes;
+          }
+          // 两个阈值必须保持「限流线 > 暂停线」，否则分档会出现无法落入的区间。
+          if (body.serviceScoreLimitedThreshold !== undefined || body.serviceScoreRestrictedThreshold !== undefined) {
+            const limited = body.serviceScoreLimitedThreshold !== undefined
+              ? Number(body.serviceScoreLimitedThreshold)
+              : Number(current.serviceScoreLimitedThreshold ?? 80);
+            const restricted = body.serviceScoreRestrictedThreshold !== undefined
+              ? Number(body.serviceScoreRestrictedThreshold)
+              : Number(current.serviceScoreRestrictedThreshold ?? 60);
+            if (!Number.isInteger(limited) || limited < 50 || limited > 100) throw new ApiError(400, 'VALIDATION_ERROR', '限流阈值需为 50-100 分');
+            if (!Number.isInteger(restricted) || restricted < 0 || restricted > 100) throw new ApiError(400, 'VALIDATION_ERROR', '暂停上新阈值需为 0-100 分');
+            if (restricted >= limited) throw new ApiError(400, 'VALIDATION_ERROR', '暂停上新阈值必须低于限流阈值');
+            current.serviceScoreLimitedThreshold = limited;
+            current.serviceScoreRestrictedThreshold = restricted;
           }
           if (body.paymentTimeoutMinutes !== undefined) {
             const minutes = Number(body.paymentTimeoutMinutes);

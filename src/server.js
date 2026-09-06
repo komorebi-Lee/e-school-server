@@ -58,6 +58,7 @@ function ensureCollections(store) {
   const defaults = initialData();
   store.update((data) => {
     if (!Array.isArray(data.slaAlerts)) data.slaAlerts = defaults.slaAlerts;
+    if (!Array.isArray(data.merchantScoreLogs)) data.merchantScoreLogs = defaults.merchantScoreLogs;
     if (!data.patrolState || typeof data.patrolState !== 'object') data.patrolState = defaults.patrolState;
   });
 }

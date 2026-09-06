@@ -114,6 +114,89 @@ test('active product detail exposes merchant and stock', async () => {
   assert.equal(missing.body.error.code, 'PRODUCT_NOT_FOUND');
 });
 
+test('public product surfaces always include the latest merchant service score', async () => {
+  store.update((data) => {
+    for (const merchant of data.merchants || []) delete merchant.serviceScore;
+  });
+  const freshDetail = await api('/api/products/prod_ebike_001');
+  assert.equal(freshDetail.response.status, 200);
+  assert.ok(freshDetail.body.data.merchantServiceScore, '直接打开详情也应即时计算店铺服务分');
+
+  const list = await api('/api/products?category=E_BIKE_NEW');
+  assert.equal(list.response.status, 200);
+  assert.ok(list.body.data.every((item) => item.merchantScore), '商品列表应展示店铺服务分');
+  assert.ok(list.body.data.every((item) => Number.isInteger(item.merchantScore.score)));
+
+  const detail = await api('/api/products/prod_ebike_001');
+  assert.equal(detail.response.status, 200);
+  assert.ok(detail.body.data.merchantServiceScore, '商品详情应展示店铺服务分');
+  assert.equal(typeof detail.body.data.merchantServiceScore.score, 'number');
+  assert.equal(detail.body.data.merchantServiceScore.stage, 'NORMAL');
+});
+
+test('admin can adjust service score and review a limited merchant product', async () => {
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+
+  const scoreList = await api('/api/admin/merchant-scores', { headers: adminHeaders });
+  assert.equal(scoreList.response.status, 200);
+  const seeded = scoreList.body.data.find((item) => item.merchantId === 'merchant_001');
+  assert.ok(seeded);
+  assert.equal(seeded.stage, 'NORMAL');
+
+  const adjusted = await api('/api/admin/merchant-scores/merchant_001/adjust', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ adjustment: -20, reason: '模拟履约问题整改' })
+  });
+  assert.equal(adjusted.response.status, 200);
+  assert.equal(adjusted.body.data.serviceScore.manualAdjustment, -20);
+  assert.equal(adjusted.body.data.serviceScore.stage, 'LIMITED');
+
+  // 把限流阈值临时提高到 100，验证商家上新会进入平台复核队列。
+  const limitedSettings = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ serviceScoreLimitedThreshold: 100, serviceScoreRestrictedThreshold: 60 })
+  });
+  assert.equal(limitedSettings.response.status, 200);
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+  await api('/api/merchant/overview', { headers: merchantHeaders });
+  const pending = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ name: '服务分复核测试商品', category: 'LIFE_SERVICE', description: '平台复核流程测试', priceInCents: 1999, stock: 3 })
+  });
+  assert.equal(pending.response.status, 201);
+  assert.equal(pending.body.data.publishReviewStatus, 'PENDING_REVIEW');
+  assert.equal(pending.body.data.active, false);
+
+  const reviewed = await api(`/api/admin/products/${pending.body.data.id}/publish-review`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ decision: 'APPROVED' })
+  });
+  assert.equal(reviewed.response.status, 200);
+  assert.equal(reviewed.body.data.publishReviewStatus, 'APPROVED');
+  assert.equal(reviewed.body.data.active, true);
+
+  const restored = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ serviceScoreLimitedThreshold: 80, serviceScoreRestrictedThreshold: 60 })
+  });
+  assert.equal(restored.response.status, 200);
+  const resetAdjustment = await api('/api/admin/merchant-scores/merchant_001/adjust', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ adjustment: 0, reason: '测试数据恢复' })
+  });
+  assert.equal(resetAdjustment.response.status, 200);
+});
+
 test('business rules configure public commitments and delivery fees', async () => {
   const config = await api('/api/business-config');
   assert.equal(config.response.status, 200);
