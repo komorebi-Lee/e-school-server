@@ -364,14 +364,26 @@ function withMerchantName(product, merchants) {
 
 function withProductReviewSummary(product, reviews = []) {
   const matched = reviews.filter((review) => review.productId === product.id && review.purchaseVerified && review.visibility !== 'HIDDEN');
-  if (!matched.length) return { ...product, ratingSummary: { average: 0, count: 0, purchaseVerifiedCount: 0 } };
+  const lowReviews = matched.filter((review) => Number(review.rating) <= 3);
+  const repliedLowReviews = lowReviews.filter((review) => review.reply?.content);
+  if (!matched.length) return {
+    ...product,
+    ratingSummary: {
+      average: 0, count: 0, purchaseVerifiedCount: 0,
+      positiveCount: 0, mediumNegativeCount: 0, repliedLowCount: 0, lowReplyRate: 1
+    }
+  };
   const average = matched.reduce((sum, review) => sum + (Number(review.rating) || 0), 0) / matched.length;
   return {
     ...product,
     ratingSummary: {
       average: Math.round(average * 10) / 10,
       count: matched.length,
-      purchaseVerifiedCount: matched.length
+      purchaseVerifiedCount: matched.length,
+      positiveCount: matched.filter((review) => Number(review.rating) >= 4).length,
+      mediumNegativeCount: lowReviews.length,
+      repliedLowCount: repliedLowReviews.length,
+      lowReplyRate: lowReviews.length ? Math.round((repliedLowReviews.length / lowReviews.length) * 100) / 100 : 1
     }
   };
 }
@@ -2212,7 +2224,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               }
               : null,
             reviews: (data.productReviews || [])
-              .filter((review) => review.productId === product.id && review.visibility !== 'HIDDEN')
+              .filter((review) => review.productId === product.id && review.visibility !== 'HIDDEN' && review.purchaseVerified !== false)
               .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
               .slice(0, 5)
               .map((review) => ({

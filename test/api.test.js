@@ -110,6 +110,9 @@ test('active product detail exposes merchant and stock', async () => {
   assert.equal(typeof result.body.data.stock, 'number');
   assert.equal(result.body.data.ratingSummary.average, 4.5);
   assert.equal(result.body.data.ratingSummary.purchaseVerifiedCount, 2);
+  assert.equal(result.body.data.ratingSummary.positiveCount, 2);
+  assert.equal(result.body.data.ratingSummary.mediumNegativeCount, 0);
+  assert.equal(result.body.data.ratingSummary.lowReplyRate, 1);
   assert.equal(result.body.data.reviews.length, 2);
   assert.ok(result.body.data.reviews.every((review) => review.purchaseVerified));
   assert.equal(result.body.data.settings.deliveryResponseHours, 24);
