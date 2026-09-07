@@ -271,6 +271,131 @@ test('admin sessions survive a service restart from the persistent store', async
   }
 });
 
+test('super admin can create role-limited admins', async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-rbac-'));
+  const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));
+  const rbacServer = http.createServer(createApp({ store }));
+  await new Promise((resolve) => rbacServer.listen(0, '127.0.0.1', resolve));
+  const rbacBaseUrl = `http://127.0.0.1:${rbacServer.address().port}`;
+  const request = (pathname, options) => fetch(`${rbacBaseUrl}${pathname}`, options);
+  const jsonRequest = (pathname, options = {}) => request(pathname, {
+    ...options,
+    headers: { 'content-type': 'application/json', ...(options.headers || {}) }
+  });
+
+  try {
+    const superLogin = await jsonRequest('/api/admin/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: ADMIN_USERNAME, password: ADMIN_PASSWORD })
+    });
+    assert.equal(superLogin.status, 200);
+    const superToken = (await superLogin.json()).data.token;
+
+    const created = await jsonRequest('/api/admin/admins', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({
+        username: 'finance-admin',
+        displayName: '财务管理员',
+        password: 'finance-password-2026',
+        role: 'FINANCE'
+      })
+    });
+    assert.equal(created.status, 201);
+    const createdBody = await created.json();
+    assert.equal(createdBody.data.role, 'FINANCE');
+    assert.equal('passwordHash' in createdBody.data, false);
+
+    const list = await jsonRequest('/api/admin/admins', {
+      headers: { authorization: `Bearer ${superToken}` }
+    });
+    assert.equal(list.status, 200);
+    const listedBody = await list.json();
+    assert.ok(listedBody.data.some((item) => item.username === 'finance-admin'));
+    assert.ok(listedBody.data.every((item) => !('passwordHash' in item)));
+
+    const financeLogin = await jsonRequest('/api/admin/login', {
+      method: 'POST',
+      body: JSON.stringify({ username: 'finance-admin', password: 'finance-password-2026' })
+    });
+    assert.equal(financeLogin.status, 200);
+    const financeToken = (await financeLogin.json()).data.token;
+
+    const financeVisible = await jsonRequest('/api/admin/payment-orders', {
+      headers: { authorization: `Bearer ${financeToken}` }
+    });
+    assert.equal(financeVisible.status, 200);
+
+    const financeForbidden = await jsonRequest('/api/admin/products', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${financeToken}` },
+      body: JSON.stringify({})
+    });
+    assert.equal(financeForbidden.status, 403);
+    assert.equal((await financeForbidden.json()).error.code, 'ADMIN_FORBIDDEN');
+  } finally {
+    await new Promise((resolve) => rbacServer.close(resolve));
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('disabling an admin revokes active sessions immediately', async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-disable-'));
+  const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));
+  const disableServer = http.createServer(createApp({ store }));
+  await new Promise((resolve) => disableServer.listen(0, '127.0.0.1', resolve));
+  const disableBaseUrl = `http://127.0.0.1:${disableServer.address().port}`;
+  const request = (pathname, options) => fetch(`${disableBaseUrl}${pathname}`, options);
+
+  try {
+    const superLogin = await request('/api/admin/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: ADMIN_USERNAME, password: ADMIN_PASSWORD })
+    });
+    const superToken = (await superLogin.json()).data.token;
+
+    const created = await request('/api/admin/admins', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({
+        username: 'support-admin',
+        displayName: '客服管理员',
+        password: 'support-password-2026',
+        role: 'SUPPORT'
+      })
+    });
+    const createdBody = await created.json();
+
+    const supportLogin = await request('/api/admin/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'support-admin', password: 'support-password-2026' })
+    });
+    const supportToken = (await supportLogin.json()).data.token;
+
+    const beforeDisable = await request('/api/admin/leads', {
+      headers: { authorization: `Bearer ${supportToken}` }
+    });
+    assert.equal(beforeDisable.status, 200);
+
+    const disabled = await request(`/api/admin/admins/${createdBody.data.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${superToken}` },
+      body: JSON.stringify({ status: 'DISABLED' })
+    });
+    assert.equal(disabled.status, 200);
+
+    const afterDisable = await request('/api/admin/leads', {
+      headers: { authorization: `Bearer ${supportToken}` }
+    });
+    assert.equal(afterDisable.status, 401);
+  } finally {
+    await new Promise((resolve) => disableServer.close(resolve));
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test('wechat login exchanges a code for a server-side user identity', async () => {
   const invalid = await api('/api/auth/login', {
     method: 'POST',

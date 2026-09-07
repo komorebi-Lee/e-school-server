@@ -1,4 +1,4 @@
-const { randomUUID, createHash, scryptSync, timingSafeEqual } = require('node:crypto');
+const { randomUUID, randomBytes, createHash, scryptSync, timingSafeEqual } = require('node:crypto');
 const https = require('node:https');
 const { URL } = require('node:url');
 const fs = require('node:fs');
@@ -602,6 +602,84 @@ function complaintDueAt(now) {
   return new Date(new Date(now).getTime() + 48 * 3600 * 1000).toISOString();
 }
 
+const adminRoleLabels = {
+  SUPER_ADMIN: '超级管理员',
+  OPERATOR: '运营管理员',
+  FINANCE: '财务管理员',
+  SUPPORT: '客服管理员'
+};
+
+const adminRolePermissions = {
+  SUPER_ADMIN: ['*'],
+  OPERATOR: ['CONFIG_MANAGE', 'CATALOG_MANAGE', 'MERCHANT_MANAGE', 'ORDER_MANAGE', 'REPORT_VIEW'],
+  FINANCE: ['FINANCE_MANAGE', 'REPORT_VIEW'],
+  SUPPORT: ['ORDER_MANAGE', 'REPORT_VIEW']
+};
+
+function hashPassword(password) {
+  const salt = randomBytes(16);
+  const passwordHash = scryptSync(String(password), salt, 64);
+  return `scrypt$${salt.toString('hex')}$${passwordHash.toString('hex')}`;
+}
+
+function verifyPasswordHash(suppliedPassword, storedHash) {
+  const parts = String(storedHash || '').split('$');
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+  let salt;
+  let expectedHash;
+  try {
+    salt = Buffer.from(parts[1], 'hex');
+    expectedHash = Buffer.from(parts[2], 'hex');
+  } catch {
+    return false;
+  }
+  if (salt.length !== 16 || expectedHash.length !== 64) return false;
+  const actualHash = scryptSync(String(suppliedPassword || ''), salt, 64);
+  return timingSafeEqual(actualHash, expectedHash);
+}
+
+function adminPermissionForRequest(pathname) {
+  if (pathname.startsWith('/api/admin/admins')) return 'ADMIN_MANAGE';
+  if (/^\/api\/admin\/merchants\/[^/]+\/settle$/.test(pathname)) return 'FINANCE_MANAGE';
+  if (pathname.startsWith('/api/admin/settings')
+    || pathname.startsWith('/api/admin/subscribe-templates')) return 'CONFIG_MANAGE';
+  if (pathname.startsWith('/api/admin/payment-orders')
+    || pathname.startsWith('/api/admin/payout-requests')
+    || pathname.startsWith('/api/admin/finance-events')) return 'FINANCE_MANAGE';
+  if (pathname.startsWith('/api/admin/products')
+    || pathname.startsWith('/api/admin/recharge-promos')
+    || pathname.startsWith('/api/admin/product-reviews')) return 'CATALOG_MANAGE';
+  if (pathname.startsWith('/api/admin/merchants')
+    || pathname.startsWith('/api/admin/merchant-scores')
+    || pathname.startsWith('/api/admin/score-cases')) return 'MERCHANT_MANAGE';
+  if (pathname.startsWith('/api/admin/orders')
+    || pathname.startsWith('/api/admin/phone-card-orders')
+    || pathname.startsWith('/api/admin/recharge-orders')
+    || pathname.startsWith('/api/admin/broadband-applications')
+    || pathname.startsWith('/api/admin/plate-applications')
+    || pathname.startsWith('/api/admin/after-sales')
+    || pathname.startsWith('/api/admin/leads')
+    || pathname.startsWith('/api/admin/sla-alerts')
+    || pathname.startsWith('/api/admin/patrol/run')
+    || pathname.startsWith('/api/admin/notifications')
+    || pathname.startsWith('/api/admin/subscribe-messages')) return 'ORDER_MANAGE';
+  if (pathname.startsWith('/api/admin/overview')
+    || pathname.startsWith('/api/admin/operations-report')) return 'REPORT_VIEW';
+  return 'ADMIN_MANAGE';
+}
+
+function publicAdminUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    role: user.role,
+    status: user.status,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt
+  };
+}
+
 function createApp({
   store,
   wechatAuth = exchangeWeChatCode,
@@ -622,6 +700,33 @@ function createApp({
   const userWeChatIdentities = new Map();
   const userSessions = new Map();
   const userSessionTtlMs = 7 * 24 * 60 * 60 * 1000;
+
+  function ensureBootstrapAdmin() {
+    store.update((data) => {
+      data.adminUsers = Array.isArray(data.adminUsers) ? data.adminUsers : [];
+      if (data.adminUsers.length > 0) return false;
+
+      const username = process.env.ADMIN_USERNAME || 'admin';
+      const passwordHash = configuredAdminPasswordHash || (
+        process.env.ADMIN_PASSWORD ? hashPassword(process.env.ADMIN_PASSWORD) : ''
+      );
+      if (!passwordHash) return false;
+
+      const now = new Date().toISOString();
+      data.adminUsers.push({
+        id: `admin_${randomUUID()}`,
+        username,
+        displayName: '运营管理员',
+        passwordHash,
+        role: 'SUPER_ADMIN',
+        status: 'ACTIVE',
+        createdAt: now,
+        updatedAt: now
+      });
+      return true;
+    });
+  }
+  ensureBootstrapAdmin();
 
   function getAdminLoginLockKey(request, attemptedUsername) {
     const clientAddress = request.socket?.remoteAddress || 'unknown';
@@ -674,58 +779,54 @@ function createApp({
     });
   }
 
-  function verifyAdminPassword(suppliedPassword) {
-    if (!configuredAdminPasswordHash) {
-      const password = process.env.ADMIN_PASSWORD;
-      return Boolean(password) && suppliedPassword === password;
-    }
-
-    const parts = configuredAdminPasswordHash.split('$');
-    if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
-    let salt;
-    let expectedHash;
-    try {
-      salt = Buffer.from(parts[1], 'hex');
-      expectedHash = Buffer.from(parts[2], 'hex');
-    } catch {
-      return false;
-    }
-    if (salt.length !== 16 || expectedHash.length !== 64) return false;
-    const actualHash = scryptSync(String(suppliedPassword || ''), salt, 64);
-    return timingSafeEqual(actualHash, expectedHash);
-  }
-
   function hashAdminToken(token) {
     return createHash('sha256').update(`admin-session:${token}`).digest('hex');
   }
 
-  function saveAdminSession(token, username, expiresAt) {
+  function saveAdminSession(token, adminUserId, expiresAt) {
     const tokenHash = hashAdminToken(token);
     store.update((data) => {
       data.adminSessions = Array.isArray(data.adminSessions) ? data.adminSessions : [];
       data.adminSessions = data.adminSessions.filter((item) => (
         item.tokenHash !== tokenHash && item.expiresAt > Date.now()
       ));
-      data.adminSessions.push({ tokenHash, username, expiresAt });
-      return { tokenHash, username, expiresAt };
+      data.adminSessions.push({ tokenHash, adminUserId, expiresAt });
+      return { tokenHash, adminUserId, expiresAt };
     });
   }
 
-  function requireAdmin(request) {
+  function requireAdmin(request, requiredPermission) {
     const token = (request.headers.authorization || '').replace(/^Bearer\s+/i, '');
     if (!token) throw new ApiError(401, 'ADMIN_UNAUTHORIZED', '请重新登录管理端');
 
     const tokenHash = hashAdminToken(token);
-    const session = (store.read().adminSessions || []).find((item) => item.tokenHash === tokenHash);
-    if (!session) throw new ApiError(401, 'ADMIN_UNAUTHORIZED', '请重新登录管理端');
-    if (session.expiresAt <= Date.now()) {
-      store.update((data) => {
-        data.adminSessions = (data.adminSessions || []).filter((item) => item.tokenHash !== tokenHash);
+    const data = store.read();
+    const session = (data.adminSessions || []).find((item) => item.tokenHash === tokenHash);
+    const user = session ? (data.adminUsers || []).find((item) => item.id === session.adminUserId) : null;
+    if (!session || !user) throw new ApiError(401, 'ADMIN_UNAUTHORIZED', '请重新登录管理端');
+
+    if (user.status !== 'ACTIVE' || session.expiresAt <= Date.now()) {
+      store.update((state) => {
+        state.adminSessions = (state.adminSessions || []).filter((item) => item.tokenHash !== tokenHash);
         return true;
       });
       throw new ApiError(401, 'ADMIN_UNAUTHORIZED', '请重新登录管理端');
     }
-    return { username: session.username, expiresAt: session.expiresAt };
+
+    if (requiredPermission) {
+      const permissions = adminRolePermissions[user.role] || [];
+      if (!permissions.includes('*') && !permissions.includes(requiredPermission)) {
+        throw new ApiError(403, 'ADMIN_FORBIDDEN', '当前管理员角色无权执行该操作');
+      }
+    }
+
+    return {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      role: user.role,
+      expiresAt: session.expiresAt
+    };
   }
 
   function loadWeChatIdentity(data, userId) {
@@ -2456,7 +2557,6 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (request.method === 'POST' && pathname === '/api/admin/login') {
         const body = await readJson(request);
-        const username = process.env.ADMIN_USERNAME || 'admin';
         const now = Date.now();
         const lockKey = getAdminLoginLockKey(request, body.username);
         const lockState = getActiveAdminLoginLock(lockKey, now);
@@ -2465,15 +2565,29 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             retryAfterSeconds: Math.ceil((lockState.lockedUntil - now) / 1000)
           });
         }
-        if (body.username !== username || !verifyAdminPassword(body.password)) {
+        const adminUser = (store.read().adminUsers || [])
+          .find((item) => item.username === body.username && item.status === 'ACTIVE');
+        if (!adminUser || !verifyPasswordHash(body.password, adminUser.passwordHash)) {
           recordAdminLoginFailure(lockKey, now);
           throw new ApiError(401, 'INVALID_CREDENTIALS', '账号或密码错误');
         }
         clearAdminLoginFailure(lockKey);
-        const token = createHash('sha256').update(`${username}:${randomUUID()}`).digest('hex');
+        const token = createHash('sha256').update(`${adminUser.username}:${randomUUID()}`).digest('hex');
         const expiresAt = Date.now() + 8 * 60 * 60 * 1000;
-        saveAdminSession(token, username, expiresAt);
-        return sendJson(response, 200, { data: { token, user: { name: '运营管理员', role: '超级管理员' }, expiresIn: 28800 }, requestId });
+        saveAdminSession(token, adminUser.id, expiresAt);
+        return sendJson(response, 200, {
+          data: {
+            token,
+            user: {
+              name: adminUser.displayName,
+              username: adminUser.username,
+              role: adminUser.role,
+              roleLabel: adminRoleLabels[adminUser.role] || adminUser.role
+            },
+            expiresIn: 28800
+          },
+          requestId
+        });
       }
 
       if (request.method === 'POST' && pathname === '/api/auth/login') {
@@ -2597,7 +2711,89 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (pathname.startsWith('/api/admin/')) {
-        requireAdmin(request);
+        requireAdmin(request, adminPermissionForRequest(pathname));
+      }
+
+      if (pathname === '/api/admin/admins') {
+        if (request.method === 'GET') {
+          const users = (store.read().adminUsers || []).map(publicAdminUser);
+          return sendJson(response, 200, { data: users, total: users.length, requestId });
+        }
+        if (request.method === 'POST') {
+          const body = await readJson(request);
+          const username = requireString(body.username, 'username', { maxLength: 32 });
+          const displayName = requireString(body.displayName, 'displayName', { maxLength: 30 });
+          const password = requireString(body.password, 'password', { maxLength: 128 });
+          const role = requireString(body.role, 'role', { maxLength: 20 });
+          if (!/^[a-zA-Z0-9_-]{3,32}$/.test(username)) {
+            throw new ApiError(400, 'VALIDATION_ERROR', '管理员账号仅支持 3-32 位字母、数字、下划线或短横线');
+          }
+          if (password.length < 12) {
+            throw new ApiError(400, 'VALIDATION_ERROR', '管理员密码至少需要 12 位');
+          }
+          if (!adminRolePermissions[role]) {
+            throw new ApiError(400, 'VALIDATION_ERROR', '不支持的管理员角色');
+          }
+
+          const created = store.update((data) => {
+            data.adminUsers = Array.isArray(data.adminUsers) ? data.adminUsers : [];
+            if (data.adminUsers.some((item) => item.username === username)) {
+              throw new ApiError(409, 'ADMIN_USERNAME_EXISTS', '管理员账号已存在');
+            }
+            const now = new Date().toISOString();
+            const user = {
+              id: `admin_${randomUUID()}`,
+              username,
+              displayName,
+              passwordHash: hashPassword(password),
+              role,
+              status: 'ACTIVE',
+              createdAt: now,
+              updatedAt: now
+            };
+            data.adminUsers.push(user);
+            addAudit(data, '新增管理员', `${displayName} ${adminRoleLabels[role] || role}`);
+            return publicAdminUser(user);
+          });
+          return sendJson(response, 201, { data: created, requestId });
+        }
+      }
+
+      const adminUserMatch = pathname.match(/^\/api\/admin\/admins\/([^/]+)$/);
+      if (request.method === 'PATCH' && adminUserMatch) {
+        const body = await readJson(request);
+        const actor = requireAdmin(request, 'ADMIN_MANAGE');
+        const updated = store.update((data) => {
+          const user = (data.adminUsers || []).find((item) => item.id === adminUserMatch[1]);
+          if (!user) throw new ApiError(404, 'ADMIN_NOT_FOUND', '管理员不存在');
+
+          if (body.displayName !== undefined) {
+            user.displayName = requireString(body.displayName, 'displayName', { maxLength: 30 });
+          }
+          if (body.role !== undefined) {
+            const role = requireString(body.role, 'role', { maxLength: 20 });
+            if (!adminRolePermissions[role]) throw new ApiError(400, 'VALIDATION_ERROR', '不支持的管理员角色');
+            user.role = role;
+          }
+          if (body.status !== undefined) {
+            if (!['ACTIVE', 'DISABLED'].includes(body.status)) {
+              throw new ApiError(400, 'VALIDATION_ERROR', '管理员状态仅支持 ACTIVE 或 DISABLED');
+            }
+            if (user.id === actor.id && body.status === 'DISABLED') {
+              throw new ApiError(400, 'VALIDATION_ERROR', '不能停用当前登录的超级管理员');
+            }
+            user.status = body.status;
+          }
+          if (body.password !== undefined) {
+            const password = requireString(body.password, 'password', { maxLength: 128 });
+            if (password.length < 12) throw new ApiError(400, 'VALIDATION_ERROR', '管理员密码至少需要 12 位');
+            user.passwordHash = hashPassword(password);
+          }
+          user.updatedAt = new Date().toISOString();
+          addAudit(data, '更新管理员', `${user.displayName} ${adminRoleLabels[user.role] || user.role}`);
+          return publicAdminUser(user);
+        });
+        return sendJson(response, 200, { data: updated, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/health') {
