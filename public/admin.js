@@ -645,7 +645,7 @@ function scoresView() {
     </tr>`).join('') || `<tr><td colspan="5" class="empty">暂无自动下架商品</td></tr>`}</tbody></table></div></section>`;
   const rows = items.map((item) => `<tr>
     <td><strong>${esc(item.merchantName)}</strong><small>${esc(item.merchantId)}</small></td>
-    <td><strong>${item.score}</strong><small>${esc(label(item.grade))}${item.manualAdjustment ? ` · 人工 ${item.manualAdjustment > 0 ? '+' : ''}${item.manualAdjustment}` : ''}</small></td>
+    <td><strong>${item.score}</strong><small>${esc(label(item.grade))}${item.manualAdjustment ? ` · 人工 ${item.manualAdjustment > 0 ? '+' : ''}${item.manualAdjustment}` : ''}${item.metrics?.compliancePenalty ? ` · 风控 -${item.metrics.compliancePenalty}` : ''}</small></td>
     <td>${esc(scoreBreakdownText(item))}</td>
     <td>按时 ${item.metrics?.onTimeCount || 0} / 超时 ${item.metrics?.lateCount || 0}<small>售后 ${item.metrics?.afterSaleCount || 0} · 预警 ${item.metrics?.overdueAlertCount || 0}</small></td>
     <td><span class="badge ${scoreStageBadges[item.stage] || 'orange'}">${esc(label(item.stage))}</span><small>${esc(scoreStageConsequences[item.stage] || '')}</small></td>

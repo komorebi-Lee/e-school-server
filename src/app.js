@@ -1690,6 +1690,15 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
 
     const slaScore = clampScore(100 - overdueAlerts.length * 20 - (openAlerts.length - overdueAlerts.length) * 8);
 
+    // 低质商品自动下架要直接影响商家服务分：不是只把单件商品藏起来，而是让商家重视整改。
+    const complianceWindowStart = new Date(new Date(now).getTime() - 30 * 24 * 3600 * 1000).toISOString();
+    const merchantComplianceProducts = (data.products || []).filter((item) => item.merchantId === merchant.id
+      && item.autoDelistRule === 'LOW_QUALITY'
+      && item.autoDelistAt
+      && String(item.autoDelistAt) >= complianceWindowStart);
+    const activeAutoDelistCount = merchantComplianceProducts.filter((item) => item.active === false).length;
+    const compliancePenalty = Math.min(12, merchantComplianceProducts.length * 3);
+
     const rawScores = {
       DELIVERY: deliveryScore,
       AFTER_SALE: afterSaleScore,
@@ -1701,7 +1710,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
     const weighted = serviceScoreWeights.reduce((sum, item) => sum + rawScores[item.key] * item.weight, 0) / totalWeight;
     const manualAdjustment = Math.max(-20, Math.min(20, Number(merchant.serviceScore?.manualAdjustment || 0)));
     const appealAdjustment = Math.max(-20, Math.min(20, Number(merchant.serviceScore?.appealAdjustment || 0)));
-    const score = clampScore(weighted + manualAdjustment + appealAdjustment);
+    const score = clampScore(weighted + manualAdjustment + appealAdjustment - compliancePenalty);
     const thresholds = scoreThresholds(data);
     const stage = score >= thresholds.limited ? 'NORMAL' : (score >= thresholds.restricted ? 'LIMITED' : 'RESTRICTED');
     const gradeEntry = serviceScoreGrades.find((item) => score >= item.min) || serviceScoreGrades[serviceScoreGrades.length - 1];
@@ -1754,7 +1763,10 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
         negativeReviewCount: negativeReviews.length,
         negativeReviewRepliedCount,
         openAlertCount: openAlerts.length,
-        overdueAlertCount: overdueAlerts.length
+        overdueAlertCount: overdueAlerts.length,
+        autoDelistCount30d: merchantComplianceProducts.length,
+        activeAutoDelistCount,
+        compliancePenalty
       },
       updatedAt: now
     };
@@ -1779,6 +1791,7 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
   // 分档变化才通知和留痕，避免每轮巡检都刷一遍相同结论。
   function refreshMerchantScores(data, now = new Date().toISOString()) {
     const changes = [];
+    const complianceActions = enforceProductCompliance(data, now);
     for (const merchant of data.merchants || []) {
       if (merchant.status !== 'APPROVED') continue;
       const previous = merchant.serviceScore || null;
@@ -1802,7 +1815,6 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       }
       changes.push({ merchantId: merchant.id, fromStage, toStage, score: merchant.serviceScore.score });
     }
-    const complianceActions = enforceProductCompliance(data, now);
     for (const action of complianceActions) {
       changes.push({ merchantId: (data.products || []).find((item) => item.id === action.productId)?.merchantId || '', action: action.action });
     }

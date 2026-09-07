@@ -321,7 +321,7 @@ test('business rules configure public commitments and delivery fees', async () =
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
       items: [{ productId: 'prod_ebike_001', quantity: 1 }],
-      fulfillment: { type: 'DELIVERY', contactName: '费同学', contactPhone: '15527111001', address: '荟园1栋', date: '2026-09-06', timeSlot: '今天 12:00-14:00' }
+      fulfillment: { type: 'DELIVERY', contactName: '费同学', contactPhone: '15527111001', address: '荟园1栋', date: new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 10), timeSlot: '今天 12:00-14:00' }
     })
   });
   assert.equal(created.response.status, 201);
@@ -2715,6 +2715,9 @@ test('low quality products are auto delisted and can be restored after complianc
   const products = await api('/api/products?category=E_BIKE_NEW');
   assert.equal(products.response.status, 200);
   const merchantOverview = await api('/api/merchant/overview', { headers: merchantHeaders });
+  const scoreAfterDelist = merchantOverview.body.data.serviceScore;
+  assert.equal(scoreAfterDelist.metrics.activeAutoDelistCount, 1);
+  assert.equal(scoreAfterDelist.metrics.compliancePenalty, 3);
   const delisted = merchantOverview.body.data.products.find((item) => item.id === 'prod_ebike_001');
   assert.equal(delisted.active, false);
   assert.equal(delisted.autoDelistRule, 'LOW_QUALITY');
