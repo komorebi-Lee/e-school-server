@@ -23,6 +23,8 @@ PORT、DB_FILE、ADMIN_USERNAME、ADMIN_PASSWORD_HASH、ADMIN_PASSWORD、CORS_AL
 
 默认 `PAYMENT_PROVIDER=mock`，保留演示用的即时确认。切换为 `PAYMENT_PROVIDER=wechat` 时必须完整配置商户号、证书序列号、商户私钥路径和 API v3 密钥；配置不完整会在启动时失败，不会静默退回模拟支付。支付单会记录 `provider`、`channel`、`providerTradeNo` 和 `providerPayload`，确认或退款失败时订单、结算和财务流水保持原状态。
 
+当前仓库尚未实现微信支付 API transport 和回调验签，`wechat` 模式只是预留边界；不要在正式收款环境直接切换。下一步应实现 JSAPI 下单、支付回调验签和退款查询，再接入商户配置。
+
 `CORS_ALLOWED_ORIGINS` 使用逗号分隔的浏览器来源，默认仅允许 `http://localhost:3000` 和 `http://127.0.0.1:3000`。小程序请求和管理端同域访问不受影响；如需把浏览器端部署到其他域名，必须显式配置精确 Origin，避免第三方网页直接调用带登录态的接口。
 
 浏览器管理端地址：
