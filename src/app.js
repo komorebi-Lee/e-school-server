@@ -5301,57 +5301,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         if (!order || !paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
         if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅待支付单可支付');
         const providerPayment = await confirmProviderPayment(paymentOrder);
-        request.url = `/api/payment-orders/${paymentOrder.id}/confirm`;
-        const rerouted = new URL(request.url, 'http://localhost');
-        const match = rerouted.pathname.match(/^\/api\/payment-orders\/([^/]+)\/confirm$/);
-        const result = store.update((innerData) => {
-          const payment = innerData.paymentOrders.find((item) => item.id === match[1] && item.userId === userId);
-          if (!payment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
-          const linkedOrder = innerData.orders.find((item) => item.id === payment.orderId && item.userId === userId);
-          if (!linkedOrder) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
-          const now = new Date().toISOString();
-          if (payment.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u5355\u53ef\u652f\u4ed8');
-          payment.status = 'PAID';
-          payment.paidAt = now;
-          payment.updatedAt = now;
-          payment.providerTradeNo = providerPayment.providerTradeNo || payment.providerTradeNo || '';
-          payment.providerPayload = providerPayment.payload || payment.providerPayload || null;
-          linkedOrder.status = 'PAID';
-          linkedOrder.paymentStatus = 'PAID';
-          linkedOrder.updatedAt = now;
-          issueDeliveryCode(linkedOrder, now);
-          consumeOrderStock(innerData, linkedOrder);
-          const bikeItem = linkedOrder.items.find((item) => (innerData.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
-          if (bikeItem) {
-            const plateApplication = {
-              id: `plate_${randomUUID()}`,
-              userId,
-              customerName: linkedOrder.fulfillment?.contactName || '\u5e73\u53f0\u8d2d\u8f66\u7528\u6237',
-              phone: linkedOrder.fulfillment?.contactPhone || '',
-              vehicleModel: bikeItem.name,
-              source: 'PLATFORM_ORDER',
-              feeInCents: 0,
-              relatedOrderId: linkedOrder.id,
-              status: 'MATERIAL_PENDING',
-              relatedIds: { platformOrderIds: [linkedOrder.id] },
-              createdAt: now,
-              updatedAt: now
-            };
-            (innerData.plateApplications = innerData.plateApplications || []).unshift(plateApplication);
-            addAudit(innerData, '\u7528\u6237\u652f\u4ed8\u540e\u521b\u5efa\u514d\u8d39\u724c\u7167\u8f85\u52a9', linkedOrder.orderNo);
-            addNotification(innerData, userId, 'PLATE', '\u514d\u8d39\u724c\u7167\u8f85\u52a9\u5df2\u53d1\u8d77', '\u5e73\u53f0\u8d2d\u8f66\u540e\u53ef\u4eab\u53d7\u514d\u8d39\u6821\u56ed\u724c\u7167\u8f85\u52a9\u3002');
-          }
-          linkedOrder.collaboration ||= createCollaboration(linkedOrder, linkedOrder.items[0]?.merchantId || '');
-          createSettlements(innerData, linkedOrder, now);
-          addFinanceEvent(innerData, 'PAYMENT', `PAYMENT_${payment.id}`, payment.amountInCents, {
-            userId, paymentNo: payment.paymentNo, orderNo: linkedOrder.orderNo, businessType: 'ORDER'
-          }, now);
-          linkedOrder.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'\u652f\u4ed8\u6210\u529f\uff0c\u5f85\u5546\u5bb6\u786e\u8ba4\u5c65\u7ea6\u3002', createdAt:now });
-          addAudit(innerData, '\u7528\u6237\u6a21\u62df\u652f\u4ed8\u6210\u529f', linkedOrder.orderNo);
-          addNotification(innerData, userId, 'ORDER', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${linkedOrder.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
-          notifyOrderMerchant(innerData, linkedOrder, 'ORDER', '新订单已支付', `订单 ${linkedOrder.orderNo} 已支付，请尽快确认履约。`);
-          return { order: linkedOrder, paymentOrder: payment };
-        });
+        const result = settlePaymentOrder(paymentOrder.id, providerPayment, 'USER_CONFIRM');
         return sendJson(response, 200, { data: result, requestId });
       }
 
@@ -5386,12 +5336,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const action = paymentMatch[2];
         if (!action) throw new ApiError(404, 'NOT_FOUND', 'Payment action is required');
         sweepExpiredOrders();
-        let providerPayment = null;
         if (action === 'confirm') {
           const currentPayment = store.read().paymentOrders.find((item) => item.id === paymentMatch[1] && item.userId === userId);
           if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
           if (currentPayment.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅待支付单可操作');
-          providerPayment = await confirmProviderPayment(currentPayment);
+          const providerPayment = await confirmProviderPayment(currentPayment);
+          const result = settlePaymentOrder(currentPayment.id, providerPayment, 'USER_CONFIRM');
+          return sendJson(response, 200, { data: result, requestId });
         }
         const updated = store.update((data) => {
           if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
@@ -5403,84 +5354,6 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const plateApplication = (data.plateApplications || []).find((item) => item.id === paymentOrder.businessId && item.userId === userId && item.paymentOrderId === paymentOrder.id);
           if (!order && !rechargeOrder && !phoneCardOrder && !plateApplication) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
           const now = new Date().toISOString();
-          if (action === 'confirm') {
-            if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u5355\u53ef\u64cd\u4f5c');
-            paymentOrder.status = 'PAID';
-            paymentOrder.paidAt = now;
-            paymentOrder.updatedAt = now;
-            paymentOrder.providerTradeNo = providerPayment.providerTradeNo || paymentOrder.providerTradeNo || '';
-            paymentOrder.providerPayload = providerPayment.payload || paymentOrder.providerPayload || null;
-            if (rechargeOrder) {
-              rechargeOrder.status = 'PENDING_CREDIT';
-              rechargeOrder.paymentStatus = 'PAID';
-              rechargeOrder.updatedAt = now;
-              addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
-                userId, paymentNo: paymentOrder.paymentNo, businessType: 'RECHARGE'
-              }, now);
-              addAudit(data, '\u8bdd\u8d39\u6743\u76ca\u652f\u4ed8\u6210\u529f', rechargeOrder.id);
-              addNotification(data, userId, 'RECHARGE', '\u8bdd\u8d39\u6743\u76ca\u652f\u4ed8\u6210\u529f', `\u5145 ${Math.round(rechargeOrder.paidInCents/100)} \u9001 ${Math.round((rechargeOrder.receiveInCents-rechargeOrder.paidInCents)/100)} \u5df2\u652f\u4ed8\uff0c\u7b49\u5f85\u8fd0\u8425\u786e\u8ba4\u5230\u8d26\u3002`);
-              return { rechargeOrder, paymentOrder };
-            }
-            if (phoneCardOrder) {
-              phoneCardOrder.status = 'PENDING_REALNAME';
-              phoneCardOrder.paymentStatus = 'PAID';
-              phoneCardOrder.updatedAt = now;
-              const activationHours = publicSettings(data.adminSettings).phoneCardActivationHours;
-              addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
-                userId, paymentNo: paymentOrder.paymentNo, businessType: 'PHONE_PLAN'
-              }, now);
-              addAudit(data, '电话卡支付成功', phoneCardOrder.id);
-            addNotification(data, userId, 'PHONE_PLAN', '电话卡支付成功', `${phoneCardOrder.planName} 已支付，运营将在 ${activationHours} 小时内联系实名激活。`);
-            return { phoneCardOrder, paymentOrder };
-          }
-          if (plateApplication) {
-            plateApplication.status = 'MATERIAL_PENDING';
-            plateApplication.paymentStatus = 'PAID';
-            plateApplication.updatedAt = now;
-            addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
-              userId, paymentNo: paymentOrder.paymentNo, businessType: 'PLATE'
-            }, now);
-            addAudit(data, '自带车上牌服务费支付成功', plateApplication.id);
-            addNotification(data, userId, 'PLATE', '牌照服务费支付成功', `${plateApplication.vehicleModel} 已支付服务费，请按客服指引补充车辆和身份材料。`);
-            return { plateApplication, paymentOrder };
-          }
-            order.paymentStatus = 'PAID';
-            order.status = 'PAID';
-            order.updatedAt = now;
-            order.paidAt = order.paidAt || now;
-            issueDeliveryCode(order, now);
-            consumeOrderStock(data, order);
-            const bikeItem = order.items.find((item) => (data.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
-            if (bikeItem) {
-              const plateApplication = {
-                id: `plate_${randomUUID()}`,
-                userId,
-                customerName: order.fulfillment?.contactName || '\u5e73\u53f0\u8d2d\u8f66\u7528\u6237',
-                phone: order.fulfillment?.contactPhone || '',
-                vehicleModel: bikeItem.name,
-                source: 'PLATFORM_ORDER',
-                feeInCents: 0,
-                relatedOrderId: order.id,
-                status: 'MATERIAL_PENDING',
-                relatedIds: { platformOrderIds: [order.id] },
-                createdAt: now,
-                updatedAt: now
-              };
-              (data.plateApplications = data.plateApplications || []).unshift(plateApplication);
-              addAudit(data, '\u8d2d\u8f66\u652f\u4ed8\u540e\u81ea\u52a8\u521b\u5efa\u514d\u8d39\u724c\u7167\u8f85\u52a9', order.orderNo);
-              addNotification(data, userId, 'PLATE', '\u514d\u8d39\u724c\u7167\u8f85\u52a9\u5df2\u53d1\u8d77', '\u6211\u4eec\u5df2\u4e3a\u60a8\u521b\u5efa\u6821\u56ed\u724c\u7167\u8f85\u52a9\u5de5\u5355\uff0c\u8bf7\u51c6\u5907\u8f66\u8f86\u4e0e\u8eab\u4efd\u6750\u6599\u3002');
-            }
-            order.collaboration ||= createCollaboration(order, order.items[0]?.merchantId || '');
-            createSettlements(data, order, now);
-            addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
-              userId, paymentNo: paymentOrder.paymentNo, orderNo: order.orderNo, businessType: 'ORDER'
-            }, now);
-            order.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'\u652f\u4ed8\u6210\u529f\uff0c\u5f85\u5546\u5bb6\u786e\u8ba4\u5c65\u7ea6\u3002', createdAt:now });
-            addAudit(data, '\u6a21\u62df\u652f\u4ed8\u56de\u8c03\u6210\u529f', order.orderNo);
-            sendOrderNotification(data, userId, 'ORDER_STATUS', '\u652f\u4ed8\u6210\u529f', `\u8ba2\u5355 ${order.orderNo} \u652f\u4ed8\u6210\u529f\uff0c\u5546\u5bb6\u5c06\u5c3d\u5feb\u786e\u8ba4\u5c65\u7ea6\u3002`);
-            notifyOrderMerchant(data, order, 'ORDER', '新订单已支付', `订单 ${order.orderNo} 已支付，请尽快确认履约。`);
-            return { order, paymentOrder };
-          }
           if (action === 'cancel') {
             if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u5355\u53ef\u64cd\u4f5c');
             paymentOrder.status = 'CANCELLED';
