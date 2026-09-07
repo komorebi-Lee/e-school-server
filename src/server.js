@@ -4,6 +4,7 @@ const http = require('node:http');
 const { JsonStore } = require('./store');
 const { createMysqlStore } = require('./mysql-store');
 const { createApp } = require('./app');
+const { createPaymentProvider } = require('./payment-provider');
 const { initialData } = require('./store');
 
 function loadEnvFile(filePath) {
@@ -92,7 +93,15 @@ async function bootstrap() {
   ensureDefaultRechargePromos(store);
   ensureDefaultSettings(store);
   ensureCollections(store);
-  const app = createApp({ store });
+  const paymentProvider = createPaymentProvider({
+    provider: process.env.PAYMENT_PROVIDER,
+    appid: process.env.WECHAT_APPID,
+    mchid: process.env.WECHAT_PAY_MCHID,
+    serialNo: process.env.WECHAT_PAY_SERIAL_NO,
+    privateKeyPath: process.env.WECHAT_PAY_PRIVATE_KEY_PATH,
+    apiV3Key: process.env.WECHAT_PAY_APIV3_KEY
+  });
+  const app = createApp({ store, paymentProvider });
   const server = http.createServer(app);
   // 运营巡检定时任务：不再依赖有人打开管理端才发现超时。
   const patrol = app.startOperationsPatrol({

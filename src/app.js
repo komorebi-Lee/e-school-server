@@ -3,6 +3,7 @@ const https = require('node:https');
 const { URL } = require('node:url');
 const fs = require('node:fs');
 const path = require('node:path');
+const { createPaymentProvider } = require('./payment-provider');
 
 class ApiError extends Error {
   constructor(statusCode, code, message, details) {
@@ -684,6 +685,7 @@ function createApp({
   store,
   wechatAuth = exchangeWeChatCode,
   wechatSubscribeSend = sendWeChatSubscribeMessage,
+  paymentProvider = createPaymentProvider(),
   corsAllowedOrigins,
   adminLoginLockout,
   adminPasswordHash
@@ -700,6 +702,44 @@ function createApp({
   const userWeChatIdentities = new Map();
   const userSessions = new Map();
   const userSessionTtlMs = 7 * 24 * 60 * 60 * 1000;
+
+  async function attachProviderIntent(paymentOrder) {
+    if (!paymentOrder) return null;
+    let intent;
+    try {
+      intent = await paymentProvider.createIntent(paymentOrder);
+    } catch (error) {
+      throw new ApiError(502, 'PAYMENT_PROVIDER_FAILED', `支付渠道暂不可用：${error.message}`);
+    }
+    return store.update((data) => {
+      const payment = (data.paymentOrders || []).find((item) => item.id === paymentOrder.id);
+      if (!payment || payment.status !== 'PENDING') {
+        throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅待支付单可生成支付参数');
+      }
+      payment.provider = paymentProvider.name;
+      payment.channel = paymentProvider.channel;
+      payment.providerTradeNo = intent.providerTradeNo || '';
+      payment.providerPayload = intent.payload || null;
+      payment.updatedAt = new Date().toISOString();
+      return payment;
+    });
+  }
+
+  async function confirmProviderPayment(paymentOrder) {
+    try {
+      return await paymentProvider.confirm(paymentOrder);
+    } catch (error) {
+      throw new ApiError(502, 'PAYMENT_PROVIDER_FAILED', `支付确认失败：${error.message}`);
+    }
+  }
+
+  async function refundProviderPayment(paymentOrder) {
+    try {
+      return await paymentProvider.refund(paymentOrder);
+    } catch (error) {
+      throw new ApiError(502, 'PAYMENT_PROVIDER_FAILED', `退款渠道失败：${error.message}`);
+    }
+  }
 
   function ensureBootstrapAdmin() {
     store.update((data) => {
@@ -3718,6 +3758,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       const adminPaymentRefundMatch = pathname.match(/^\/api\/admin\/payment-orders\/([^/]+)\/refund$/);
       if (request.method === 'POST' && adminPaymentRefundMatch) {
+        const currentPayment = store.read().paymentOrders.find((item) => item.id === adminPaymentRefundMatch[1]);
+        if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        if (currentPayment.status !== 'PAID') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅已支付单可退款');
+        const providerRefund = await refundProviderPayment(currentPayment);
         const updated = store.update((data) => {
           if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
           const paymentOrder = data.paymentOrders.find((item) => item.id === adminPaymentRefundMatch[1]);
@@ -3727,6 +3771,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           paymentOrder.status = 'REFUNDED';
           paymentOrder.refundedAt = now;
           paymentOrder.updatedAt = now;
+          paymentOrder.providerTradeNo = providerRefund.providerTradeNo || paymentOrder.providerTradeNo || '';
           const order = (data.orders || []).find((item) => item.id === paymentOrder.orderId);
           const rechargeOrder = (data.rechargeOrders || []).find((item) => item.id === paymentOrder.businessId && item.paymentOrderId === paymentOrder.id);
           const phoneCardOrder = (data.phoneCardOrders || []).find((item) => item.id === paymentOrder.businessId && item.paymentOrderId === paymentOrder.id);
@@ -4063,7 +4108,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             currency:'CNY',
             status:'PENDING',
             idempotencyKey:cardIdempotencyKey?`card:${userId}:${cardIdempotencyKey}`:'',
-            channel:'MOCK',
+            channel:paymentProvider.channel,
+            provider:paymentProvider.name,
+            providerTradeNo:'',
+            providerPayload:null,
             createdAt:now,
             updatedAt:now,
             paidAt:'',
@@ -4074,7 +4122,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           addAudit(data,'新增待支付电话卡订单',record.id);
           return { record, paymentOrder };
         });
-        return sendJson(response, result.reused?200:201, { data:result.record, paymentOrder:result.paymentOrder, requestId });
+        const paymentOrder = result.reused ? result.paymentOrder : await attachProviderIntent(result.paymentOrder);
+        return sendJson(response, result.reused?200:201, { data:result.record, paymentOrder, requestId });
       }
       if (request.method === 'POST' && pathname === '/api/recharge-orders') {
         const { userId } = requireUser(request);
@@ -4112,7 +4161,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             currency:'CNY',
             status:'PENDING',
             idempotencyKey:idempotencyKey?`recharge:${userId}:${idempotencyKey}`:'',
-            channel:'MOCK',
+            channel:paymentProvider.channel,
+            provider:paymentProvider.name,
+            providerTradeNo:'',
+            providerPayload:null,
             createdAt:now,
             updatedAt:now,
             paidAt:'',
@@ -4123,7 +4175,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           addAudit(data,'新增待支付话费权益订单',record.id);
           return { record, paymentOrder };
         });
-        return sendJson(response,201,{data:result.record,paymentOrder:result.paymentOrder,requestId});
+        const paymentOrder = await attachProviderIntent(result.paymentOrder);
+        return sendJson(response,201,{data:result.record,paymentOrder,requestId});
       }
       if (request.method === 'POST' && pathname === '/api/broadband-applications') {
         const { userId } = requireUser(request);
@@ -4173,7 +4226,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               amountInCents:feeInCents,
               currency:'CNY',
               status:'PENDING',
-              channel:'MOCK',
+              channel:paymentProvider.channel,
+              provider:paymentProvider.name,
+              providerTradeNo:'',
+              providerPayload:null,
               createdAt:now,
               updatedAt:now,
               paidAt:'',
@@ -4187,7 +4243,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           addAudit(data,'新增校园牌照辅助申请',application.id);
           return { application, paymentOrder: !platformOrder ? (data.paymentOrders||[]).find(item=>item.id===application.paymentOrderId) : null };
         });
-        return sendJson(response,201,{data:result.application,paymentOrder:result.paymentOrder,requestId});
+        const paymentOrder = await attachProviderIntent(result.paymentOrder);
+        return sendJson(response,201,{data:result.application,paymentOrder,requestId});
       }
       const businessMatch = pathname.match(/^\/api\/service-records\/([^/]+)\/actions$/);
       const plateMaterialMatch = pathname.match(/^\/api\/plate-applications\/([^/]+)\/materials$/);
@@ -5086,7 +5143,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             currency: 'CNY',
             status: 'PENDING',
             idempotencyKey: compoundKey || idempotencyKey || '',
-            channel: 'MOCK',
+            channel: paymentProvider.channel,
+            provider: paymentProvider.name,
+            providerTradeNo: '',
+            providerPayload: null,
             createdAt: now,
             updatedAt: now,
             paidAt: '',
@@ -5097,7 +5157,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           addAudit(data, '\u521b\u5efa\u5f85\u652f\u4ed8\u5355', order.orderNo);
           return { order, paymentOrder, reused: false };
         });
-        return sendJson(response, result.reused ? 200 : 201, { data: result.order, paymentOrder: result.paymentOrder, idempotencyReused: result.reused, requestId });
+        const paymentOrder = result.reused ? result.paymentOrder : await attachProviderIntent(result.paymentOrder);
+        return sendJson(response, result.reused ? 200 : 201, { data: result.order, paymentOrder, idempotencyReused: result.reused, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/api/orders') {
@@ -5123,6 +5184,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const order = (data.orders || []).find((item) => item.id === userPaymentMatch[1] && item.userId === userId);
         const paymentOrder = order ? (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId) : null;
         if (!order || !paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅待支付单可支付');
+        const providerPayment = await confirmProviderPayment(paymentOrder);
         request.url = `/api/payment-orders/${paymentOrder.id}/confirm`;
         const rerouted = new URL(request.url, 'http://localhost');
         const match = rerouted.pathname.match(/^\/api\/payment-orders\/([^/]+)\/confirm$/);
@@ -5136,6 +5199,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           payment.status = 'PAID';
           payment.paidAt = now;
           payment.updatedAt = now;
+          payment.providerTradeNo = providerPayment.providerTradeNo || payment.providerTradeNo || '';
+          payment.providerPayload = providerPayment.payload || payment.providerPayload || null;
           linkedOrder.status = 'PAID';
           linkedOrder.paymentStatus = 'PAID';
           linkedOrder.updatedAt = now;
@@ -5181,6 +5246,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const action = paymentMatch[2];
         if (!action) throw new ApiError(404, 'NOT_FOUND', 'Payment action is required');
         sweepExpiredOrders();
+        let providerPayment = null;
+        if (action === 'confirm') {
+          const currentPayment = store.read().paymentOrders.find((item) => item.id === paymentMatch[1] && item.userId === userId);
+          if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+          if (currentPayment.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅待支付单可操作');
+          providerPayment = await confirmProviderPayment(currentPayment);
+        }
         const updated = store.update((data) => {
           if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
           const paymentOrder = data.paymentOrders.find((item) => item.id === paymentMatch[1] && item.userId === userId);
@@ -5196,6 +5268,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             paymentOrder.status = 'PAID';
             paymentOrder.paidAt = now;
             paymentOrder.updatedAt = now;
+            paymentOrder.providerTradeNo = providerPayment.providerTradeNo || paymentOrder.providerTradeNo || '';
+            paymentOrder.providerPayload = providerPayment.payload || paymentOrder.providerPayload || null;
             if (rechargeOrder) {
               rechargeOrder.status = 'PENDING_CREDIT';
               rechargeOrder.paymentStatus = 'PAID';
