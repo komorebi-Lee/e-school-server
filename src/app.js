@@ -606,16 +606,57 @@ function createApp({
   store,
   wechatAuth = exchangeWeChatCode,
   wechatSubscribeSend = sendWeChatSubscribeMessage,
-  corsAllowedOrigins
+  corsAllowedOrigins,
+  adminLoginLockout
 }) {
   const allowedCorsOrigins = normalizeCorsOrigins(
     corsAllowedOrigins ?? process.env.CORS_ALLOWED_ORIGINS ?? 'http://localhost:3000,http://127.0.0.1:3000'
   );
   const adminSessions = new Map();
   const merchantSessions = new Map();
+  const adminLoginFailures = new Map();
+  const {
+    maxFailures: adminLoginMaxFailures = 5,
+    lockDurationMs: adminLoginLockDurationMs = 15 * 60 * 1000
+  } = adminLoginLockout || {};
   const userWeChatIdentities = new Map();
   const userSessions = new Map();
   const userSessionTtlMs = 7 * 24 * 60 * 60 * 1000;
+
+  function getAdminLoginLockKey(request, attemptedUsername) {
+    const clientAddress = request.socket?.remoteAddress || 'unknown';
+    const normalizedUsername = String(attemptedUsername || '').trim().toLowerCase();
+    return `${clientAddress}|${normalizedUsername}`;
+  }
+
+  function getActiveAdminLoginLock(lockKey, now) {
+    const state = adminLoginFailures.get(lockKey);
+    if (!state) return null;
+    if (state.lockedUntil > now) return state;
+    if (state.lastFailedAt + adminLoginLockDurationMs <= now) {
+      adminLoginFailures.delete(lockKey);
+      return null;
+    }
+    return state.lockedUntil ? null : state;
+  }
+
+  function recordAdminLoginFailure(lockKey, now) {
+    const state = adminLoginFailures.get(lockKey) || {
+      failures: 0,
+      lockedUntil: 0,
+      lastFailedAt: 0
+    };
+    if (state.lastFailedAt + adminLoginLockDurationMs <= now) {
+      state.failures = 0;
+      state.lockedUntil = 0;
+    }
+    state.failures += 1;
+    state.lastFailedAt = now;
+    if (state.failures >= adminLoginMaxFailures) {
+      state.lockedUntil = now + adminLoginLockDurationMs;
+    }
+    adminLoginFailures.set(lockKey, state);
+  }
 
   function loadWeChatIdentity(data, userId) {
     if (userWeChatIdentities.has(userId)) return userWeChatIdentities.get(userId);
@@ -2347,9 +2388,19 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const username = process.env.ADMIN_USERNAME || 'admin';
         const password = process.env.ADMIN_PASSWORD;
+        const now = Date.now();
+        const lockKey = getAdminLoginLockKey(request, body.username);
+        const lockState = getActiveAdminLoginLock(lockKey, now);
+        if (lockState?.lockedUntil) {
+          throw new ApiError(429, 'ADMIN_LOGIN_LOCKED', '管理员登录失败次数过多，请稍后再试', {
+            retryAfterSeconds: Math.ceil((lockState.lockedUntil - now) / 1000)
+          });
+        }
         if (!password || body.username !== username || body.password !== password) {
+          recordAdminLoginFailure(lockKey, now);
           throw new ApiError(401, 'INVALID_CREDENTIALS', '账号或密码错误');
         }
+        adminLoginFailures.delete(lockKey);
         const token = createHash('sha256').update(`${username}:${password}:${randomUUID()}`).digest('hex');
         adminSessions.set(token, { username, expiresAt: Date.now() + 8 * 60 * 60 * 1000 });
         return sendJson(response, 200, { data: { token, user: { name: '运营管理员', role: '超级管理员' }, expiresIn: 28800 }, requestId });

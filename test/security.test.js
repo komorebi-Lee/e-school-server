@@ -81,6 +81,56 @@ test('admin password is environment-only and never shipped in the login page', a
   assert.ok(!adminPage.includes('id="password" value='));
 });
 
+test('admin login locks after repeated credential failures', async () => {
+  const failedLogin = {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: ADMIN_USERNAME, password: 'wrong-password' })
+  };
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const failed = await api('/api/admin/login', failedLogin);
+    assert.equal(failed.response.status, 401);
+  }
+
+  const locked = await api('/api/admin/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: ADMIN_USERNAME, password: ADMIN_PASSWORD })
+  });
+  assert.equal(locked.response.status, 429);
+  assert.equal(locked.body.error.code, 'ADMIN_LOGIN_LOCKED');
+});
+
+test('admin login lock expires and allows another attempt', async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-lock-'));
+  const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));
+  const lockServer = http.createServer(createApp({
+    store,
+    adminLoginLockout: { maxFailures: 5, lockDurationMs: 100 }
+  }));
+  await new Promise((resolve) => lockServer.listen(0, '127.0.0.1', resolve));
+  const lockBaseUrl = `http://127.0.0.1:${lockServer.address().port}`;
+  const login = (password) => fetch(`${lockBaseUrl}/api/admin/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: ADMIN_USERNAME, password })
+  });
+
+  try {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      assert.equal((await login('wrong-password')).status, 401);
+    }
+    assert.equal((await login(ADMIN_PASSWORD)).status, 429);
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal((await login(ADMIN_PASSWORD)).status, 200);
+  } finally {
+    await new Promise((resolve) => lockServer.close(resolve));
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test('wechat login exchanges a code for a server-side user identity', async () => {
   const invalid = await api('/api/auth/login', {
     method: 'POST',
