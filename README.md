@@ -218,6 +218,8 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 
 超时预警会同步写商家站内通知；商家开启服务分提醒后，还会进入微信订阅消息队列。模板 ID 由管理端「商家服务分 → 微信订阅消息模板」的「履约超时提醒模板 ID」配置。
 
+同一轮巡检也会执行待支付超时关单：电瓶车订单释放预占库存，电话卡、话费权益和校园牌照待支付单取消并关闭对应模拟支付单。该动作不依赖用户访问任何接口。
+
 预警工单状态机：
 
 ```
@@ -233,11 +235,11 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 责任方是商家的预警会写一条 `SLA` 类型站内通知给该商家；责任方是平台但涉及某商家的预警，会给商家一条「平台正在处理中」的知会。
 - 开启提醒后，责任商家的预警会额外生成一条 `sla_warning` 订阅消息，派发后统一跳转商家工作台。
 - 微信订阅消息派发失败后，可在管理端「站内通知 → 订阅消息队列」单独重试；模板 ID 修复后消息会回到 `QUEUED` 状态。
-- 巡检不改变任何业务状态，只维护预警工单，因此重复运行是安全的。
+- 除待支付超时关单外，巡检不改变履约业务状态，只维护预警工单，因此重复运行是安全的。
 
 `GET /api/admin/sla-alerts`（可选 `?status=OPEN|ACKNOWLEDGED|RESOLVED`）返回预警列表、`summary` 汇总与 `patrolState`。
 
-`POST /api/admin/patrol/run` 立即执行一轮巡检，返回本轮 `created` / `escalated` / `resolved` / `open`，用于处理完一批工单后马上刷新。
+`POST /api/admin/patrol/run` 立即执行一轮巡检，返回本轮 `created` / `escalated` / `resolved` / `expiredOrders` / `open`，用于处理完一批工单后马上刷新。
 
 `POST /api/admin/sla-alerts/:id/acknowledge`，body `{ "note": "已电话联系商家" }`
 
@@ -299,7 +301,7 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - CORS 当前开放用于本地联调，部署时应限制来源。
 - 未接入真实微信支付、实名服务、校方校园卡系统、物流或消息通知。
 - 库存已实现“预占 → 支付扣减 → 取消/超时释放 → 退款回补”闭环，但仍是单进程 JSON/MySQL 快照方案，高并发场景需要数据库行级锁或独立库存服务。
-- 超时关单依赖读接口触发的惰性清扫（商品、订单、概览接口），没有独立定时任务；长时间无人访问时订单会在下一次访问时统一关闭。
+- 待支付超时关单已并入常驻巡检；读接口仍保留惰性清扫作为兜底，多实例部署时需要分布式锁避免重复执行。
 - 分账账期到期依赖读接口惰性清扫；运营巡检已有独立定时任务（`patrolIntervalMinutes`），但仍是单进程内的 `setInterval`，多实例部署时会重复执行，需要改为分布式任务或选主。
 - 提现审核与打款仍是人工在管理端确认的模拟动作，未接入真实企业付款/企业转账接口，也没有银行回单附件上传与批量打款。
 - 超时预警已接入站内通知、微信订阅消息和店铺服务分；短信或企业微信告警仍未接入。

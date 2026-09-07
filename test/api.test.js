@@ -2538,6 +2538,43 @@ test('operations patrol raises overdue alerts and closes them when work moves on
   assert.equal(restored.response.status, 200);
 });
 
+test('patrol closes expired pending payments without user traffic', async () => {
+  const adminHeaders = await loginAdmin();
+  const buyer = await loginWeChat('patrol_timeout_buyer');
+  // 先把历史测试留下的待支付单统一置为过期，便于验证巡检能清空全部库存预占。
+  store.update((data) => {
+    const expiredAt = new Date(Date.now() - 60 * 1000).toISOString();
+    for (const order of data.orders || []) {
+      if (order.status === 'PENDING_PAYMENT') order.paymentExpiresAt = expiredAt;
+    }
+  });
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(created.response.status, 201);
+  const productBefore = store.read().products.find((item) => item.id === 'prod_ebike_001');
+  assert.equal(productBefore.reservedStock, 1);
+
+  store.update((data) => {
+    const order = data.orders.find((item) => item.id === created.body.data.id);
+    order.paymentExpiresAt = new Date(Date.now() - 60 * 1000).toISOString();
+  });
+
+  const patrol = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(patrol.response.status, 200);
+  assert.ok(patrol.body.data.expiredOrders.includes(created.body.data.orderNo));
+  assert.ok(patrol.body.data.patrolState.lastExpiredOrders >= 1);
+
+  const state = store.read();
+  const order = state.orders.find((item) => item.id === created.body.data.id);
+  assert.equal(order.status, 'CANCELLED');
+  assert.equal(order.paymentStatus, 'EXPIRED');
+  assert.equal(order.cancelReason, 'PAYMENT_TIMEOUT');
+  assert.equal(state.products.find((item) => item.id === 'prod_ebike_001').reservedStock, 0);
+  assert.equal(state.paymentOrders.find((item) => item.id === created.body.data.paymentOrderId).status, 'CANCELLED');
+});
+
 test('service score cases support appeal review, rectification and subscription queue', async () => {
   const merchantSession = await loginWeChat('merchant_demo');
   const merchantLogin = await api('/api/merchant/login', {

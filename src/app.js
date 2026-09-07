@@ -1461,6 +1461,8 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
   // 巡检一轮：新增/升级超时预警、关闭已完成事项的预警，并把结果写进 patrolState。
   function runOperationsPatrol(data, now = new Date().toISOString()) {
     if (!Array.isArray(data.slaAlerts)) data.slaAlerts = [];
+    // 待支付超时关单放进常驻巡检，避免无人访问时库存一直被预占。
+    const expiredOrders = expirePendingOrders(data, now);
     const nowMs = new Date(now).getTime();
     const warningWindowMs = patrolWarningWindowMs(data);
     const targets = collectSlaTargets(data);
@@ -1546,15 +1548,16 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       runCount: Number(data.patrolState?.runCount || 0) + 1,
       lastCreated: created.length,
       lastResolved: resolved.length,
-      lastOpen: stillOpen.length
+      lastOpen: stillOpen.length,
+      lastExpiredOrders: expiredOrders.length
     };
     // 预警变化会直接影响服务分，所以巡检末尾统一重算一次分档。
     const scoreChanges = refreshMerchantScores(data, now);
     data.patrolState.lastScoreChanges = scoreChanges.length;
-    if (created.length || resolved.length || escalated.length) {
-      addAudit(data, '运营巡检执行', `新增 ${created.length} · 升级 ${escalated.length} · 关闭 ${resolved.length}`);
+    if (created.length || resolved.length || escalated.length || expiredOrders.length) {
+      addAudit(data, '运营巡检执行', `新增 ${created.length} · 升级 ${escalated.length} · 关闭 ${resolved.length} · 超时关单 ${expiredOrders.length}`);
     }
-    return { created, escalated, resolved, open: stillOpen.length, scoreChanges };
+    return { created, escalated, resolved, open: stillOpen.length, scoreChanges, expiredOrders };
   }
 
   function notifySlaAlert(data, alert) {
@@ -3323,6 +3326,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             created: result.created.length,
             escalated: result.escalated.length,
             resolved: result.resolved.length,
+            expiredOrders: result.expiredOrders,
             open: result.open,
             patrolState: data.patrolState || {},
             slaSummary: slaSummary(data.slaAlerts || [])
