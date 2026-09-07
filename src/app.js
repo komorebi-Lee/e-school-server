@@ -443,8 +443,11 @@ async function readJson(request) {
     chunks.push(chunk);
   }
   if (chunks.length === 0) return {};
+  const rawBody = Buffer.concat(chunks).toString('utf8');
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const body = JSON.parse(rawBody);
+    request.rawBody = rawBody;
+    return body;
   } catch {
     throw new ApiError(400, 'INVALID_JSON', 'Request body must be valid JSON');
   }
@@ -705,9 +708,14 @@ function createApp({
 
   async function attachProviderIntent(paymentOrder) {
     if (!paymentOrder) return null;
+    const payerOpenId = store.read().userOpenIds?.[paymentOrder.userId] || paymentOrder.openid || '';
     let intent;
     try {
-      intent = await paymentProvider.createIntent(paymentOrder);
+      intent = await paymentProvider.createIntent({
+        ...paymentOrder,
+        openid: payerOpenId,
+        description: paymentOrder.description || `狮山智生活订单 ${paymentOrder.paymentNo}`
+      });
     } catch (error) {
       throw new ApiError(502, 'PAYMENT_PROVIDER_FAILED', `支付渠道暂不可用：${error.message}`);
     }
@@ -5332,6 +5340,15 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
         const result = settlePaymentOrder(paymentOrder.id, callbackResult, 'PROVIDER_CALLBACK');
         return sendJson(response, 200, { data: result, requestId });
+      }
+
+      const reloadPaymentMatch = pathname.match(/^\/api\/payment-orders\/([^/]+)$/);
+      if (request.method === 'GET' && reloadPaymentMatch) {
+        const { userId } = requireUser(request);
+        const paymentOrder = (store.read().paymentOrders || [])
+          .find((item) => item.id === reloadPaymentMatch[1] && item.userId === userId);
+        if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        return sendJson(response, 200, { data: paymentOrder, requestId });
       }
 
       const paymentMatch = pathname.match(/^\/api\/payment-orders\/([^/]+)(?:\/(confirm|cancel|refund))?$/);

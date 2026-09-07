@@ -1,3 +1,5 @@
+const { WeChatPayTransport } = require('./wechat-pay-transport');
+
 class MockPaymentProvider {
   constructor() {
     this.name = 'mock';
@@ -36,17 +38,22 @@ class MockPaymentProvider {
 }
 
 class WeChatPaymentProvider {
-  constructor({ appid, mchid, serialNo, privateKeyPath, apiV3Key, transport }) {
-    const missingFields = Object.entries({ appid, mchid, serialNo, privateKeyPath, apiV3Key })
+  constructor({ appid, mchid, serialNo, privateKeyPath, apiV3Key, notifyUrl, platformPublicKeyPath, platformCertificateSerial, transport, httpClient, now }) {
+    const missingFields = Object.entries({
+      appid,
+      mchid,
+      serialNo,
+      privateKeyPath,
+      apiV3Key,
+      notifyUrl,
+      platformPublicKeyPath,
+      platformCertificateSerial
+    })
       .filter(([, value]) => !value)
       .map(([key]) => key);
     if (missingFields.length) {
       throw new Error(`WECHAT_PAYMENT_CONFIG_MISSING: ${missingFields.join(', ')}`);
     }
-    if (!transport) {
-      throw new Error('WECHAT_PAYMENT_TRANSPORT_MISSING');
-    }
-
     this.name = 'wechat';
     this.channel = 'WECHAT';
     this.appid = appid;
@@ -54,44 +61,34 @@ class WeChatPaymentProvider {
     this.serialNo = serialNo;
     this.privateKeyPath = privateKeyPath;
     this.apiV3Key = apiV3Key;
-    this.transport = transport;
+    this.transport = transport || new WeChatPayTransport({
+      appid,
+      mchid,
+      serialNo,
+      privateKeyPath,
+      apiV3Key,
+      notifyUrl,
+      platformPublicKeyPath,
+      platformCertificateSerial,
+      httpClient,
+      now
+    });
   }
 
   createIntent(payment) {
-    return this.transport.createIntent({
-      payment,
-      appid: this.appid,
-      mchid: this.mchid,
-      serialNo: this.serialNo,
-      privateKeyPath: this.privateKeyPath,
-      apiV3Key: this.apiV3Key
-    });
+    return this.transport.createIntent(payment);
   }
 
   confirm(payment) {
-    return this.transport.confirm({
-      payment,
-      appid: this.appid,
-      mchid: this.mchid,
-      serialNo: this.serialNo,
-      privateKeyPath: this.privateKeyPath,
-      apiV3Key: this.apiV3Key
-    });
+    return this.transport.confirm(payment);
   }
 
   refund(payment) {
-    return this.transport.refund({
-      payment,
-      appid: this.appid,
-      mchid: this.mchid,
-      serialNo: this.serialNo,
-      privateKeyPath: this.privateKeyPath,
-      apiV3Key: this.apiV3Key
-    });
+    return this.transport.refund(payment);
   }
 
   verifyCallback(request, body) {
-    return this.transport.verifyCallback({ request, body });
+    return this.transport.verifyCallback(request, body);
   }
 }
 
@@ -105,7 +102,12 @@ function createPaymentProvider(options = {}) {
       serialNo: options.serialNo || process.env.WECHAT_PAY_SERIAL_NO,
       privateKeyPath: options.privateKeyPath || process.env.WECHAT_PAY_PRIVATE_KEY_PATH,
       apiV3Key: options.apiV3Key || process.env.WECHAT_PAY_APIV3_KEY,
-      transport: options.transport
+      notifyUrl: options.notifyUrl || process.env.WECHAT_PAY_NOTIFY_URL,
+      platformPublicKeyPath: options.platformPublicKeyPath || process.env.WECHAT_PAY_PLATFORM_PUBLIC_KEY_PATH,
+      platformCertificateSerial: options.platformCertificateSerial || process.env.WECHAT_PAY_PLATFORM_CERT_SERIAL,
+      transport: options.transport,
+      httpClient: options.httpClient,
+      now: options.now
     });
   }
   throw new Error(`PAYMENT_PROVIDER_UNSUPPORTED: ${providerName}`);
