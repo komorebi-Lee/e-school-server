@@ -2575,6 +2575,51 @@ test('patrol closes expired pending payments without user traffic', async () => 
   assert.equal(state.paymentOrders.find((item) => item.id === created.body.data.paymentOrderId).status, 'CANCELLED');
 });
 
+test('patrol releases matured settlements without dashboard traffic', async () => {
+  const adminHeaders = await loginAdmin();
+  const buyer = await loginWeChat('patrol_settlement_buyer');
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_001', quantity: 1 }] })
+  });
+  assert.equal(created.response.status, 201);
+  await confirmPayment(created.body.paymentOrder.id, buyer.token);
+  const detail = await api(`/api/orders/${created.body.data.id}`, { headers: { authorization: `Bearer ${buyer.token}` } });
+  const fulfilled = await api(`/api/merchant/orders/${created.body.data.id}/status`, {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ status: 'COMPLETED', deliveryCode: detail.body.data.deliveryCode })
+  });
+  assert.equal(fulfilled.response.status, 200);
+
+  const maturedIds = store.update((data) => {
+    const expiredAt = new Date(Date.now() - 60 * 1000).toISOString();
+    for (const settlement of data.settlements || []) {
+      if (settlement.orderId === created.body.data.id) settlement.availableAt = expiredAt;
+    }
+    return (data.settlements || [])
+      .filter((item) => item.orderId === created.body.data.id)
+      .map((item) => item.id);
+  });
+  assert.ok(maturedIds.length >= 1);
+
+  const patrol = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(patrol.response.status, 200);
+  assert.equal(patrol.body.data.maturedSettlements.length, maturedIds.length);
+  assert.equal(patrol.body.data.patrolState.lastMaturedSettlements, maturedIds.length);
+
+  const state = store.read();
+  for (const id of maturedIds) {
+    const settlement = state.settlements.find((item) => item.id === id);
+    assert.equal(settlement.settlementStatus, 'PENDING_SETTLE');
+  }
+});
+
 test('service score cases support appeal review, rectification and subscription queue', async () => {
   const merchantSession = await loginWeChat('merchant_demo');
   const merchantLogin = await api('/api/merchant/login', {
