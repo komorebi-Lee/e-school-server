@@ -339,6 +339,48 @@ test('super admin can create role-limited admins', async () => {
   }
 });
 
+test('admin overview includes a sanitized admin directory', async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-directory-'));
+  const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));
+  const directoryServer = http.createServer(createApp({ store }));
+  await new Promise((resolve) => directoryServer.listen(0, '127.0.0.1', resolve));
+  const directoryBaseUrl = `http://127.0.0.1:${directoryServer.address().port}`;
+
+  try {
+    const login = await fetch(`${directoryBaseUrl}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: ADMIN_USERNAME, password: ADMIN_PASSWORD })
+    });
+    const token = (await login.json()).data.token;
+
+    const overview = await fetch(`${directoryBaseUrl}/api/admin/overview`, {
+      headers: { authorization: `Bearer ${token}` }
+    });
+    assert.equal(overview.status, 200);
+    const body = await overview.json();
+    assert.ok(Array.isArray(body.data.adminUsers));
+    assert.ok(body.data.adminUsers.some((item) => item.username === ADMIN_USERNAME));
+    assert.ok(body.data.adminUsers.every((item) => !('passwordHash' in item)));
+  } finally {
+    await new Promise((resolve) => directoryServer.close(resolve));
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('admin UI exposes the admin management screen', () => {
+  const adminPage = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.html'), 'utf8');
+  const adminScript = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8');
+
+  assert.ok(adminPage.includes('data-view="admins"'));
+  assert.ok(adminPage.includes('id="adminModal"'));
+  assert.ok(adminPage.includes('id="adminUsername"'));
+  assert.ok(adminPage.includes('id="adminRole"'));
+  assert.ok(adminScript.includes('titles.admins'));
+  assert.ok(adminScript.includes('function admins()'));
+  assert.ok(adminScript.includes('/api/admin/admins'));
+});
+
 test('disabling an admin revokes active sessions immediately', async () => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-disable-'));
   const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));

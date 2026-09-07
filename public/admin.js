@@ -758,3 +758,137 @@ bindView = function () {
     await load();
   });
 };
+
+// ===== 管理员管理 =====
+titles.admins = '管理员管理';
+collections.admins = 'adminUsers';
+Object.assign(statuses, { ACTIVE: '启用', DISABLED: '停用' });
+const adminRoleLabels = {
+  SUPER_ADMIN: '超级管理员',
+  OPERATOR: '运营管理员',
+  FINANCE: '财务管理员',
+  SUPPORT: '客服管理员'
+};
+
+function admins() {
+  const items = (state.data.adminUsers || []).filter(match).filter(statusMatch);
+  const rows = items.map((item) => {
+    const isSelf = item.id === state.user?.id;
+    return `<tr>
+      <td><strong>${esc(item.displayName || item.username)}</strong><small>${esc(item.username)}</small></td>
+      <td>${esc(adminRoleLabels[item.role] || item.role)}</td>
+      <td><span class="badge ${item.status === 'DISABLED' ? 'red' : 'green'}">${label(item.status)}</span></td>
+      <td>${fmtDate(item.createdAt)}<small>更新 ${fmtDate(item.updatedAt)}</small></td>
+      <td><div class="row-actions">
+        <button class="table-button edit-admin" data-id="${esc(item.id)}">编辑</button>
+        <button class="text-button toggle-admin" data-id="${esc(item.id)}" data-status="${item.status === 'DISABLED' ? 'ACTIVE' : 'DISABLED'}" ${isSelf ? 'disabled' : ''}>${item.status === 'DISABLED' ? '启用' : '停用'}</button>
+        <button class="text-button reset-admin-password" data-id="${esc(item.id)}">重置密码</button>
+      </div></td>
+    </tr>`;
+  });
+  return `<div class="page-actions"><p>共 ${items.length} 个账号</p><div><button id="addAdmin" class="primary">＋ 新增管理员</button></div></div>
+    <div class="filterbar"><div class="filters"><input id="listSearch" class="search" value="${esc(state.query)}" placeholder="搜索姓名或账号"><select id="statusFilter" class="filter-select"><option value="ALL">全部状态</option><option value="ACTIVE" ${state.status === 'ACTIVE' ? 'selected' : ''}>启用</option><option value="DISABLED" ${state.status === 'DISABLED' ? 'selected' : ''}>停用</option></select></div><button id="exportButton" class="export-button">导出 CSV</button></div>
+    ${table(['管理员', '角色', '状态', '时间', '操作'], rows, items.length)}`;
+}
+
+const baseRenderWithAdmins = render;
+render = function () {
+  if (state.view === 'admins') {
+    document.querySelector('#pageTitle').textContent = titles.admins;
+    document.querySelector('#breadcrumb').textContent = titles.admins;
+    document.querySelector('#content').innerHTML = admins();
+    bindView();
+    return;
+  }
+  return baseRenderWithAdmins();
+};
+
+function toggleAdminModal(show) {
+  document.querySelector('#adminModal').classList.toggle('hidden', !show);
+  document.querySelector('#modalBackdrop').classList.toggle('hidden', !show);
+}
+
+function openAdmin(admin) {
+  const editing = Boolean(admin);
+  document.querySelector('#adminModalTitle').textContent = editing ? '编辑管理员' : '新增管理员';
+  document.querySelector('#adminId').value = admin?.id || '';
+  document.querySelector('#adminUsername').value = admin?.username || '';
+  document.querySelector('#adminUsername').disabled = editing;
+  document.querySelector('#adminDisplayName').value = admin?.displayName || '';
+  document.querySelector('#adminRole').value = admin?.role || 'OPERATOR';
+  document.querySelector('#adminPassword').value = '';
+  document.querySelector('#adminPassword').required = !editing;
+  document.querySelector('#adminPassword').placeholder = editing ? '留空则不修改密码' : '至少 12 位';
+  toggleAdminModal(true);
+}
+
+async function saveAdmin(event) {
+  event.preventDefault();
+  const id = document.querySelector('#adminId').value;
+  const password = document.querySelector('#adminPassword').value;
+  const payload = {
+    displayName: document.querySelector('#adminDisplayName').value.trim(),
+    role: document.querySelector('#adminRole').value
+  };
+  if (password) payload.password = password;
+  if (!id) {
+    payload.username = document.querySelector('#adminUsername').value.trim();
+    payload.password = password;
+  }
+  await api(id ? `/api/admin/admins/${id}` : '/api/admin/admins', {
+    method: id ? 'PATCH' : 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  toggleAdminModal(false);
+  showToast(id ? '管理员已更新' : '管理员已创建');
+  await load();
+}
+
+async function toggleAdminStatus(id, nextStatus) {
+  await api(`/api/admin/admins/${id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ status: nextStatus })
+  });
+  showToast(nextStatus === 'DISABLED' ? '管理员已停用' : '管理员已启用');
+  await load();
+}
+
+async function resetAdminPassword(id) {
+  const password = prompt('请输入新密码（至少 12 位）');
+  if (password === null) return;
+  if (password.length < 12) return showToast('密码至少需要 12 位');
+  await api(`/api/admin/admins/${id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ password })
+  });
+  showToast('密码已重置');
+  await load();
+}
+
+const baseBindViewWithAdmins = bindView;
+bindView = function () {
+  baseBindViewWithAdmins();
+  document.querySelector('#addAdmin')?.addEventListener('click', () => openAdmin());
+  document.querySelectorAll('.edit-admin').forEach((button) => button.addEventListener('click', () => {
+    const admin = (state.data.adminUsers || []).find((item) => item.id === button.dataset.id);
+    if (admin) openAdmin(admin);
+  }));
+  document.querySelectorAll('.toggle-admin').forEach((button) => button.addEventListener('click', () => {
+    toggleAdminStatus(button.dataset.id, button.dataset.status).catch((error) => showToast(error.message));
+  }));
+  document.querySelectorAll('.reset-admin-password').forEach((button) => button.addEventListener('click', () => {
+    resetAdminPassword(button.dataset.id).catch((error) => showToast(error.message));
+  }));
+};
+
+document.querySelector('#closeAdminModal').addEventListener('click', () => toggleAdminModal(false));
+document.querySelector('#cancelAdminModal').addEventListener('click', () => toggleAdminModal(false));
+document.querySelector('#modalBackdrop').addEventListener('click', () => {
+  if (!document.querySelector('#adminModal').classList.contains('hidden')) toggleAdminModal(false);
+});
+document.querySelector('#adminForm').addEventListener('submit', (event) => {
+  saveAdmin(event).catch((error) => showToast(error.message));
+});

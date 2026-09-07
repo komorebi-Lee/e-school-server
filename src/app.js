@@ -3823,6 +3823,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 status: item.lowStockAlertStatus || ''
               })),
             products: data.products.map(withAvailableStock),
+            adminUsers: (data.adminUsers || []).map(publicAdminUser),
             rechargePromos: data.rechargePromos || [],
             merchants: data.merchants,
             orders: data.orders,
