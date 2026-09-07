@@ -101,17 +101,19 @@ function reconciliationPanel(){
   }).join('');
   const differenceRows=differences.slice(0,20).map(item=>`<tr><td>${esc(reconciliationTypeLabels[item.type]||item.type)}</td><td>${esc(item.paymentNo||'—')}</td><td>${esc(item.refundNo||'—')}</td><td>${item.localAmountInCents!==undefined?money(item.localAmountInCents):'—'}</td><td>${item.providerAmountInCents!==undefined?money(item.providerAmountInCents):item.amountInCents!==undefined?money(item.amountInCents):'—'}</td></tr>`).join('');
   const taskStatusLabels={PENDING:'待处理',ACKNOWLEDGED:'已认领',RESOLVED:'已完成'};
+  const isOverdue=(task)=>task.status!=='RESOLVED'&&task.dueAt&&task.dueAt<new Date().toISOString();
+  const taskDue=(task)=>task.dueAt?`${fmtDate(task.dueAt)}${isOverdue(task)?'<span class="badge red">已逾期</span>':''}`:'未设置';
   const taskRows=financeTasks.slice(0,8).map(task=>{
     const actions=task.status==='PENDING'?`<button class="text-button ack-finance-task" data-id="${esc(task.id)}">认领处理</button>`:'';
     const resolveAction=task.status!=='RESOLVED'?`<button class="text-button resolve-finance-task" data-id="${esc(task.id)}">完成处理</button>`:'';
-    return `<tr><td><strong>${esc(task.billDate)}</strong><small>${esc(task.provider)} · ${esc(task.reportId)}</small></td><td>${task.differenceCount}<small>${esc(task.detail||'')}</small></td><td><span class="badge ${task.status==='RESOLVED'?'green':task.status==='ACKNOWLEDGED'?'blue':'orange'}">${esc(taskStatusLabels[task.status]||task.status)}</span><small>${esc(task.acknowledgeNote||task.resolutionNote||task.resolvedReason||'')}</small></td><td>${fmtDate(task.updatedAt||task.createdAt)}</td><td><div class="row-actions">${actions}${resolveAction}</div></td></tr>`;
+    return `<tr><td><strong>${esc(task.billDate)}</strong><small>${esc(task.provider)} · ${esc(task.reportId)}</small></td><td>${task.differenceCount}<small>${esc(task.detail||'')}</small></td><td><span class="badge ${task.status==='RESOLVED'?'green':task.status==='ACKNOWLEDGED'?'blue':'orange'}">${esc(taskStatusLabels[task.status]||task.status)}</span><small>${esc(task.acknowledgeNote||task.resolutionNote||task.resolvedReason||'')}</small></td><td>${taskDue(task)}</td><td>${fmtDate(task.updatedAt||task.createdAt)}</td><td><div class="row-actions">${actions}${resolveAction}</div></td></tr>`;
   }).join('');
   return `<section class="panel reconciliation-panel"><div class="panel-head"><h2>支付对账</h2><span>微信账单与本地支付/退款核对</span></div>
     <div class="page-actions"><p>${latest?`最近对账：${esc(latest.billDate)} · ${latest.status==='MATCHED'?'账实相符':'账实不符'}`:'尚未执行对账'}</p><div><input id="reconciliation-date" type="date" value="${yesterday}"><button id="run-reconciliation" class="primary">执行对账</button></div></div>
     <div class="metric-grid">${metric('支付匹配',summary.matchedPaymentCount||0,'渠道与本地一致')}${metric('支付差异',paymentDifferenceCount,'缺失或金额不一致')}${metric('退款匹配',summary.matchedRefundCount||0,'渠道与本地一致')}${metric('退款差异',refundDifferenceCount,'缺失或金额不一致')}${metric('待处理对账',financeTasks.filter(item=>item.status!=='RESOLVED').length,'平台财务待跟进',true)}</div>
     <div class="table-wrap"><table><thead><tr><th>账单日期</th><th>结果</th><th>支付</th><th>退款</th><th>差异数</th><th>执行时间</th></tr></thead><tbody>${reportRows||'<tr><td colspan="6" class="empty">暂无对账报告</td></tr>'}</tbody></table></div>
     ${latest?`<div class="panel-head secondary-panel-head"><h3>差异明细</h3><span>最近一次报告，最多展示 20 条</span></div><div class="table-wrap"><table><thead><tr><th>差异类型</th><th>支付单</th><th>退款单</th><th>本地金额</th><th>渠道金额</th></tr></thead><tbody>${differenceRows||'<tr><td colspan="5" class="empty">暂无差异</td></tr>'}</tbody></table></div>`:''}
-    <div class="panel-head secondary-panel-head"><h3>对账待办</h3><span>差异报告自动生成，处理结论留痕</span></div><div class="table-wrap"><table><thead><tr><th>账单</th><th>差异</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${taskRows||'<tr><td colspan="5" class="empty">暂无对账待办</td></tr>'}</tbody></table></div>
+    <div class="panel-head secondary-panel-head"><h3>对账待办</h3><span>差异报告自动生成，处理时限和结论留痕</span></div><div class="table-wrap"><table><thead><tr><th>账单</th><th>差异</th><th>状态</th><th>处理时限</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${taskRows||'<tr><td colspan="6" class="empty">暂无对账待办</td></tr>'}</tbody></table></div>
   </section>`;
 }
 function payments(){

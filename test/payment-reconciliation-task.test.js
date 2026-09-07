@@ -186,6 +186,12 @@ test('overdue finance tasks raise patrol alerts and auto-close after resolution'
   assert.equal(financeAlert.level, 'OVERDUE');
   assert.ok(financeAlert.overdueMinutes >= 120);
 
+  const adminNotifications = await api('/api/admin/notifications', { headers: { authorization: `Bearer ${admin.token}` } });
+  assert.equal(adminNotifications.response.status, 200);
+  assert.ok(adminNotifications.body.data.some((item) => item.type === 'SLA'
+    && item.title.includes('支付对账差异处理')
+    && item.content.includes('2026-09-07 reconciliation-provider')), '平台逾期预警应进入运营通知');
+
   providerBills = {
     tradeBill: (store.read().paymentOrders || [])
       .filter((item) => ['PAID', 'REFUNDED'].includes(item.status))

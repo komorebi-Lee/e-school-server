@@ -74,6 +74,7 @@ test('admin payments view renders reconciliation controls and differences', () =
         provider: 'wechat',
         differenceCount: 1,
         status: 'PENDING',
+        dueAt: '2026-09-06T10:00:00.000Z',
         createdAt: '2026-09-07T08:00:00.000Z',
         updatedAt: '2026-09-07T08:00:00.000Z'
       }
@@ -93,6 +94,8 @@ test('admin payments view renders reconciliation controls and differences', () =
   assert.ok(html.includes('¥1,299.00'));
   assert.ok(html.includes('对账待办'));
   assert.ok(html.includes('待处理'));
+  assert.ok(html.includes('处理时限'));
+  assert.ok(html.includes('已逾期'));
   assert.ok(html.includes('认领处理'));
   assert.ok(html.includes('完成处理'));
 });

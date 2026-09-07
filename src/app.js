@@ -2289,14 +2289,19 @@ function createApp({
     const content = `${alert.ruleLabel}：${alert.businessNo} ${overdueText}，请尽快处理。${alert.detail ? `（${alert.detail}）` : ''}`.slice(0, 300);
     const merchant = (data.merchants || []).find((item) => item.id === alert.merchantId);
     const isMerchantOwner = alert.ownerRole === 'MERCHANT' && alert.merchantId;
-    if (!merchant?.userId) return;
     const title = isMerchantOwner
       ? (alert.level === 'OVERDUE' ? '履约已超时' : '履约即将超时')
-      : '平台正在处理中';
+      : `${alert.ruleLabel}${alert.level === 'OVERDUE' ? '已逾期' : '即将超时'}`;
     const message = isMerchantOwner
       ? content
       : `${alert.ruleLabel}：${alert.businessNo} ${overdueText}，平台已收到提醒。`;
-    sendScoreNotification(data, merchant.userId, 'SLA_WARNING', title, message, alert.updatedAt || alert.createdAt, 'SLA');
+    if (isMerchantOwner && merchant?.userId) {
+      sendScoreNotification(data, merchant.userId, 'SLA_WARNING', title, message, alert.updatedAt || alert.createdAt, 'SLA');
+      return;
+    }
+    if (alert.ownerRole === 'PLATFORM' && !merchant?.userId) {
+      addNotification(data, 'PLATFORM', 'SLA', title, content);
+    }
   }
 
   async function patrolOnce() {
