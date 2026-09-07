@@ -25,6 +25,7 @@ PORT、DB_FILE、ADMIN_USERNAME、ADMIN_PASSWORD_HASH、ADMIN_PASSWORD、CORS_AL
 支付提供方返回的状态必须是 `PAID` 才会落账；返回其他状态时接口返回 `502 PAYMENT_PROVIDER_FAILED`，订单继续保持待支付。
 退款同理，提供方必须返回 `REFUNDED` 才会冲销订单、分账和财务流水。
 微信退款为异步状态时，后台会先把支付单标记为「退款处理中」并保留退款单号；运营可通过退款查询接口确认结果，收到退款成功回调时也会自动执行统一冲账。
+如果用户在本地订单已超时关闭后才完成微信支付，支付回调会先把这笔延迟收款记入财务流水，再自动发起全额退款；已经释放的库存预占不会被重复回补。
 
 微信模式已实现 JSAPI 下单、商户请求签名、小程序支付参数签名、支付/退款状态查询、退款请求、回调时间戳/序列/签名校验和 AES-256-GCM 回调解密。正式收款前仍必须在微信支付商户平台完成配置，并用沙箱或小额真实订单联调回调、退款和对账。
 
@@ -35,6 +36,7 @@ PORT、DB_FILE、ADMIN_USERNAME、ADMIN_PASSWORD_HASH、ADMIN_PASSWORD、CORS_AL
 - `:provider` 必须与当前启用的支付提供方一致。
 - 请求体和签名校验完全交给 `paymentProvider.verifyCallback(request, body)`。
 - `TRANSACTION.SUCCESS` 校验通过后，服务端按 `providerTradeNo` 找到支付单，并把订单推进到已支付。
+- 订单已超时关闭时收到 `TRANSACTION.SUCCESS`，服务端会记录延迟收款并自动发起退款，避免用户资金被吞单。
 - `REFUND.SUCCESS` 校验通过后，服务端按 `refundNo` 找到支付单，并把待确认退款推进到已退款。
 - 重复支付或退款回调会直接返回当前状态，不会重复生成财务流水、分账或库存回补。
 - 签名不合法返回 `401 PAYMENT_CALLBACK_INVALID`，支付单和订单保持原状态。

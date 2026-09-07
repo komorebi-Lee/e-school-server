@@ -270,7 +270,7 @@ function consumeOrderStock(data, order) {
 // 退款/售后退货时把已扣减的库存还回可售池。
 function restoreOrderStock(data, order) {
   if (order.stockReservation === 'HELD') return releaseOrderStock(data, order);
-  if (order.stockReservation === 'RESTORED') return false;
+  if (order.stockReservation !== 'CONSUMED') return false;
   const affectedProducts = [];
   for (const orderItem of order.items || []) {
     const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
@@ -818,6 +818,8 @@ function createApp({
         ? '管理端退款查询确认'
         : source === 'REFUND_CALLBACK'
           ? '退款回调自动确认'
+          : source === 'LATE_PAYMENT_CALLBACK'
+            ? '超时支付自动退款'
           : '管理端退款';
       addAudit(data, refundAuditAction, paymentOrder.paymentNo);
       if (rechargeOrder) {
@@ -831,6 +833,83 @@ function createApp({
       }
       return { order, rechargeOrder, phoneCardOrder, plateApplication, paymentOrder };
     });
+  }
+
+  async function handleLatePaymentCallback(paymentOrder, providerPayment) {
+    const captured = store.update((data) => {
+      const currentPayment = (data.paymentOrders || []).find((item) => item.id === paymentOrder.id);
+      if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+      if (currentPayment.status !== 'CANCELLED') return { paymentOrder: currentPayment, duplicate: true };
+
+      const now = new Date().toISOString();
+      const refundNo = `RF_${currentPayment.paymentNo}`;
+      currentPayment.status = 'PAID';
+      currentPayment.paidAt = providerPayment?.paidAt || now;
+      currentPayment.updatedAt = now;
+      currentPayment.providerTradeNo = providerPayment?.providerTradeNo || currentPayment.providerTradeNo || '';
+      currentPayment.providerPayload = providerPayment?.payload || currentPayment.providerPayload || null;
+      currentPayment.latePaymentCaptured = true;
+      currentPayment.refund = {
+        status: 'PENDING',
+        refundNo,
+        requestedAt: now,
+        updatedAt: now,
+        note: '订单已关闭后收到支付，平台自动退款',
+        providerPayload: null
+      };
+      addFinanceEvent(data, 'PAYMENT', `PAYMENT_${currentPayment.id}`, currentPayment.amountInCents, {
+        userId: currentPayment.userId,
+        paymentNo: currentPayment.paymentNo,
+        businessType: 'LATE_PAYMENT'
+      }, now);
+      addAudit(data, '超时订单收到延迟支付，自动发起退款', currentPayment.paymentNo);
+      addNotification(
+        data,
+        currentPayment.userId,
+        'ORDER',
+        '超时订单收到支付，正在退款',
+        `订单支付单 ${currentPayment.paymentNo} 在关闭后收到支付，平台已自动发起退款。`
+      );
+      return { paymentOrder: currentPayment, duplicate: false };
+    });
+
+    if (captured.duplicate) {
+      const order = store.read().orders.find((item) => item.id === paymentOrder.orderId);
+      return { paymentOrder: captured.paymentOrder, order, duplicate: true };
+    }
+
+    let providerRefund;
+    try {
+      providerRefund = await paymentProvider.refund(captured.paymentOrder);
+    } catch (error) {
+      const failedPayment = store.update((data) => {
+        const currentPayment = (data.paymentOrders || []).find((item) => item.id === paymentOrder.id);
+        currentPayment.refund.status = 'FAILED';
+        currentPayment.refund.updatedAt = new Date().toISOString();
+        currentPayment.refund.providerPayload = { error: error.message };
+        addAudit(data, '超时支付自动退款失败', currentPayment.paymentNo);
+        return currentPayment;
+      });
+      const order = store.read().orders.find((item) => item.id === paymentOrder.orderId);
+      return { paymentOrder: failedPayment, order, lateRefundFailed: true };
+    }
+
+    if (providerRefund?.status === 'REFUNDED') {
+      return completePaymentRefund(paymentOrder.id, providerRefund, 'LATE_PAYMENT_CALLBACK');
+    }
+
+    const pendingPayment = store.update((data) => {
+      const currentPayment = (data.paymentOrders || []).find((item) => item.id === paymentOrder.id);
+      currentPayment.refund.status = ['PENDING', 'FAILED'].includes(providerRefund?.status) ? providerRefund.status : 'FAILED';
+      currentPayment.refund.updatedAt = new Date().toISOString();
+      currentPayment.refund.providerPayload = providerRefund?.payload || null;
+      if (currentPayment.refund.status === 'FAILED') {
+        addAudit(data, '超时支付自动退款失败', currentPayment.paymentNo);
+      }
+      return currentPayment;
+    });
+    const order = store.read().orders.find((item) => item.id === paymentOrder.orderId);
+    return { paymentOrder: pendingPayment, order };
   }
 
   function settlePaymentOrder(paymentId, providerPayment, source = 'USER_CONFIRM') {
@@ -5495,6 +5574,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }
         const paymentOrder = (store.read().paymentOrders || []).find((item) => item.providerTradeNo === callbackResult.providerTradeNo);
         if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        if (paymentOrder.status === 'CANCELLED') {
+          const result = await handleLatePaymentCallback(paymentOrder, callbackResult);
+          return sendJson(response, 200, { data: result, requestId });
+        }
         const result = settlePaymentOrder(paymentOrder.id, callbackResult, 'PROVIDER_CALLBACK');
         return sendJson(response, 200, { data: result, requestId });
       }
