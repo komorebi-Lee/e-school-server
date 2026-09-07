@@ -727,7 +727,11 @@ function createApp({
 
   async function confirmProviderPayment(paymentOrder) {
     try {
-      return await paymentProvider.confirm(paymentOrder);
+      const result = await paymentProvider.confirm(paymentOrder);
+      if (result?.status !== 'PAID') {
+        throw new Error(`provider returned ${result?.status || 'UNKNOWN'}`);
+      }
+      return result;
     } catch (error) {
       throw new ApiError(502, 'PAYMENT_PROVIDER_FAILED', `支付确认失败：${error.message}`);
     }
