@@ -15,6 +15,12 @@ npm start
 
 默认地址为 `http://localhost:3000`。可用环境变量覆盖配置：
 
+```text
+PORT、DB_FILE、ADMIN_USERNAME、ADMIN_PASSWORD、CORS_ALLOWED_ORIGINS
+```
+
+`CORS_ALLOWED_ORIGINS` 使用逗号分隔的浏览器来源，默认仅允许 `http://localhost:3000` 和 `http://127.0.0.1:3000`。小程序请求和管理端同域访问不受影响；如需把浏览器端部署到其他域名，必须显式配置精确 Origin，避免第三方网页直接调用带登录态的接口。
+
 浏览器管理端地址：
 
 ```text
@@ -298,7 +304,7 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 
 - `userId` 是模拟身份参数，生产环境应从微信登录后的服务端会话中取得，不能信任客户端传值。
 - JSON 文件适合本机演示和产品联调，不支持多进程并发；生产环境应替换为事务数据库和 Redis。
-- CORS 当前开放用于本地联调，部署时应限制来源。
+- CORS 默认只允许本地开发来源；生产环境需通过 `CORS_ALLOWED_ORIGINS` 配置精确白名单，且仅给可信浏览器端使用。
 - 未接入真实微信支付、实名服务、校方校园卡系统、物流或消息通知。
 - 库存已实现“预占 → 支付扣减 → 取消/超时释放 → 退款回补”闭环，但仍是单进程 JSON/MySQL 快照方案，高并发场景需要数据库行级锁或独立库存服务。
 - 待支付超时关单已并入常驻巡检；读接口仍保留惰性清扫作为兜底，多实例部署时需要分布式锁避免重复执行。

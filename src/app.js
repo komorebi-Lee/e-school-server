@@ -387,14 +387,32 @@ async function exchangeWeChatCode(code) {
   return { openid: result.openid, userId: `wx_${result.openid}` };
 }
 function sendJson(response, statusCode, body) {
-  response.writeHead(statusCode, {
+  const headers = {
     'content-type': 'application/json; charset=utf-8',
-    'access-control-allow-origin': '*',
     'access-control-allow-methods': 'GET,POST,OPTIONS',
     'access-control-allow-headers': 'content-type,idempotency-key,authorization',
     'cache-control': 'no-store'
-  });
+  };
+  if (response.corsOrigin) {
+    headers['access-control-allow-origin'] = response.corsOrigin;
+    headers.vary = 'Origin';
+  }
+  response.writeHead(statusCode, headers);
   response.end(JSON.stringify(body));
+}
+
+function normalizeCorsOrigins(input) {
+  const values = Array.isArray(input)
+    ? input
+    : String(input || '').split(',');
+  return values.map((value) => value.trim()).filter(Boolean);
+}
+
+function resolveCorsOrigin(request, allowedOrigins) {
+  const origin = String(request.headers.origin || '').trim();
+  if (!origin) return '';
+  if (allowedOrigins.includes('*')) return '*';
+  return allowedOrigins.includes(origin) ? origin : '';
 }
 
 function sendStatic(response, filePath) {
@@ -584,7 +602,15 @@ function complaintDueAt(now) {
   return new Date(new Date(now).getTime() + 48 * 3600 * 1000).toISOString();
 }
 
-function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend = sendWeChatSubscribeMessage }) {
+function createApp({
+  store,
+  wechatAuth = exchangeWeChatCode,
+  wechatSubscribeSend = sendWeChatSubscribeMessage,
+  corsAllowedOrigins
+}) {
+  const allowedCorsOrigins = normalizeCorsOrigins(
+    corsAllowedOrigins ?? process.env.CORS_ALLOWED_ORIGINS ?? 'http://localhost:3000,http://127.0.0.1:3000'
+  );
   const adminSessions = new Map();
   const merchantSessions = new Map();
   const userWeChatIdentities = new Map();
@@ -2288,6 +2314,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
   const handler = async function app(request, response) {
     const requestId = randomUUID();
     try {
+      response.corsOrigin = resolveCorsOrigin(request, allowedCorsOrigins);
       if (request.method === 'OPTIONS') return sendJson(response, 204, {});
       const url = new URL(request.url, 'http://localhost');
       const pathname = url.pathname.replace(/\/$/, '') || '/';
@@ -3015,7 +3042,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           response.writeHead(200, {
             'content-type': 'text/csv; charset=utf-8',
             'content-disposition': `attachment; filename="${fileName}"`,
-            'access-control-allow-origin': '*',
+            ...(response.corsOrigin ? { 'access-control-allow-origin': response.corsOrigin, vary: 'Origin' } : {}),
             'cache-control': 'no-store'
           });
           response.end(`\ufeff${csv}`);
@@ -3572,7 +3599,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         response.writeHead(200, {
           'content-type': 'text/csv; charset=utf-8',
           'content-disposition': `attachment; filename="${fileName}"`,
-          'access-control-allow-origin': '*',
+          ...(response.corsOrigin ? { 'access-control-allow-origin': response.corsOrigin, vary: 'Origin' } : {}),
           'cache-control': 'no-store'
         });
         response.end(`${String.fromCharCode(65279)}${csv}`);

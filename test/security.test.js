@@ -183,3 +183,34 @@ test('demo login issues a working session without wechat verification', async ()
   const orders = await api('/api/my/orders', { headers: { authorization: `Bearer ${token}` } });
   assert.equal(orders.response.status, 200);
 });
+
+test('CORS responses only allow explicitly configured origins', async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-cors-'));
+  const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));
+  const corsServer = http.createServer(createApp({
+    store,
+    corsAllowedOrigins: ['https://allowed.example']
+  }));
+  await new Promise((resolve) => corsServer.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${corsServer.address().port}`;
+  try {
+    const allowed = await fetch(`${origin}/health`, { headers: { origin: 'https://allowed.example' } });
+    assert.equal(allowed.status, 200);
+    assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://allowed.example');
+    assert.equal(allowed.headers.get('vary'), 'Origin');
+
+    const denied = await fetch(`${origin}/health`, { headers: { origin: 'https://attacker.example' } });
+    assert.equal(denied.status, 200);
+    assert.equal(denied.headers.get('access-control-allow-origin'), null);
+
+    const preflight = await fetch(`${origin}/api/orders`, {
+      method: 'OPTIONS',
+      headers: { origin: 'https://attacker.example' }
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), null);
+  } finally {
+    await new Promise((resolve) => corsServer.close(resolve));
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
