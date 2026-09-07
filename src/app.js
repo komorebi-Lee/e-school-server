@@ -613,7 +613,6 @@ function createApp({
   const allowedCorsOrigins = normalizeCorsOrigins(
     corsAllowedOrigins ?? process.env.CORS_ALLOWED_ORIGINS ?? 'http://localhost:3000,http://127.0.0.1:3000'
   );
-  const adminSessions = new Map();
   const merchantSessions = new Map();
   const adminLoginFailures = new Map();
   const {
@@ -679,6 +678,39 @@ function createApp({
     if (salt.length !== 16 || expectedHash.length !== 64) return false;
     const actualHash = scryptSync(String(suppliedPassword || ''), salt, 64);
     return timingSafeEqual(actualHash, expectedHash);
+  }
+
+  function hashAdminToken(token) {
+    return createHash('sha256').update(`admin-session:${token}`).digest('hex');
+  }
+
+  function saveAdminSession(token, username, expiresAt) {
+    const tokenHash = hashAdminToken(token);
+    store.update((data) => {
+      data.adminSessions = Array.isArray(data.adminSessions) ? data.adminSessions : [];
+      data.adminSessions = data.adminSessions.filter((item) => (
+        item.tokenHash !== tokenHash && item.expiresAt > Date.now()
+      ));
+      data.adminSessions.push({ tokenHash, username, expiresAt });
+      return { tokenHash, username, expiresAt };
+    });
+  }
+
+  function requireAdmin(request) {
+    const token = (request.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!token) throw new ApiError(401, 'ADMIN_UNAUTHORIZED', '请重新登录管理端');
+
+    const tokenHash = hashAdminToken(token);
+    const session = (store.read().adminSessions || []).find((item) => item.tokenHash === tokenHash);
+    if (!session) throw new ApiError(401, 'ADMIN_UNAUTHORIZED', '请重新登录管理端');
+    if (session.expiresAt <= Date.now()) {
+      store.update((data) => {
+        data.adminSessions = (data.adminSessions || []).filter((item) => item.tokenHash !== tokenHash);
+        return true;
+      });
+      throw new ApiError(401, 'ADMIN_UNAUTHORIZED', '请重新登录管理端');
+    }
+    return { username: session.username, expiresAt: session.expiresAt };
   }
 
   function loadWeChatIdentity(data, userId) {
@@ -2424,7 +2456,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }
         adminLoginFailures.delete(lockKey);
         const token = createHash('sha256').update(`${username}:${randomUUID()}`).digest('hex');
-        adminSessions.set(token, { username, expiresAt: Date.now() + 8 * 60 * 60 * 1000 });
+        const expiresAt = Date.now() + 8 * 60 * 60 * 1000;
+        saveAdminSession(token, username, expiresAt);
         return sendJson(response, 200, { data: { token, user: { name: '运营管理员', role: '超级管理员' }, expiresIn: 28800 }, requestId });
       }
 
@@ -2549,9 +2582,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (pathname.startsWith('/api/admin/')) {
-        const token = (request.headers.authorization || '').replace(/^Bearer\s+/i, '');
-        const session = adminSessions.get(token);
-        if (!session || session.expiresAt < Date.now()) throw new ApiError(401, 'ADMIN_UNAUTHORIZED', '请重新登录管理端');
+        requireAdmin(request);
       }
 
       if (request.method === 'GET' && pathname === '/health') {
@@ -2775,8 +2806,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }
         if (role === 'MERCHANT') requireMerchant(request);
         if (role === 'PLATFORM') {
-          const adminToken=(request.headers.authorization||'').replace(/^Bearer\s+/i,'');
-          if (!adminSessions.get(adminToken)) throw new ApiError(401,'ADMIN_UNAUTHORIZED','请重新登录管理端');
+          requireAdmin(request);
         }
         const serviceRecordMatch = serviceRecordOwner(store.read(), orderId);
         if (serviceRecordMatch && ['USER', 'PLATFORM'].includes(role)) {

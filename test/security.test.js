@@ -189,6 +189,49 @@ test('admin password hash helper reads the secret from stdin', async () => {
   }
 });
 
+test('admin sessions survive a service restart from the persistent store', async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-session-'));
+  const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));
+  const startServer = async () => {
+    const restartServer = http.createServer(createApp({ store }));
+    await new Promise((resolve) => restartServer.listen(0, '127.0.0.1', resolve));
+    return restartServer;
+  };
+  const firstServer = await startServer();
+  const firstBaseUrl = `http://127.0.0.1:${firstServer.address().port}`;
+
+  try {
+    const login = await fetch(`${firstBaseUrl}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: ADMIN_USERNAME, password: ADMIN_PASSWORD })
+    });
+    assert.equal(login.status, 200);
+    const token = (await login.json()).data.token;
+    const persistedState = store.read();
+    assert.ok(Array.isArray(persistedState.adminSessions));
+    assert.ok(persistedState.adminSessions.length > 0);
+    assert.equal(JSON.stringify(persistedState).includes(token), false);
+
+    await new Promise((resolve) => firstServer.close(resolve));
+    const secondServer = await startServer();
+    const secondBaseUrl = `http://127.0.0.1:${secondServer.address().port}`;
+    try {
+      const overview = await fetch(`${secondBaseUrl}/api/admin/overview`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      assert.equal(overview.status, 200);
+    } finally {
+      await new Promise((resolve) => secondServer.close(resolve));
+    }
+  } finally {
+    if (firstServer.listening) {
+      await new Promise((resolve) => firstServer.close(resolve));
+    }
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test('wechat login exchanges a code for a server-side user identity', async () => {
   const invalid = await api('/api/auth/login', {
     method: 'POST',
