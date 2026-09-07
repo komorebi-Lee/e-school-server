@@ -192,9 +192,19 @@ class WeChatPayTransport {
     }
 
     const resource = this.decryptCallbackResource(body?.resource);
-    const status = TRADE_STATE_MAP[resource.trade_state] || 'UNKNOWN';
+    if (body?.event_type === 'REFUND.SUCCESS') {
+      return {
+        type: 'REFUND',
+        status: REFUND_STATE_MAP[resource.refund_status] || 'UNKNOWN',
+        refundNo: resource.out_refund_no || '',
+        providerTradeNo: resource.out_trade_no || '',
+        payload: resource
+      };
+    }
+
     return {
-      status,
+      type: 'PAYMENT',
+      status: TRADE_STATE_MAP[resource.trade_state] || 'UNKNOWN',
       providerTradeNo: resource.out_trade_no || '',
       paidAt: resource.success_time || '',
       payload: resource

@@ -814,7 +814,12 @@ function createApp({
         orderNo: order?.orderNo || '',
         businessType: phoneCardOrder ? 'PHONE_PLAN' : rechargeOrder ? 'RECHARGE' : plateApplication ? 'PLATE' : 'ORDER'
       }, now);
-      addAudit(data, source === 'REFUND_QUERY' ? '管理端退款查询确认' : '管理端退款', paymentOrder.paymentNo);
+      const refundAuditAction = source === 'REFUND_QUERY'
+        ? '管理端退款查询确认'
+        : source === 'REFUND_CALLBACK'
+          ? '退款回调自动确认'
+          : '管理端退款';
+      addAudit(data, refundAuditAction, paymentOrder.paymentNo);
       if (rechargeOrder) {
         addNotification(data, paymentOrder.userId, 'RECHARGE', '话费权益已退款', `订单 ${paymentOrder.paymentNo} 已完成退款。`);
       } else if (phoneCardOrder) {
@@ -5467,9 +5472,24 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         } catch (error) {
           throw new ApiError(401, 'PAYMENT_CALLBACK_INVALID', `支付回调校验失败：${error.message}`);
         }
+        const callbackType = callbackResult?.type || 'PAYMENT';
         if (!callbackResult?.providerTradeNo) {
           throw new ApiError(400, 'PAYMENT_CALLBACK_INVALID', '支付回调缺少渠道交易号');
         }
+        if (callbackType === 'REFUND') {
+          if (callbackResult.status !== 'REFUNDED') {
+            throw new ApiError(400, 'PAYMENT_CALLBACK_UNSUPPORTED', '当前仅支持退款成功回调');
+          }
+          if (!callbackResult.refundNo) {
+            throw new ApiError(400, 'PAYMENT_CALLBACK_INVALID', '退款回调缺少退款单号');
+          }
+          const paymentOrder = (store.read().paymentOrders || [])
+            .find((item) => item.refund?.refundNo === callbackResult.refundNo);
+          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+          const result = completePaymentRefund(paymentOrder.id, callbackResult, 'REFUND_CALLBACK');
+          return sendJson(response, 200, { data: result, requestId });
+        }
+
         if (callbackResult.status !== 'PAID') {
           throw new ApiError(400, 'PAYMENT_CALLBACK_UNSUPPORTED', '当前仅支持支付成功回调');
         }

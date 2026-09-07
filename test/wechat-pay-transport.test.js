@@ -232,6 +232,40 @@ test('wechat callback verifies platform signature and decrypts payment result', 
   assert.equal(result.payload.transaction_id, '4200001234567890');
 });
 
+test('wechat callback decrypts refund result and maps provider status', async () => {
+  const provider = createProvider(async () => textResponse({}));
+  const callbackBody = encryptedCallbackBody({
+    out_refund_no: 'RF_PAY1760000000001',
+    out_trade_no: 'PAY1760000000001',
+    refund_id: '5000001234567890',
+    refund_status: 'SUCCESS',
+    success_time: '2026-09-09T10:10:00.000Z'
+  }, 'REFUND.SUCCESS', 'refund');
+  const rawBody = JSON.stringify(callbackBody);
+  const timestamp = String(Math.floor(fixedTimeMs / 1000));
+  const nonce = 'refund-callback-nonce';
+  const signature = crypto.sign(
+    'sha256',
+    Buffer.from(`${timestamp}\n${nonce}\n${rawBody}\n`),
+    platformKeys.privateKey
+  ).toString('base64');
+
+  const result = await provider.verifyCallback({
+    rawBody,
+    headers: {
+      'wechatpay-timestamp': timestamp,
+      'wechatpay-nonce': nonce,
+      'wechatpay-signature': signature,
+      'wechatpay-serial': 'PLATFORM-SERIAL'
+    }
+  }, callbackBody);
+  assert.equal(result.type, 'REFUND');
+  assert.equal(result.status, 'REFUNDED');
+  assert.equal(result.refundNo, 'RF_PAY1760000000001');
+  assert.equal(result.providerTradeNo, 'PAY1760000000001');
+  assert.equal(result.payload.refund_id, '5000001234567890');
+});
+
 test('wechat callback rejects stale or invalid platform signature', async () => {
   const provider = createProvider(async () => textResponse({}));
   const callbackBody = encryptedCallbackBody({
@@ -276,22 +310,22 @@ test('wechat callback rejects stale or invalid platform signature', async () => 
   });
 });
 
-function encryptedCallbackBody(resource) {
+function encryptedCallbackBody(resource, eventType = 'TRANSACTION.SUCCESS', associatedData = 'transaction') {
   const nonce = crypto.randomBytes(12);
-  const associatedData = 'transaction';
+  const callbackAssociatedData = associatedData;
   const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(apiV3Key), nonce);
-  cipher.setAAD(Buffer.from(associatedData));
+  cipher.setAAD(Buffer.from(callbackAssociatedData));
   const encrypted = Buffer.concat([
     cipher.update(Buffer.from(JSON.stringify(resource))),
     cipher.final(),
     cipher.getAuthTag()
   ]);
   return {
-    event_type: 'TRANSACTION.SUCCESS',
+    event_type: eventType,
     resource: {
       original_type: 'transaction',
       algorithm: 'AEAD_AES_256_GCM',
-      associated_data: associatedData,
+      associated_data: callbackAssociatedData,
       nonce: nonce.toString('base64'),
       ciphertext: encrypted.toString('base64')
     }
