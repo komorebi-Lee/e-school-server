@@ -1,4 +1,4 @@
-const { randomUUID, createHash } = require('node:crypto');
+const { randomUUID, createHash, scryptSync, timingSafeEqual } = require('node:crypto');
 const https = require('node:https');
 const { URL } = require('node:url');
 const fs = require('node:fs');
@@ -607,7 +607,8 @@ function createApp({
   wechatAuth = exchangeWeChatCode,
   wechatSubscribeSend = sendWeChatSubscribeMessage,
   corsAllowedOrigins,
-  adminLoginLockout
+  adminLoginLockout,
+  adminPasswordHash
 }) {
   const allowedCorsOrigins = normalizeCorsOrigins(
     corsAllowedOrigins ?? process.env.CORS_ALLOWED_ORIGINS ?? 'http://localhost:3000,http://127.0.0.1:3000'
@@ -619,6 +620,7 @@ function createApp({
     maxFailures: adminLoginMaxFailures = 5,
     lockDurationMs: adminLoginLockDurationMs = 15 * 60 * 1000
   } = adminLoginLockout || {};
+  const configuredAdminPasswordHash = adminPasswordHash || process.env.ADMIN_PASSWORD_HASH || '';
   const userWeChatIdentities = new Map();
   const userSessions = new Map();
   const userSessionTtlMs = 7 * 24 * 60 * 60 * 1000;
@@ -656,6 +658,27 @@ function createApp({
       state.lockedUntil = now + adminLoginLockDurationMs;
     }
     adminLoginFailures.set(lockKey, state);
+  }
+
+  function verifyAdminPassword(suppliedPassword) {
+    if (!configuredAdminPasswordHash) {
+      const password = process.env.ADMIN_PASSWORD;
+      return Boolean(password) && suppliedPassword === password;
+    }
+
+    const parts = configuredAdminPasswordHash.split('$');
+    if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+    let salt;
+    let expectedHash;
+    try {
+      salt = Buffer.from(parts[1], 'hex');
+      expectedHash = Buffer.from(parts[2], 'hex');
+    } catch {
+      return false;
+    }
+    if (salt.length !== 16 || expectedHash.length !== 64) return false;
+    const actualHash = scryptSync(String(suppliedPassword || ''), salt, 64);
+    return timingSafeEqual(actualHash, expectedHash);
   }
 
   function loadWeChatIdentity(data, userId) {
@@ -2387,7 +2410,6 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && pathname === '/api/admin/login') {
         const body = await readJson(request);
         const username = process.env.ADMIN_USERNAME || 'admin';
-        const password = process.env.ADMIN_PASSWORD;
         const now = Date.now();
         const lockKey = getAdminLoginLockKey(request, body.username);
         const lockState = getActiveAdminLoginLock(lockKey, now);
@@ -2396,12 +2418,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             retryAfterSeconds: Math.ceil((lockState.lockedUntil - now) / 1000)
           });
         }
-        if (!password || body.username !== username || body.password !== password) {
+        if (body.username !== username || !verifyAdminPassword(body.password)) {
           recordAdminLoginFailure(lockKey, now);
           throw new ApiError(401, 'INVALID_CREDENTIALS', '账号或密码错误');
         }
         adminLoginFailures.delete(lockKey);
-        const token = createHash('sha256').update(`${username}:${password}:${randomUUID()}`).digest('hex');
+        const token = createHash('sha256').update(`${username}:${randomUUID()}`).digest('hex');
         adminSessions.set(token, { username, expiresAt: Date.now() + 8 * 60 * 60 * 1000 });
         return sendJson(response, 200, { data: { token, user: { name: '运营管理员', role: '超级管理员' }, expiresIn: 28800 }, requestId });
       }

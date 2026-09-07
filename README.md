@@ -16,7 +16,7 @@ npm start
 默认地址为 `http://localhost:3000`。可用环境变量覆盖配置：
 
 ```text
-PORT、DB_FILE、ADMIN_USERNAME、ADMIN_PASSWORD、CORS_ALLOWED_ORIGINS
+PORT、DB_FILE、ADMIN_USERNAME、ADMIN_PASSWORD_HASH、ADMIN_PASSWORD、CORS_ALLOWED_ORIGINS
 ```
 
 `CORS_ALLOWED_ORIGINS` 使用逗号分隔的浏览器来源，默认仅允许 `http://localhost:3000` 和 `http://127.0.0.1:3000`。小程序请求和管理端同域访问不受影响；如需把浏览器端部署到其他域名，必须显式配置精确 Origin，避免第三方网页直接调用带登录态的接口。
@@ -29,7 +29,7 @@ http://localhost:3000/admin
 
 管理端支持经营概览、商品库存、电瓶车订单、电话卡订单、话费权益、双人宽带资格、校园牌照辅助和售后处理。当前均使用本地模拟数据。
 
-管理端账号密码来自环境变量，不再写入前端页面或代码。复制 `.env.example` 为 `.env` 后配置 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD`；微信云托管请在服务“环境变量”中配置同名变量，不要把真实密码提交到 Git。
+管理端账号密码来自环境变量，不再写入前端页面或代码。复制 `.env.example` 为 `.env` 后配置 `ADMIN_USERNAME`；生产环境推荐先运行 `npm run hash-admin-password`，输入密码并回车，把输出的 `scrypt$salt$hash` 配置为 `ADMIN_PASSWORD_HASH`。配置哈希后登录会使用时间安全比较，并忽略 `ADMIN_PASSWORD`；明文 `ADMIN_PASSWORD` 仅保留为本地演示兼容。微信云托管请在服务“环境变量”中配置同名变量，不要把真实密码或哈希提交到 Git。
 
 管理端登录内置防暴力破解：同一来源地址和账号在 15 分钟内连续失败 5 次后锁定 15 分钟，期间即使密码正确也会返回 `ADMIN_LOGIN_LOCKED`；登录成功会清空失败计数，锁定到期后自动恢复。
 

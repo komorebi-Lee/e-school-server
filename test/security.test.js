@@ -3,12 +3,15 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const { spawnSync } = require('node:child_process');
 const { after, before, test } = require('node:test');
 const { JsonStore } = require('../src/store');
 const { ApiError, createApp } = require('../src/app');
 
 const ADMIN_USERNAME = 'security-admin';
 const ADMIN_PASSWORD = 'rotated-strong-password-2026';
+const ADMIN_HASH_PASSWORD = 'hashed-admin-password-2026';
+const ADMIN_PASSWORD_HASH = 'scrypt$64b9725fa13b9ede663b108a46b4b096$d2dc19258e712f34d776eedb1c75718a5faa0d09723baf0f331cc7a5c98a217b77ab3109e34799aca37110d622a524245595d52b4485c5979125244b7585fa57';
 const TEST_OPENID = 'openid_security_test';
 const TEST_USER_ID = 'wx_openid_security_test';
 
@@ -127,6 +130,61 @@ test('admin login lock expires and allows another attempt', async () => {
     assert.equal((await login(ADMIN_PASSWORD)).status, 200);
   } finally {
     await new Promise((resolve) => lockServer.close(resolve));
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('admin login verifies a configured scrypt password hash', async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-hash-'));
+  const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));
+  const hashServer = http.createServer(createApp({
+    store,
+    adminPasswordHash: ADMIN_PASSWORD_HASH
+  }));
+  await new Promise((resolve) => hashServer.listen(0, '127.0.0.1', resolve));
+  const hashBaseUrl = `http://127.0.0.1:${hashServer.address().port}`;
+  const login = (password) => fetch(`${hashBaseUrl}/api/admin/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: ADMIN_USERNAME, password })
+  });
+
+  try {
+    const valid = await login(ADMIN_HASH_PASSWORD);
+    assert.equal(valid.status, 200);
+
+    const invalid = await login('wrong-hashed-password');
+    assert.equal(invalid.status, 401);
+  } finally {
+    await new Promise((resolve) => hashServer.close(resolve));
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('admin password hash helper reads the secret from stdin', async () => {
+  const helper = spawnSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'hash-admin-password.js')], {
+    input: 'stdin-admin-password-2026\n',
+    encoding: 'utf8'
+  });
+  assert.equal(helper.status, 0);
+  assert.match(helper.stdout.trim(), /^scrypt\$[0-9a-f]+\$[0-9a-f]+$/);
+
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-helper-'));
+  const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));
+  const helperServer = http.createServer(createApp({
+    store,
+    adminPasswordHash: helper.stdout.trim()
+  }));
+  await new Promise((resolve) => helperServer.listen(0, '127.0.0.1', resolve));
+  try {
+    const login = await fetch(`http://127.0.0.1:${helperServer.address().port}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: ADMIN_USERNAME, password: 'stdin-admin-password-2026' })
+    });
+    assert.equal(login.status, 200);
+  } finally {
+    await new Promise((resolve) => helperServer.close(resolve));
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 });
