@@ -27,6 +27,14 @@ class MockPaymentProvider {
     };
   }
 
+  queryRefund(payment) {
+    return {
+      status: 'REFUNDED',
+      refundNo: payment.refund?.refundNo || `RF_${payment.paymentNo}`,
+      providerTradeNo: payment.providerTradeNo || `MOCK_${payment.paymentNo}`
+    };
+  }
+
   verifyCallback(request, body) {
     return {
       providerTradeNo: body.providerTradeNo,
@@ -85,6 +93,10 @@ class WeChatPaymentProvider {
 
   refund(payment) {
     return this.transport.refund(payment);
+  }
+
+  queryRefund(payment) {
+    return this.transport.queryRefund(payment);
   }
 
   verifyCallback(request, body) {

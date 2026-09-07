@@ -161,6 +161,18 @@ class WeChatPayTransport {
     };
   }
 
+  async queryRefund(payment) {
+    const refundNo = payment.refund?.refundNo || payment.refundNo || `RF_${payment.paymentNo}`;
+    const pathname = `/v3/refund/domestic/refunds/${encodeURIComponent(refundNo)}?mchid=${encodeURIComponent(this.mchid)}`;
+    const result = await this.request('GET', pathname);
+    return {
+      status: REFUND_STATE_MAP[result.status] || 'UNKNOWN',
+      refundNo: result.out_refund_no || refundNo,
+      providerTradeNo: result.out_trade_no || payment.providerTradeNo || payment.paymentNo,
+      payload: result
+    };
+  }
+
   verifyCallback(request, body) {
     const timestamp = Number(request.headers['wechatpay-timestamp']);
     const nonce = String(request.headers['wechatpay-nonce'] || '');

@@ -43,7 +43,7 @@ async function api(pathname, options) {
   return { response, body: await response.json() };
 }
 
-test('provider refund result other than REFUNDED does not reverse payment', async () => {
+test('pending provider refund result is accepted without reversing payment', async () => {
   const login = await api('/api/auth/login', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -72,8 +72,8 @@ test('provider refund result other than REFUNDED does not reverse payment', asyn
     headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
     body: JSON.stringify({ note: 'provider is still processing' })
   });
-  assert.equal(refund.response.status, 502);
-  assert.equal(refund.body.error.code, 'PAYMENT_PROVIDER_FAILED');
+  assert.equal(refund.response.status, 202);
+  assert.equal(refund.body.data.paymentOrder.refund.status, 'PENDING');
 
   const data = store.read();
   const payment = data.paymentOrders.find((item) => item.id === created.body.paymentOrder.id);

@@ -745,16 +745,87 @@ function createApp({
     }
   }
 
-  async function refundProviderPayment(paymentOrder) {
+  async function queryProviderRefund(paymentOrder) {
     try {
-      const result = await paymentProvider.refund(paymentOrder);
-      if (result?.status !== 'REFUNDED') {
+      if (typeof paymentProvider.queryRefund !== 'function') {
+        throw new Error('payment provider does not support refund query');
+      }
+      const result = await paymentProvider.queryRefund(paymentOrder);
+      if (!['REFUNDED', 'PENDING', 'FAILED'].includes(result?.status)) {
         throw new Error(`provider returned ${result?.status || 'UNKNOWN'}`);
       }
       return result;
     } catch (error) {
-      throw new ApiError(502, 'PAYMENT_PROVIDER_FAILED', `退款渠道失败：${error.message}`);
+      throw new ApiError(502, 'PAYMENT_PROVIDER_FAILED', `退款查询失败：${error.message}`);
     }
+  }
+
+  function completePaymentRefund(paymentId, providerRefund, source = 'ADMIN_REFUND') {
+    return store.update((data) => {
+      if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
+      const paymentOrder = data.paymentOrders.find((item) => item.id === paymentId);
+      if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+      if (paymentOrder.status === 'REFUNDED') return { paymentOrder, duplicate: true };
+      if (paymentOrder.status !== 'PAID') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅已支付单可退款');
+      const now = new Date().toISOString();
+      const refundNo = providerRefund?.refundNo || paymentOrder.refund?.refundNo || `RF_${paymentOrder.paymentNo}`;
+      paymentOrder.status = 'REFUNDED';
+      paymentOrder.refundedAt = now;
+      paymentOrder.updatedAt = now;
+      paymentOrder.providerTradeNo = providerRefund?.providerTradeNo || paymentOrder.providerTradeNo || '';
+      paymentOrder.refund = {
+        status: 'REFUNDED',
+        refundNo,
+        requestedAt: paymentOrder.refund?.requestedAt || now,
+        updatedAt: now,
+        note: paymentOrder.refund?.note || '',
+        providerPayload: providerRefund?.payload || paymentOrder.refund?.providerPayload || null
+      };
+
+      const order = (data.orders || []).find((item) => item.id === paymentOrder.orderId);
+      const rechargeOrder = (data.rechargeOrders || []).find((item) => item.id === paymentOrder.businessId && item.paymentOrderId === paymentOrder.id);
+      const phoneCardOrder = (data.phoneCardOrders || []).find((item) => item.id === paymentOrder.businessId && item.paymentOrderId === paymentOrder.id);
+      const plateApplication = (data.plateApplications || []).find((item) => item.id === paymentOrder.businessId && item.paymentOrderId === paymentOrder.id);
+      if (phoneCardOrder) {
+        phoneCardOrder.status = 'CANCELLED';
+        phoneCardOrder.paymentStatus = 'REFUNDED';
+        phoneCardOrder.updatedAt = now;
+      }
+      if (rechargeOrder) {
+        rechargeOrder.status = 'CANCELLED';
+        rechargeOrder.paymentStatus = 'REFUNDED';
+        rechargeOrder.updatedAt = now;
+      }
+      if (plateApplication) {
+        plateApplication.status = 'REJECTED';
+        plateApplication.paymentStatus = 'REFUNDED';
+        plateApplication.updatedAt = now;
+      }
+      if (order) {
+        order.status = 'CANCELLED';
+        order.paymentStatus = 'REFUNDED';
+        order.updatedAt = now;
+        restoreOrderStock(data, order);
+      }
+      markSettlementsRefunded(data, order?.id || '', now);
+      addFinanceEvent(data, 'REFUND', `REFUND_${paymentOrder.id}`, -(paymentOrder.amountInCents || 0), {
+        userId: paymentOrder.userId,
+        paymentNo: paymentOrder.paymentNo,
+        orderNo: order?.orderNo || '',
+        businessType: phoneCardOrder ? 'PHONE_PLAN' : rechargeOrder ? 'RECHARGE' : plateApplication ? 'PLATE' : 'ORDER'
+      }, now);
+      addAudit(data, source === 'REFUND_QUERY' ? '管理端退款查询确认' : '管理端退款', paymentOrder.paymentNo);
+      if (rechargeOrder) {
+        addNotification(data, paymentOrder.userId, 'RECHARGE', '话费权益已退款', `订单 ${paymentOrder.paymentNo} 已完成退款。`);
+      } else if (phoneCardOrder) {
+        addNotification(data, paymentOrder.userId, 'PHONE_PLAN', '电话卡订单已退款', `订单 ${paymentOrder.paymentNo} 已完成退款。`);
+      } else if (plateApplication) {
+        addNotification(data, paymentOrder.userId, 'PLATE', '牌照服务费已退款', `申请 ${paymentOrder.paymentNo} 已完成退款，如需重新办理可再次提交。`);
+      } else {
+        addNotification(data, paymentOrder.userId, 'ORDER', '订单已退款', `订单 ${paymentOrder.orderNo} 已完成退款。`);
+      }
+      return { order, rechargeOrder, phoneCardOrder, plateApplication, paymentOrder };
+    });
   }
 
   function settlePaymentOrder(paymentId, providerPayment, source = 'USER_CONFIRM') {
@@ -3883,12 +3954,70 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: alert, requestId });
       }
 
+      const adminPaymentRefundRefreshMatch = pathname.match(/^\/api\/admin\/payment-orders\/([^/]+)\/refund\/refresh$/);
+      if (request.method === 'POST' && adminPaymentRefundRefreshMatch) {
+        const currentPayment = store.read().paymentOrders.find((item) => item.id === adminPaymentRefundRefreshMatch[1]);
+        if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        if (currentPayment.status !== 'PAID' || currentPayment.refund?.status !== 'PENDING') {
+          throw new ApiError(409, 'PAYMENT_REFUND_NOT_PENDING', '仅渠道处理中的退款可查询结果');
+        }
+        const providerRefund = await queryProviderRefund(currentPayment);
+        if (providerRefund.status === 'REFUNDED') {
+          const completed = completePaymentRefund(currentPayment.id, providerRefund, 'REFUND_QUERY');
+          return sendJson(response, 200, { data: completed, requestId });
+        }
+        const updated = store.update((data) => {
+          const paymentOrder = data.paymentOrders.find((item) => item.id === adminPaymentRefundRefreshMatch[1]);
+          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+          if (paymentOrder.status !== 'PAID' || paymentOrder.refund?.status !== 'PENDING') {
+            throw new ApiError(409, 'PAYMENT_REFUND_NOT_PENDING', '仅渠道处理中的退款可查询结果');
+          }
+          const now = new Date().toISOString();
+          paymentOrder.refund.status = providerRefund.status;
+          paymentOrder.refund.updatedAt = now;
+          paymentOrder.refund.providerPayload = providerRefund.payload || paymentOrder.refund.providerPayload || null;
+          paymentOrder.updatedAt = now;
+          return { paymentOrder };
+        });
+        return sendJson(response, 200, { data: updated, requestId });
+      }
+
       const adminPaymentRefundMatch = pathname.match(/^\/api\/admin\/payment-orders\/([^/]+)\/refund$/);
       if (request.method === 'POST' && adminPaymentRefundMatch) {
+        const body = await readJson(request);
+        const refundNote = requireString(body.note, 'note', { maxLength: 200 });
         const currentPayment = store.read().paymentOrders.find((item) => item.id === adminPaymentRefundMatch[1]);
         if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
         if (currentPayment.status !== 'PAID') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅已支付单可退款');
-        const providerRefund = await refundProviderPayment(currentPayment);
+        let providerRefund;
+        try {
+          providerRefund = await paymentProvider.refund(currentPayment);
+        } catch (error) {
+          throw new ApiError(502, 'PAYMENT_PROVIDER_FAILED', `退款渠道失败：${error.message}`);
+        }
+        if (!['REFUNDED', 'PENDING', 'FAILED'].includes(providerRefund?.status)) {
+          throw new ApiError(502, 'PAYMENT_PROVIDER_FAILED', `退款渠道返回未知状态：${providerRefund?.status || 'UNKNOWN'}`);
+        }
+        if (providerRefund.status !== 'REFUNDED') {
+          const pending = store.update((data) => {
+            const paymentOrder = data.paymentOrders.find((item) => item.id === adminPaymentRefundMatch[1]);
+            if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+            if (paymentOrder.status !== 'PAID') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅已支付单可退款');
+            const now = new Date().toISOString();
+            const refundNo = providerRefund.refundNo || `RF_${paymentOrder.paymentNo}`;
+            paymentOrder.refund = {
+              status: providerRefund.status,
+              refundNo,
+              requestedAt: now,
+              updatedAt: now,
+              note: refundNote,
+              providerPayload: providerRefund.payload || null
+            };
+            paymentOrder.updatedAt = now;
+            return { paymentOrder };
+          });
+          return sendJson(response, 202, { data: pending, requestId });
+        }
         const updated = store.update((data) => {
           if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
           const paymentOrder = data.paymentOrders.find((item) => item.id === adminPaymentRefundMatch[1]);
@@ -3899,6 +4028,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           paymentOrder.refundedAt = now;
           paymentOrder.updatedAt = now;
           paymentOrder.providerTradeNo = providerRefund.providerTradeNo || paymentOrder.providerTradeNo || '';
+          paymentOrder.refund = {
+            status: 'REFUNDED',
+            refundNo: providerRefund.refundNo || `RF_${paymentOrder.paymentNo}`,
+            requestedAt: now,
+            updatedAt: now,
+            note: refundNote,
+            providerPayload: providerRefund.payload || null
+          };
           const order = (data.orders || []).find((item) => item.id === paymentOrder.orderId);
           const rechargeOrder = (data.rechargeOrders || []).find((item) => item.id === paymentOrder.businessId && item.paymentOrderId === paymentOrder.id);
           const phoneCardOrder = (data.phoneCardOrders || []).find((item) => item.id === paymentOrder.businessId && item.paymentOrderId === paymentOrder.id);

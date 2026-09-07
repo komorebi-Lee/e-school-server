@@ -389,6 +389,15 @@ test('admin settings UI exposes configuration change history', () => {
   assert.ok(adminScript.includes('renderSettingChangeText'));
 });
 
+test('admin payment UI exposes pending refunds and result refresh', () => {
+  const adminScript = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8');
+
+  assert.ok(adminScript.includes('refund.status'));
+  assert.ok(adminScript.includes('退款处理中'));
+  assert.ok(adminScript.includes('refund-refresh'));
+  assert.ok(adminScript.includes('/refund/refresh'));
+});
+
 test('disabling an admin revokes active sessions immediately', async () => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-disable-'));
   const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));

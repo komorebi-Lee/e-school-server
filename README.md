@@ -24,6 +24,7 @@ PORT、DB_FILE、ADMIN_USERNAME、ADMIN_PASSWORD_HASH、ADMIN_PASSWORD、CORS_AL
 默认 `PAYMENT_PROVIDER=mock`，保留演示用的即时确认。切换为 `PAYMENT_PROVIDER=wechat` 时必须完整配置小程序 appid、商户号、商户证书序列号、商户私钥路径、API v3 密钥、回调地址、微信支付平台公钥路径和平台公钥序列号；配置不完整会在启动时失败，不会静默退回模拟支付。支付单会记录 `provider`、`channel`、`providerTradeNo` 和 `providerPayload`，确认或退款失败时订单、结算和财务流水保持原状态。
 支付提供方返回的状态必须是 `PAID` 才会落账；返回其他状态时接口返回 `502 PAYMENT_PROVIDER_FAILED`，订单继续保持待支付。
 退款同理，提供方必须返回 `REFUNDED` 才会冲销订单、分账和财务流水。
+微信退款为异步状态时，后台会先把支付单标记为「退款处理中」并保留退款单号；运营可通过退款查询接口确认结果，只有查询到 `REFUNDED` 才执行统一冲账。
 
 微信模式已实现 JSAPI 下单、商户请求签名、小程序支付参数签名、支付/退款状态查询、退款请求、回调时间戳/序列/签名校验和 AES-256-GCM 回调解密。正式收款前仍必须在微信支付商户平台完成配置，并用沙箱或小额真实订单联调回调、退款和对账。
 

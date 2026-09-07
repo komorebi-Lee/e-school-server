@@ -176,6 +176,30 @@ test('wechat provider maps refund success and pending states', async () => {
   assert.equal(pending.status, 'PENDING');
 });
 
+test('wechat provider queries refund state by out refund no', async () => {
+  const requests = [];
+  const provider = createProvider(async (url, options) => {
+    requests.push({ url: String(url), options });
+    return textResponse({
+      out_refund_no: 'RF_PAY1760000000001',
+      refund_id: '5000001234567890',
+      out_trade_no: 'PAY1760000000001',
+      status: 'PROCESSING'
+    });
+  });
+
+  const result = await provider.queryRefund({
+    ...payment(),
+    refund: { refundNo: 'RF_PAY1760000000001' }
+  });
+  assert.equal(result.status, 'PENDING');
+  assert.equal(result.providerTradeNo, 'PAY1760000000001');
+  assert.equal(result.refundNo, 'RF_PAY1760000000001');
+  assert.equal(requests[0].options.method, 'GET');
+  assert.ok(requests[0].url.includes('/v3/refund/domestic/refunds/RF_PAY1760000000001'));
+  assert.ok(requests[0].url.includes('mchid=1900000001'));
+});
+
 test('wechat callback verifies platform signature and decrypts payment result', async () => {
   const provider = createProvider(async () => textResponse({}));
   const callbackBody = encryptedCallbackBody({
