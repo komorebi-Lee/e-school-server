@@ -739,7 +739,11 @@ function createApp({
 
   async function refundProviderPayment(paymentOrder) {
     try {
-      return await paymentProvider.refund(paymentOrder);
+      const result = await paymentProvider.refund(paymentOrder);
+      if (result?.status !== 'REFUNDED') {
+        throw new Error(`provider returned ${result?.status || 'UNKNOWN'}`);
+      }
+      return result;
     } catch (error) {
       throw new ApiError(502, 'PAYMENT_PROVIDER_FAILED', `退款渠道失败：${error.message}`);
     }
