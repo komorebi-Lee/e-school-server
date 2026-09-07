@@ -25,6 +25,16 @@ PORT、DB_FILE、ADMIN_USERNAME、ADMIN_PASSWORD_HASH、ADMIN_PASSWORD、CORS_AL
 
 当前仓库尚未实现微信支付 API transport 和回调验签，`wechat` 模式只是预留边界；不要在正式收款环境直接切换。下一步应实现 JSAPI 下单、支付回调验签和退款查询，再接入商户配置。
 
+### 支付回调
+
+`POST /api/payment-callbacks/:provider`
+
+- `:provider` 必须与当前启用的支付提供方一致。
+- 请求体和签名校验完全交给 `paymentProvider.verifyCallback(request, body)`。
+- 校验通过后，服务端按 `providerTradeNo` 找到支付单，并把订单推进到已支付。
+- 重复回调会直接返回当前状态，不会重复生成财务流水或分账。
+- 签名不合法返回 `401 PAYMENT_CALLBACK_INVALID`，支付单和订单保持原状态。
+
 `CORS_ALLOWED_ORIGINS` 使用逗号分隔的浏览器来源，默认仅允许 `http://localhost:3000` 和 `http://127.0.0.1:3000`。小程序请求和管理端同域访问不受影响；如需把浏览器端部署到其他域名，必须显式配置精确 Origin，避免第三方网页直接调用带登录态的接口。
 
 浏览器管理端地址：

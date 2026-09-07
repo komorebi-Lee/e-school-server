@@ -741,6 +741,117 @@ function createApp({
     }
   }
 
+  function settlePaymentOrder(paymentId, providerPayment, source = 'USER_CONFIRM') {
+    return store.update((data) => {
+      const paymentOrder = (data.paymentOrders || []).find((item) => item.id === paymentId);
+      if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+      if (paymentOrder.status !== 'PENDING') return { paymentOrder, duplicate: true };
+
+      const order = data.orders.find((item) => item.id === paymentOrder.orderId && item.userId === paymentOrder.userId);
+      const rechargeOrder = data.rechargeOrders.find((item) => item.id === paymentOrder.businessId && item.userId === paymentOrder.userId);
+      const phoneCardOrder = data.phoneCardOrders.find((item) => item.id === paymentOrder.businessId && item.userId === paymentOrder.userId);
+      const plateApplication = (data.plateApplications || []).find((item) => item.id === paymentOrder.businessId && item.userId === paymentOrder.userId && item.paymentOrderId === paymentOrder.id);
+      if (!order && !rechargeOrder && !phoneCardOrder && !plateApplication) {
+        throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+      }
+
+      const now = new Date().toISOString();
+      paymentOrder.status = 'PAID';
+      paymentOrder.paidAt = providerPayment?.paidAt || now;
+      paymentOrder.updatedAt = now;
+      paymentOrder.providerTradeNo = providerPayment?.providerTradeNo || paymentOrder.providerTradeNo || '';
+      paymentOrder.providerPayload = providerPayment?.payload || paymentOrder.providerPayload || null;
+
+      if (rechargeOrder) {
+        rechargeOrder.status = 'PENDING_CREDIT';
+        rechargeOrder.paymentStatus = 'PAID';
+        rechargeOrder.updatedAt = now;
+        addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
+          userId: paymentOrder.userId,
+          paymentNo: paymentOrder.paymentNo,
+          businessType: 'RECHARGE'
+        }, now);
+        addAudit(data, source === 'PROVIDER_CALLBACK' ? '话费权益支付回调成功' : '话费权益支付成功', rechargeOrder.id);
+        addNotification(data, paymentOrder.userId, 'RECHARGE', '话费权益支付成功', `充 ${Math.round(rechargeOrder.paidInCents / 100)} 送 ${Math.round((rechargeOrder.receiveInCents - rechargeOrder.paidInCents) / 100)} 已支付，等待运营确认到账。`);
+        return { rechargeOrder, paymentOrder };
+      }
+
+      if (phoneCardOrder) {
+        phoneCardOrder.status = 'PENDING_REALNAME';
+        phoneCardOrder.paymentStatus = 'PAID';
+        phoneCardOrder.updatedAt = now;
+        const activationHours = publicSettings(data.adminSettings).phoneCardActivationHours;
+        addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
+          userId: paymentOrder.userId,
+          paymentNo: paymentOrder.paymentNo,
+          businessType: 'PHONE_PLAN'
+        }, now);
+        addAudit(data, source === 'PROVIDER_CALLBACK' ? '电话卡支付回调成功' : '电话卡支付成功', phoneCardOrder.id);
+        addNotification(data, paymentOrder.userId, 'PHONE_PLAN', '电话卡支付成功', `${phoneCardOrder.planName} 已支付，运营商将在 ${activationHours} 小时内联系实名激活。`);
+        return { phoneCardOrder, paymentOrder };
+      }
+
+      if (plateApplication) {
+        plateApplication.status = 'MATERIAL_PENDING';
+        plateApplication.paymentStatus = 'PAID';
+        plateApplication.updatedAt = now;
+        addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
+          userId: paymentOrder.userId,
+          paymentNo: paymentOrder.paymentNo,
+          businessType: 'PLATE'
+        }, now);
+        addAudit(data, source === 'PROVIDER_CALLBACK' ? '自带车上牌服务费支付回调成功' : '自带车上牌服务费支付成功', plateApplication.id);
+        addNotification(data, paymentOrder.userId, 'PLATE', '牌照服务费支付成功', `${plateApplication.vehicleModel} 已支付服务费，请按提示补充车辆和身份材料。`);
+        return { plateApplication, paymentOrder };
+      }
+
+      order.paymentStatus = 'PAID';
+      order.status = 'PAID';
+      order.updatedAt = now;
+      order.paidAt = order.paidAt || now;
+      issueDeliveryCode(order, now);
+      consumeOrderStock(data, order);
+      const bikeItem = order.items.find((item) => (data.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
+      if (bikeItem) {
+        const plateApplication = {
+          id: `plate_${randomUUID()}`,
+          userId: paymentOrder.userId,
+          customerName: order.fulfillment?.contactName || '平台购车用户',
+          phone: order.fulfillment?.contactPhone || '',
+          vehicleModel: bikeItem.name,
+          source: 'PLATFORM_ORDER',
+          feeInCents: 0,
+          relatedOrderId: order.id,
+          status: 'MATERIAL_PENDING',
+          relatedIds: { platformOrderIds: [order.id] },
+          createdAt: now,
+          updatedAt: now
+        };
+        (data.plateApplications = data.plateApplications || []).unshift(plateApplication);
+        addAudit(data, source === 'PROVIDER_CALLBACK' ? '购车支付回调后自动创建免费牌照辅助' : '购车支付后自动创建免费牌照辅助', order.orderNo);
+        addNotification(data, paymentOrder.userId, 'PLATE', '免费牌照辅助已发起', '平台购车后可享受免费校园牌照辅助。');
+      }
+      order.collaboration ||= createCollaboration(order, order.items[0]?.merchantId || '');
+      createSettlements(data, order, now);
+      addFinanceEvent(data, 'PAYMENT', `PAYMENT_${paymentOrder.id}`, paymentOrder.amountInCents, {
+        userId: paymentOrder.userId,
+        paymentNo: paymentOrder.paymentNo,
+        orderNo: order.orderNo,
+        businessType: 'ORDER'
+      }, now);
+      order.collaboration.messages.unshift({
+        id: `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+        role: 'PLATFORM',
+        text: '支付成功，待商家确认履约。',
+        createdAt: now
+      });
+      addAudit(data, source === 'PROVIDER_CALLBACK' ? '支付回调成功' : '支付成功', order.orderNo);
+      sendOrderNotification(data, paymentOrder.userId, 'ORDER_STATUS', '支付成功', `订单 ${order.orderNo} 支付成功，商家将尽快确认履约。`);
+      notifyOrderMerchant(data, order, 'ORDER', '新订单已支付', `订单 ${order.orderNo} 已支付，请尽快确认履约。`);
+      return { order, paymentOrder };
+    });
+  }
+
   function ensureBootstrapAdmin() {
     store.update((data) => {
       data.adminUsers = Array.isArray(data.adminUsers) ? data.adminUsers : [];
@@ -5237,6 +5348,31 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           notifyOrderMerchant(innerData, linkedOrder, 'ORDER', '新订单已支付', `订单 ${linkedOrder.orderNo} 已支付，请尽快确认履约。`);
           return { order: linkedOrder, paymentOrder: payment };
         });
+        return sendJson(response, 200, { data: result, requestId });
+      }
+
+      const providerCallbackMatch = pathname.match(/^\/api\/payment-callbacks\/([^/]+)$/);
+      if (request.method === 'POST' && providerCallbackMatch) {
+        const providerName = decodeURIComponent(providerCallbackMatch[1]);
+        if (providerName !== paymentProvider.name) {
+          throw new ApiError(404, 'PAYMENT_PROVIDER_NOT_FOUND', 'Payment provider not found');
+        }
+        const body = await readJson(request);
+        let callbackResult;
+        try {
+          callbackResult = await paymentProvider.verifyCallback(request, body);
+        } catch (error) {
+          throw new ApiError(401, 'PAYMENT_CALLBACK_INVALID', `支付回调校验失败：${error.message}`);
+        }
+        if (!callbackResult?.providerTradeNo) {
+          throw new ApiError(400, 'PAYMENT_CALLBACK_INVALID', '支付回调缺少渠道交易号');
+        }
+        if (callbackResult.status !== 'PAID') {
+          throw new ApiError(400, 'PAYMENT_CALLBACK_UNSUPPORTED', '当前仅支持支付成功回调');
+        }
+        const paymentOrder = (store.read().paymentOrders || []).find((item) => item.providerTradeNo === callbackResult.providerTradeNo);
+        if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        const result = settlePaymentOrder(paymentOrder.id, callbackResult, 'PROVIDER_CALLBACK');
         return sendJson(response, 200, { data: result, requestId });
       }
 

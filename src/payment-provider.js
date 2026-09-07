@@ -24,6 +24,15 @@ class MockPaymentProvider {
       providerTradeNo: payment.providerTradeNo || `MOCK_${payment.paymentNo}`
     };
   }
+
+  verifyCallback(request, body) {
+    return {
+      providerTradeNo: body.providerTradeNo,
+      status: body.status,
+      paidAt: body.paidAt,
+      payload: body.payload || null
+    };
+  }
 }
 
 class WeChatPaymentProvider {
@@ -79,6 +88,10 @@ class WeChatPaymentProvider {
       privateKeyPath: this.privateKeyPath,
       apiV3Key: this.apiV3Key
     });
+  }
+
+  verifyCallback(request, body) {
+    return this.transport.verifyCallback({ request, body });
   }
 }
 
