@@ -149,3 +149,65 @@ test('finance task can be acknowledged and auto-resolves when a rerun matches', 
   assert.equal(storeTask.status, 'RESOLVED');
   assert.ok(storeTask.resolvedAt);
 });
+
+test('overdue finance tasks raise patrol alerts and auto-close after resolution', async () => {
+  const admin = await adminLogin();
+  const configured = await api('/api/admin/settings', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin.token}` },
+    body: JSON.stringify({ financeTaskResponseHours: 1, patrolIntervalMinutes: 1 })
+  });
+  assert.equal(configured.response.status, 200);
+
+  providerBills = { tradeBill: [], fundBill: [] };
+  const reconciled = await api('/api/admin/payment-reconciliations/run', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin.token}` },
+    body: JSON.stringify({ billDate: '2026-09-07' })
+  });
+  assert.equal(reconciled.response.status, 200);
+  const taskId = reconciled.body.data.financeTask.id;
+  assert.ok(reconciled.body.data.financeTask.dueAt);
+
+  const staleDueAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  store.update((data) => {
+    const task = data.financeTasks.find((item) => item.id === taskId);
+    task.createdAt = staleDueAt;
+    task.updatedAt = staleDueAt;
+    task.dueAt = staleDueAt;
+  });
+
+  await api('/api/admin/patrol/run', { method: 'POST', headers: { authorization: `Bearer ${admin.token}` } });
+  const alerts = await api('/api/admin/sla-alerts', { headers: { authorization: `Bearer ${admin.token}` } });
+  assert.equal(alerts.response.status, 200);
+  const financeAlert = alerts.body.data.find((item) => item.ruleKey === 'FINANCE_RECONCILIATION' && item.businessId === taskId);
+  assert.ok(financeAlert, '应生成支付对账待办逾期预警');
+  assert.equal(financeAlert.ownerRole, 'PLATFORM');
+  assert.equal(financeAlert.level, 'OVERDUE');
+  assert.ok(financeAlert.overdueMinutes >= 120);
+
+  providerBills = {
+    tradeBill: (store.read().paymentOrders || [])
+      .filter((item) => ['PAID', 'REFUNDED'].includes(item.status))
+      .map((item) => ({
+        paymentNo: item.paymentNo,
+        providerTradeNo: item.providerTradeNo,
+        status: 'SUCCESS',
+        amountInCents: item.amountInCents,
+        paidAt: item.paidAt
+      })),
+    fundBill: []
+  };
+  const resolved = await api('/api/admin/payment-reconciliations/run', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin.token}` },
+    body: JSON.stringify({ billDate: '2026-09-07' })
+  });
+  assert.equal(resolved.response.status, 200);
+  assert.equal(resolved.body.data.financeTask.status, 'RESOLVED');
+
+  await api('/api/admin/patrol/run', { method: 'POST', headers: { authorization: `Bearer ${admin.token}` } });
+  const afterResolve = await api('/api/admin/sla-alerts', { headers: { authorization: `Bearer ${admin.token}` } });
+  const closedAlert = afterResolve.body.data.find((item) => item.ruleKey === 'FINANCE_RECONCILIATION' && item.businessId === taskId);
+  assert.equal(closedAlert.status, 'RESOLVED');
+});

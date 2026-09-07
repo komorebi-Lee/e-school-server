@@ -195,6 +195,7 @@ function initialData() {
       broadbandVerifyHours: 48,
       payoutReviewHours: 48,
       leadResponseHours: 24,
+      financeTaskResponseHours: 24,
       patrolIntervalMinutes: 10,
       lowStockThreshold: 10,
       serviceScoreLimitedThreshold: 80,
@@ -232,7 +233,13 @@ class JsonStore {
       for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'paymentReconciliations', 'financeTasks', 'notifications', 'slaAlerts', 'merchantScoreLogs', 'settingChangeLogs', 'adminUsers', 'adminSessions', 'adminLoginFailures']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
-      if (!data.adminSettings) { data.adminSettings = defaults.adminSettings; changed = true; }
+      if (!data.adminSettings) {
+        data.adminSettings = defaults.adminSettings;
+        changed = true;
+      } else if (data.adminSettings.financeTaskResponseHours === undefined) {
+        data.adminSettings.financeTaskResponseHours = defaults.adminSettings.financeTaskResponseHours;
+        changed = true;
+      }
       if (!data.userOpenIds || typeof data.userOpenIds !== 'object') { data.userOpenIds = {}; changed = true; }
       if (!data.patrolState || typeof data.patrolState !== 'object') { data.patrolState = defaults.patrolState; changed = true; }
       if (changed) this.write(data);

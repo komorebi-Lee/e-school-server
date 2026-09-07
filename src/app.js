@@ -167,6 +167,13 @@ function buildPaymentReconciliationTaskDetail(report) {
   return report.differences.length > 3 ? `${detail}；等 ${report.differences.length} 项差异` : detail;
 }
 
+function financeTaskDueAt(data, baseIso) {
+  const value = Number(data?.adminSettings?.financeTaskResponseHours);
+  const hours = Number.isInteger(value) && value >= 1 && value <= 168 ? value : 24;
+  const base = new Date(baseIso || Date.now()).getTime();
+  return new Date(base + hours * 60 * 60 * 1000).toISOString();
+}
+
 function upsertPaymentReconciliationTask(data, report, now = new Date().toISOString(), addAuditLog = () => {}) {
   if (!Array.isArray(data.financeTasks)) data.financeTasks = [];
   if (!Array.isArray(data.auditLogs)) data.auditLogs = [];
@@ -200,6 +207,7 @@ function upsertPaymentReconciliationTask(data, report, now = new Date().toISOStr
       detail: differenceCount > 3 ? `${detail}；等 ${differenceCount} 项差异` : detail,
       status: 'PENDING',
       ownerRole: 'PLATFORM',
+      dueAt: financeTaskDueAt(data, now),
       acknowledgeNote: '',
       acknowledgedAt: '',
       resolutionNote: '',
@@ -2139,6 +2147,23 @@ function createApp({
         userId: record.userId || '',
         dueAt: record.dueAt || addHours(record.createdAt, 48),
         detail: `${record.reason || ''}`.slice(0, 120)
+      });
+    }
+
+    for (const record of data.financeTasks || []) {
+      if (record.type !== 'PAYMENT_RECONCILIATION' || record.status === 'RESOLVED') continue;
+      targets.push({
+        ruleKey: 'FINANCE_RECONCILIATION',
+        ruleLabel: '支付对账差异处理',
+        businessType: 'FINANCE_TASK',
+        businessId: record.id,
+        businessNo: `${record.billDate} ${record.provider}`,
+        ownerRole: 'PLATFORM',
+        merchantId: '',
+        merchantName: '',
+        userId: '',
+        dueAt: record.dueAt || financeTaskDueAt(data, record.createdAt),
+        detail: `${record.differenceCount} 项差异 · ${record.detail || ''}`.slice(0, 120)
       });
     }
 
@@ -5625,7 +5650,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isInteger(rate) || rate < 0 || rate > 50) throw new ApiError(400, 'VALIDATION_ERROR', '平台佣金比例需为 0-50 的整数');
             current.commissionRatePercent = rate;
           }
-          for (const field of ['deliveryResponseHours', 'plateResponseHours', 'afterSaleResponseHours', 'afterSaleResolutionHours', 'phoneCardActivationHours', 'rechargeCreditHours', 'broadbandVerifyHours', 'payoutReviewHours', 'leadResponseHours']) {
+          for (const field of ['deliveryResponseHours', 'plateResponseHours', 'afterSaleResponseHours', 'afterSaleResolutionHours', 'phoneCardActivationHours', 'rechargeCreditHours', 'broadbandVerifyHours', 'payoutReviewHours', 'leadResponseHours', 'financeTaskResponseHours']) {
             if (body[field] !== undefined) {
               const hours = Number(body[field]);
               if (!Number.isInteger(hours) || hours < 1 || hours > 168) throw new ApiError(400, 'VALIDATION_ERROR', `${field} 需为 1-168 小时`);

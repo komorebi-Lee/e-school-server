@@ -43,7 +43,7 @@ POST /api/admin/payment-reconciliations/run
 
 该接口需要 `FINANCE_MANAGE` 权限。`mock` 支付提供方只返回空账单用于演示；真实环境必须启用 `wechat` provider，并在商户平台开通账单下载权限。
 
-存在差异的对账报告会自动生成一条平台财务待办（`financeTasks`），同一天和同一支付提供方重复对账会复用同一条待办；待办被人工关闭后再次出现差异会自动重开。重新对账且账实相符时，未关闭待办会自动关闭。运营可在管理端「支付单 → 对账待办」认领或填写结论完成处理，相关动作会写入审计日志。接口为：
+存在差异的对账报告会自动生成一条平台财务待办（`financeTasks`），默认处理时限为 24 小时，可在「运营设置 → 对账待办处理时限」中配置为 1-168 小时。同一天和同一支付提供方重复对账会复用同一条待办；待办被人工关闭后再次出现差异会自动重开。重新对账且账实相符时，未关闭待办会自动关闭。逾期待办会被运营巡检升级为「支付对账差异处理」平台预警；待办关闭后，对应预警也会自动关闭。运营可在管理端「支付单 → 对账待办」认领或填写结论完成处理，相关动作会写入审计日志。接口为：
 
 ```text
 GET /api/admin/finance-tasks
@@ -271,6 +271,7 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 | `AFTER_SALE_RESPONSE` | 售后工单 `SUBMITTED` | 工单上的 `responseDueAt`（`afterSaleResponseHours`，24h） | 商家 |
 | `AFTER_SALE_RESOLUTION` | 售后工单未关闭 | 工单上的 `resolutionDueAt`（`afterSaleResolutionHours`，72h） | 商家 |
 | `PAYOUT_REVIEW` | 提现单 `PENDING_REVIEW` | `payoutReviewHours`（48h） | 平台 |
+| `FINANCE_RECONCILIATION` | 支付对账差异待办未关闭 | `financeTaskResponseHours`（24h） | 平台 |
 | `LEAD_FOLLOW_UP` | 线索 `SUBMITTED` / `FOLLOW_UP` | 线索上的 `slaDueAt`（`leadResponseHours`，24h） | 平台 |
 
 超时预警会同步写商家站内通知；商家开启服务分提醒后，还会进入微信订阅消息队列。模板 ID 由管理端「商家服务分 → 微信订阅消息模板」的「履约超时提醒模板 ID」配置。
