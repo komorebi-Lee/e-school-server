@@ -20,6 +20,13 @@ class MockPaymentProvider {
     };
   }
 
+  close(payment) {
+    return {
+      status: 'CLOSED',
+      providerTradeNo: payment.providerTradeNo || `MOCK_${payment.paymentNo}`
+    };
+  }
+
   refund(payment) {
     return {
       status: 'REFUNDED',
@@ -89,6 +96,10 @@ class WeChatPaymentProvider {
 
   confirm(payment) {
     return this.transport.confirm(payment);
+  }
+
+  close(payment) {
+    return this.transport.close(payment);
   }
 
   refund(payment) {

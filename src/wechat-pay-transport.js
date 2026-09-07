@@ -144,6 +144,16 @@ class WeChatPayTransport {
     };
   }
 
+  async close(payment) {
+    const pathname = `/v3/pay/transactions/out-trade-no/${encodeURIComponent(payment.paymentNo)}/close`;
+    await this.request('POST', pathname, { mchid: this.mchid });
+    return {
+      status: 'CLOSED',
+      providerTradeNo: payment.providerTradeNo || payment.paymentNo,
+      payload: null
+    };
+  }
+
   async refund(payment) {
     const result = await this.request('POST', '/v3/refund/domestic/refunds', {
       out_trade_no: payment.paymentNo,

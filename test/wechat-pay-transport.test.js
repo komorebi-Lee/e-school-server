@@ -176,6 +176,36 @@ test('wechat provider maps refund success and pending states', async () => {
   assert.equal(pending.status, 'PENDING');
 });
 
+test('wechat provider closes transaction by merchant order number', async () => {
+  let closeRequest;
+  const provider = createProvider(async (url, options) => {
+    closeRequest = { url: String(url), options };
+    return textResponse({});
+  });
+
+  const closed = await provider.close(payment());
+  assert.equal(closed.status, 'CLOSED');
+  assert.equal(closed.providerTradeNo, 'PAY1760000000001');
+  assert.equal(closeRequest.url, 'https://api.mch.weixin.qq.com/v3/pay/transactions/out-trade-no/PAY1760000000001/close');
+  assert.deepEqual(JSON.parse(closeRequest.options.body), { mchid: '1900000001' });
+
+  const authorization = String(closeRequest.options.headers.Authorization);
+  assert.match(authorization, /^WECHATPAY2-SHA256-RSA2048 /);
+  const authValues = Object.fromEntries(authorization
+    .slice('WECHATPAY2-SHA256-RSA2048 '.length)
+    .split(',')
+    .map((part) => part.split('=', 2).map((value) => value.replace(/"/g, ''))));
+  const authMessage = [
+    'POST',
+    '/v3/pay/transactions/out-trade-no/PAY1760000000001/close',
+    authValues.timestamp,
+    authValues.nonce_str,
+    closeRequest.options.body,
+    ''
+  ].join('\n');
+  assert.ok(crypto.verify('sha256', Buffer.from(authMessage), merchantKeys.publicKey, Buffer.from(authValues.signature, 'base64')));
+});
+
 test('wechat provider queries refund state by out refund no', async () => {
   const requests = [];
   const provider = createProvider(async (url, options) => {

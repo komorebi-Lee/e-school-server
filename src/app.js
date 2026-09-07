@@ -1759,6 +1759,9 @@ function createApp({
       const paymentOrder = (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId);
       if (paymentOrder && paymentOrder.status === 'PENDING') {
         paymentOrder.status = 'CANCELLED';
+        paymentOrder.providerCloseStatus = 'PENDING';
+        paymentOrder.providerCloseRequestedAt = now;
+        paymentOrder.providerCloseError = '';
         paymentOrder.updatedAt = now;
       }
       addAudit(data, '待支付订单超时自动关闭', order.orderNo);
@@ -1784,6 +1787,9 @@ function createApp({
         const paymentOrder = (data.paymentOrders || []).find((item) => item.id === record.paymentOrderId);
         if (paymentOrder && paymentOrder.status === 'PENDING') {
           paymentOrder.status = 'CANCELLED';
+          paymentOrder.providerCloseStatus = 'PENDING';
+          paymentOrder.providerCloseRequestedAt = now;
+          paymentOrder.providerCloseError = '';
           paymentOrder.updatedAt = now;
         }
         addAudit(data, `${target.label}超时自动关闭`, record.id);
@@ -1800,7 +1806,7 @@ function createApp({
     return expired;
   }
 
-  function sweepExpiredOrders() {
+  async function sweepExpiredOrders() {
     const snapshot = store.read();
     const now = new Date().toISOString();
     const timeoutMinutes = Number(snapshot.adminSettings?.paymentTimeoutMinutes || 30);
@@ -1816,7 +1822,61 @@ function createApp({
       || (snapshot.plateApplications || []).some((item) => item.status === 'PENDING_PAYMENT'
         && (item.paymentExpiresAt || new Date(new Date(item.createdAt).getTime() + timeoutMinutes * 60 * 1000).toISOString()) <= now);
     if (!hasExpired) return [];
-    return store.update((data) => expirePendingOrders(data, new Date().toISOString()));
+    const expired = store.update((data) => expirePendingOrders(data, new Date().toISOString()));
+    if (!expired.length) return expired;
+    await processProviderCloseQueue();
+    return expired;
+  }
+
+  async function processProviderCloseQueue() {
+    const queued = store.update((data) => {
+      if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
+      return data.paymentOrders
+        .filter((item) => item.status === 'CANCELLED' && item.providerCloseStatus === 'PENDING')
+        .map((item) => {
+          item.providerCloseStatus = 'REQUESTED';
+          item.updatedAt = new Date().toISOString();
+          return item;
+        });
+    });
+
+    let closedCount = 0;
+    let failedCount = 0;
+    for (const queuedPayment of queued) {
+      try {
+        if (typeof paymentProvider.close !== 'function') {
+          throw new Error('payment provider does not support transaction close');
+        }
+        const result = await paymentProvider.close(queuedPayment);
+        if (result?.status !== 'CLOSED') {
+          throw new Error(`provider returned ${result?.status || 'UNKNOWN'}`);
+        }
+        store.update((data) => {
+          const paymentOrder = (data.paymentOrders || []).find((item) => item.id === queuedPayment.id);
+          if (!paymentOrder || paymentOrder.status !== 'CANCELLED') return;
+          const now = new Date().toISOString();
+          paymentOrder.providerCloseStatus = 'CLOSED';
+          paymentOrder.providerClosedAt = now;
+          paymentOrder.providerCloseError = '';
+          paymentOrder.providerTradeNo = result.providerTradeNo || paymentOrder.providerTradeNo || '';
+          paymentOrder.updatedAt = now;
+          addAudit(data, '支付渠道订单已关闭', paymentOrder.paymentNo);
+        });
+        closedCount += 1;
+      } catch (error) {
+        store.update((data) => {
+          const paymentOrder = (data.paymentOrders || []).find((item) => item.id === queuedPayment.id);
+          if (!paymentOrder || paymentOrder.status !== 'CANCELLED') return;
+          const now = new Date().toISOString();
+          paymentOrder.providerCloseStatus = 'FAILED';
+          paymentOrder.providerCloseError = error.message;
+          paymentOrder.updatedAt = now;
+          addAudit(data, '支付渠道关单失败', paymentOrder.paymentNo);
+        });
+        failedCount += 1;
+      }
+    }
+    return { closedCount, failedCount };
   }
 
   // ---------------------------------------------------------------------------
@@ -2140,8 +2200,14 @@ function createApp({
     sendScoreNotification(data, merchant.userId, 'SLA_WARNING', title, message, alert.updatedAt || alert.createdAt, 'SLA');
   }
 
-  function patrolOnce() {
-    return store.update((data) => runOperationsPatrol(data, new Date().toISOString()));
+  async function patrolOnce() {
+    const result = store.update((data) => runOperationsPatrol(data, new Date().toISOString()));
+    const providerCloses = await processProviderCloseQueue();
+    return {
+      ...result,
+      providerCloses: providerCloses.closedCount,
+      providerCloseFailures: providerCloses.failedCount
+    };
   }
 
   // 读接口顺带触发巡检，但按巡检间隔节流，避免每次请求都全量扫描。
@@ -3124,7 +3190,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/products') {
-        sweepExpiredOrders();
+        await sweepExpiredOrders();
         sweepOperationsPatrol();
         refreshScoresNow();
         const data = store.read();
@@ -3197,7 +3263,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       const productMatch = pathname.match(/^\/api\/products\/([^/]+)$/);
       if (request.method === 'GET' && productMatch) {
-        sweepExpiredOrders();
+        await sweepExpiredOrders();
         refreshScoresNow();
         const data = store.read();
         const product = data.products.find((item) => item.id === productMatch[1] && item.active);
@@ -3515,7 +3581,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/merchant/overview') {
-        sweepExpiredOrders();
+        await sweepExpiredOrders();
         sweepMaturedSettlements();
         sweepOperationsPatrol();
         refreshScoresNow();
@@ -3776,6 +3842,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         if (!Number.isInteger(requestedAdjustment) || requestedAdjustment < 0 || requestedAdjustment > 20) {
           throw new ApiError(400, 'VALIDATION_ERROR', '申请补分需为 0-20 分的整数');
         }
+        await sweepExpiredOrders();
         const result = store.update((data) => {
           const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
           if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号不可用');
@@ -3985,7 +4052,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       // 运营巡检：手动立即跑一轮，用于处理完一批工单后马上刷新预警。
       if (request.method === 'POST' && pathname === '/api/admin/patrol/run') {
-        const result = patrolOnce();
+        const result = await patrolOnce();
         const data = store.read();
         return sendJson(response, 200, {
           data: {
@@ -4166,7 +4233,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/admin/overview') {
-        sweepExpiredOrders();
+        await sweepExpiredOrders();
         sweepMaturedSettlements();
         sweepOperationsPatrol();
         refreshScoresNow();
@@ -4382,7 +4449,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
       if (request.method === 'GET' && pathname === '/api/my/orders') {
         const { userId } = requireUser(request);
-        sweepExpiredOrders();
+        await sweepExpiredOrders();
         const data = store.read();
         const merchants = data.merchants || [];
           const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, statusLabel:statusLabels[order.status]||order.status, collaboration:order.collaboration || createCollaboration(order, order.items?.[0]?.merchantId || ''), merchantName:merchants.find(merchant=>merchant.id===order.collaboration?.merchantId)?.name || '平台自营', plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '' }));
@@ -5596,7 +5663,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const action = paymentMatch[2];
         if (!action) throw new ApiError(404, 'NOT_FOUND', 'Payment action is required');
-        sweepExpiredOrders();
+        await sweepExpiredOrders();
         if (action === 'confirm') {
           const currentPayment = store.read().paymentOrders.find((item) => item.id === paymentMatch[1] && item.userId === userId);
           if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
@@ -5618,6 +5685,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (action === 'cancel') {
             if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u5355\u53ef\u64cd\u4f5c');
             paymentOrder.status = 'CANCELLED';
+            paymentOrder.providerCloseStatus = 'PENDING';
+            paymentOrder.providerCloseRequestedAt = now;
+            paymentOrder.providerCloseError = '';
             paymentOrder.updatedAt = now;
             if (rechargeOrder) {
               rechargeOrder.status = 'CANCELLED';
@@ -5653,7 +5723,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           throw new ApiError(403, 'FORBIDDEN', '\u4ec5\u7ba1\u7406\u7aef\u53ef\u9000\u6b3e');
         });
-        return sendJson(response, 200, { data: { order: updated.order, rechargeOrder: updated.rechargeOrder, phoneCardOrder: updated.phoneCardOrder, plateApplication: updated.plateApplication, paymentOrder: updated.paymentOrder }, requestId });
+        await processProviderCloseQueue();
+        const closedPaymentOrder = store.read().paymentOrders
+          .find((item) => item.id === paymentMatch[1] && item.userId === userId);
+        return sendJson(response, 200, { data: { order: updated.order, rechargeOrder: updated.rechargeOrder, phoneCardOrder: updated.phoneCardOrder, plateApplication: updated.plateApplication, paymentOrder: closedPaymentOrder }, requestId });
       }
 
       if (request.method === 'PATCH' && orderMatch) {
@@ -5705,12 +5778,16 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const paymentOrder = (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId);
           if (paymentOrder && paymentOrder.status === 'PENDING') {
             paymentOrder.status = 'CANCELLED';
+            paymentOrder.providerCloseStatus = 'PENDING';
+            paymentOrder.providerCloseRequestedAt = now;
+            paymentOrder.providerCloseError = '';
             paymentOrder.updatedAt = now;
           }
           addAudit(data, '\u7528\u6237\u53d6\u6d88\u8ba2\u5355', order.orderNo);
           addNotification(data, userId, 'ORDER', '\u8ba2\u5355\u5df2\u53d6\u6d88', `\u8ba2\u5355 ${order.orderNo} \u5df2\u53d6\u6d88\u3002`);
           return order;
         });
+        await processProviderCloseQueue();
         return sendJson(response, 200, { data: updated, requestId });
       }
 
@@ -5811,9 +5888,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
     const settings = store.read().adminSettings || {};
     const configured = Number(settings.patrolIntervalMinutes);
     const minutes = Number.isInteger(configured) && configured >= 1 && configured <= 1440 ? configured : 10;
-    const tick = () => {
+    const tick = async () => {
       try {
-        const result = patrolOnce();
+        const result = await patrolOnce();
         if (typeof onRun === 'function') onRun(result);
       } catch (error) {
         console.error('[patrol] run failed:', error.message);
