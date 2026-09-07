@@ -648,6 +648,7 @@ function adminPermissionForRequest(pathname) {
   if (pathname.startsWith('/api/admin/settings')
     || pathname.startsWith('/api/admin/subscribe-templates')) return 'CONFIG_MANAGE';
   if (pathname.startsWith('/api/admin/payment-orders')
+    || pathname.startsWith('/api/admin/payment-reconciliations')
     || pathname.startsWith('/api/admin/payout-requests')
     || pathname.startsWith('/api/admin/finance-events')) return 'FINANCE_MANAGE';
   if (pathname.startsWith('/api/admin/products')
@@ -4044,6 +4045,174 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
+      if (request.method === 'POST' && pathname === '/api/admin/payment-reconciliations/run') {
+        const body = await readJson(request);
+        const billDate = requireString(body.billDate, 'billDate', { maxLength: 10 });
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(billDate)) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '账单日期格式必须为 YYYY-MM-DD');
+        }
+        if (typeof paymentProvider.fetchBills !== 'function') {
+          throw new ApiError(501, 'PAYMENT_RECONCILIATION_UNSUPPORTED', '当前支付提供方不支持对账');
+        }
+        let bills;
+        try {
+          bills = await paymentProvider.fetchBills(billDate);
+        } catch (error) {
+          throw new ApiError(502, 'PAYMENT_PROVIDER_FAILED', `获取支付账单失败：${error.message}`);
+        }
+
+        const snapshot = store.read();
+        const providerPayments = (bills.tradeBill || [])
+          .filter((item) => item.paymentNo && ['SUCCESS', 'PAID'].includes(item.status))
+          .map((item) => ({
+            paymentNo: item.paymentNo,
+            providerTradeNo: item.providerTradeNo || '',
+            amountInCents: Number(item.amountInCents || 0),
+            paidAt: item.paidAt || ''
+          }));
+        const providerRefunds = (bills.fundBill || [])
+          .filter((item) => item.refundNo)
+          .map((item) => ({
+            paymentNo: item.paymentNo || '',
+            refundNo: item.refundNo,
+            providerTradeNo: item.providerTradeNo || '',
+            amountInCents: Number(item.amountInCents || 0),
+            refundedAt: item.refundedAt || ''
+          }));
+        const localPayments = (snapshot.paymentOrders || [])
+          .filter((item) => ['PAID', 'REFUNDED'].includes(item.status)
+            && String(item.paidAt || '').startsWith(billDate))
+          .map((item) => ({
+            paymentNo: item.paymentNo,
+            providerTradeNo: item.providerTradeNo || '',
+            amountInCents: Number(item.amountInCents || 0),
+            paidAt: item.paidAt || ''
+          }));
+        const localRefunds = (snapshot.paymentOrders || [])
+          .filter((item) => item.status === 'REFUNDED'
+            && (String(item.refundedAt || '').startsWith(billDate)
+              || String(item.refund?.updatedAt || '').startsWith(billDate)))
+          .map((item) => ({
+            paymentNo: item.paymentNo,
+            refundNo: item.refund?.refundNo || `RF_${item.paymentNo}`,
+            amountInCents: Number(item.amountInCents || 0),
+            refundedAt: item.refundedAt || item.refund?.updatedAt || ''
+          }));
+
+        const differences = [];
+        const providerPaymentMap = new Map(providerPayments.map((item) => [item.paymentNo, item]));
+        const localPaymentMap = new Map(localPayments.map((item) => [item.paymentNo, item]));
+        for (const providerPayment of providerPayments) {
+          const localPayment = localPaymentMap.get(providerPayment.paymentNo);
+          if (!localPayment) {
+            differences.push({
+              type: 'PROVIDER_PAYMENT_MISSING_LOCAL',
+              paymentNo: providerPayment.paymentNo,
+              providerTradeNo: providerPayment.providerTradeNo,
+              amountInCents: providerPayment.amountInCents
+            });
+          } else if (localPayment.amountInCents !== providerPayment.amountInCents) {
+            differences.push({
+              type: 'PAYMENT_AMOUNT_MISMATCH',
+              paymentNo: providerPayment.paymentNo,
+              providerTradeNo: providerPayment.providerTradeNo,
+              localAmountInCents: localPayment.amountInCents,
+              providerAmountInCents: providerPayment.amountInCents
+            });
+          }
+        }
+        for (const localPayment of localPayments) {
+          if (!providerPaymentMap.has(localPayment.paymentNo)) {
+            differences.push({
+              type: 'LOCAL_PAYMENT_MISSING_PROVIDER',
+              paymentNo: localPayment.paymentNo,
+              providerTradeNo: localPayment.providerTradeNo,
+              amountInCents: localPayment.amountInCents
+            });
+          }
+        }
+
+        const providerRefundMap = new Map(providerRefunds.map((item) => [item.refundNo, item]));
+        const localRefundMap = new Map(localRefunds.map((item) => [item.refundNo, item]));
+        for (const providerRefund of providerRefunds) {
+          const localRefund = localRefundMap.get(providerRefund.refundNo);
+          if (!localRefund) {
+            differences.push({
+              type: 'PROVIDER_REFUND_MISSING_LOCAL',
+              paymentNo: providerRefund.paymentNo,
+              refundNo: providerRefund.refundNo,
+              amountInCents: providerRefund.amountInCents
+            });
+          } else if (localRefund.amountInCents !== providerRefund.amountInCents) {
+            differences.push({
+              type: 'REFUND_AMOUNT_MISMATCH',
+              paymentNo: providerRefund.paymentNo,
+              refundNo: providerRefund.refundNo,
+              localAmountInCents: localRefund.amountInCents,
+              providerAmountInCents: providerRefund.amountInCents
+            });
+          }
+        }
+        for (const localRefund of localRefunds) {
+          if (!providerRefundMap.has(localRefund.refundNo)) {
+            differences.push({
+              type: 'LOCAL_REFUND_MISSING_PROVIDER',
+              paymentNo: localRefund.paymentNo,
+              refundNo: localRefund.refundNo,
+              amountInCents: localRefund.amountInCents
+            });
+          }
+        }
+
+        const matchedPaymentCount = providerPayments
+          .filter((item) => localPaymentMap.has(item.paymentNo)
+            && localPaymentMap.get(item.paymentNo).amountInCents === item.amountInCents).length;
+        const matchedRefundCount = providerRefunds
+          .filter((item) => localRefundMap.has(item.refundNo)
+            && localRefundMap.get(item.refundNo).amountInCents === item.amountInCents).length;
+        const report = {
+          id: `rec_${randomUUID()}`,
+          billDate,
+          provider: paymentProvider.name,
+          channel: paymentProvider.channel,
+          status: differences.length ? 'DIFFERENCES' : 'MATCHED',
+          summary: {
+            providerPaymentCount: providerPayments.length,
+            localPaymentCount: localPayments.length,
+            matchedPaymentCount,
+            missingLocalPaymentCount: providerPayments.length - matchedPaymentCount,
+            missingProviderPaymentCount: localPayments.length - matchedPaymentCount,
+            providerRefundCount: providerRefunds.length,
+            localRefundCount: localRefunds.length,
+            matchedRefundCount,
+            missingLocalRefundCount: providerRefunds.length - matchedRefundCount,
+            missingProviderRefundCount: localRefunds.length - matchedRefundCount,
+            differenceCount: differences.length
+          },
+          differences,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+
+        const persisted = store.update((data) => {
+          if (!Array.isArray(data.paymentReconciliations)) data.paymentReconciliations = [];
+          const existingIndex = data.paymentReconciliations.findIndex((item) => (
+            item.billDate === billDate && item.provider === paymentProvider.name
+          ));
+          if (existingIndex >= 0) {
+            report.id = data.paymentReconciliations[existingIndex].id;
+            report.createdAt = data.paymentReconciliations[existingIndex].createdAt;
+            data.paymentReconciliations[existingIndex] = report;
+          } else {
+            data.paymentReconciliations.unshift(report);
+          }
+          data.paymentReconciliations = data.paymentReconciliations.slice(0, 500);
+          addAudit(data, '执行支付对账', `${billDate} ${paymentProvider.name}`);
+          return report;
+        });
+        return sendJson(response, 200, { data: persisted, requestId });
+      }
+
       if (request.method === 'GET' && pathname === '/api/admin/notifications') {
         const data = store.read();
         const items = (data.notifications || []).filter(Boolean);
@@ -4292,6 +4461,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             broadbandApplications: data.broadbandApplications,
             plateApplications: data.plateApplications,
             paymentOrders: data.paymentOrders || [],
+            paymentReconciliations: data.paymentReconciliations || [],
             notifications: data.notifications || [],
             afterSales: data.afterSales,
             productReviews: data.productReviews || [],

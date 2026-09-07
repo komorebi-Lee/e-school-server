@@ -27,6 +27,10 @@ class MockPaymentProvider {
     };
   }
 
+  fetchBills() {
+    return { billDate: '', tradeBill: [], fundBill: [] };
+  }
+
   refund(payment) {
     return {
       status: 'REFUNDED',
@@ -100,6 +104,10 @@ class WeChatPaymentProvider {
 
   close(payment) {
     return this.transport.close(payment);
+  }
+
+  fetchBills(billDate) {
+    return this.transport.fetchBills(billDate);
   }
 
   refund(payment) {

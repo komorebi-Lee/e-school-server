@@ -148,6 +148,7 @@ function initialData() {
     settlements: [],
     payoutRequests: [],
     financeEvents: [],
+    paymentReconciliations: [],
     userOpenIds: {},
     adminUsers: [],
     adminSessions: [],
@@ -227,7 +228,7 @@ class JsonStore {
       if (!data || !Array.isArray(data.products)) throw new Error('invalid database');
       const defaults = initialData();
       let changed = false;
-      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'notifications', 'slaAlerts', 'merchantScoreLogs', 'settingChangeLogs', 'adminUsers', 'adminSessions', 'adminLoginFailures']) {
+      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'paymentReconciliations', 'notifications', 'slaAlerts', 'merchantScoreLogs', 'settingChangeLogs', 'adminUsers', 'adminSessions', 'adminLoginFailures']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) { data.adminSettings = defaults.adminSettings; changed = true; }

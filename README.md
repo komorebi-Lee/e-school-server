@@ -30,6 +30,19 @@ PORT、DB_FILE、ADMIN_USERNAME、ADMIN_PASSWORD_HASH、ADMIN_PASSWORD、CORS_AL
 
 微信模式已实现 JSAPI 下单、商户请求签名、小程序支付参数签名、支付/退款状态查询、退款请求、回调时间戳/序列/签名校验和 AES-256-GCM 回调解密。正式收款前仍必须在微信支付商户平台完成配置，并用沙箱或小额真实订单联调回调、退款和对账。
 
+### 支付对账
+
+微信模式会按账单日期下载微信支付「交易账单」和「资金账单」，并把渠道成功支付/退款记录与本地 `paymentOrders` 按 `paymentNo`、`refundNo` 和金额核对。差异类型覆盖渠道缺失、本地缺失和金额不一致，报告会持久化到 `paymentReconciliations`，同一账单日期和支付提供方重复执行时复用原报告 ID，并写入操作审计。
+
+管理端「支付单」页面可选择账单日期并执行对账，页面展示支付/退款匹配数、差异明细和最近 8 次报告。接口为：
+
+```text
+POST /api/admin/payment-reconciliations/run
+{ "billDate": "YYYY-MM-DD" }
+```
+
+该接口需要 `FINANCE_MANAGE` 权限。`mock` 支付提供方只返回空账单用于演示；真实环境必须启用 `wechat` provider，并在商户平台开通账单下载权限。
+
 ### 支付回调
 
 `POST /api/payment-callbacks/:provider`

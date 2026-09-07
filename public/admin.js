@@ -3,7 +3,7 @@ const state={data:null,view:'dashboard',query:'',status:'ALL',token:localStorage
 const lowStockThreshold=Number((state.data.settings||{}).lowStockThreshold??10);
 const titles={dashboard:'经营概览',merchants:'商家入驻',products:'商品中心',promos:'话费活动',reviews:'商品评价',orders:'电瓶车订单',payments:'支付单',phones:'电话卡订单',recharges:'话费权益',finance:'财务流水',broadband:'宽带资格',plates:'牌照辅助',afterSales:'售后工单',notifications:'站内通知',logs:'操作日志',settings:'运营设置',settlements:'商家结算',payouts:'商家提现',patrol:'超时预警',scores:'商家服务分'};
 titles.serviceCollabs='服务单协同';
-const statuses={PENDING_PAYMENT:'待支付',PAID:'已支付',FULFILLING:'配送中',COMPLETED:'已完成',CANCELLED:'已取消',PENDING:'待支付',EXPIRED:'支付超时',REFUNDED:'已退款',PENDING_REALNAME:'待实名',ACTIVATED:'已激活',PENDING_CREDIT:'待到账',CREDITED:'已到账',PENDING_VERIFY:'待核验',APPROVED:'已通过',REJECTED:'未通过',MATERIAL_PENDING:'待材料',REVIEWING:'处理中',SUBMITTED:'待审核',CLOSED:'已关闭',AFTER_SALE:'售后中',PUBLISHED:'已展示',HIDDEN:'已隐藏',PENDING_SETTLE:'可结算',SETTLED:'已结算',PENDING_DELIVERY:'待交付核验',IN_ACCOUNT_PERIOD:'账期中',FROZEN:'售后冻结',PAYOUT_REQUESTED:'提现待审核',PENDING_REVIEW:'待审核',OPEN:'待认领',ACKNOWLEDGED:'已认领',RESOLVED:'已关闭',OVERDUE:'已超时',WARNING:'即将超时',NORMAL:'正常经营',LIMITED:'限流整改',RESTRICTED:'暂停上新',EXCELLENT:'优秀',GOOD:'良好',WATCH:'观察',RISK:'高风险',AUTO:'自动上架'};
+const statuses={PENDING_PAYMENT:'待支付',PAID:'已支付',FULFILLING:'配送中',COMPLETED:'已完成',CANCELLED:'已取消',PENDING:'待支付',EXPIRED:'支付超时',REFUNDED:'已退款',PENDING_REALNAME:'待实名',ACTIVATED:'已激活',PENDING_CREDIT:'待到账',CREDITED:'已到账',PENDING_VERIFY:'待核验',APPROVED:'已通过',REJECTED:'未通过',MATERIAL_PENDING:'待材料',REVIEWING:'处理中',SUBMITTED:'待审核',CLOSED:'已关闭',AFTER_SALE:'售后中',PUBLISHED:'已展示',HIDDEN:'已隐藏',PENDING_SETTLE:'可结算',SETTLED:'已结算',PENDING_DELIVERY:'待交付核验',IN_ACCOUNT_PERIOD:'账期中',FROZEN:'售后冻结',PAYOUT_REQUESTED:'提现待审核',PENDING_REVIEW:'待审核',OPEN:'待认领',ACKNOWLEDGED:'已认领',RESOLVED:'已关闭',OVERDUE:'已超时',WARNING:'即将超时',NORMAL:'正常经营',LIMITED:'限流整改',RESTRICTED:'暂停上新',EXCELLENT:'优秀',GOOD:'良好',WATCH:'观察',RISK:'高风险',AUTO:'自动上架',MATCHED:'账实相符',DIFFERENCES:'存在差异'};
 const endpointTypes={orders:'orders',phones:'phone-card-orders',recharges:'recharge-orders',broadband:'broadband-applications',plates:'plate-applications',afterSales:'after-sales'};
 const collections={orders:'orders',payments:'paymentOrders',phones:'phoneCardOrders',recharges:'rechargeOrders',broadband:'broadbandApplications',plates:'plateApplications',afterSales:'afterSales',finance:'financeEvents',settlements:'settlements',payouts:'payoutRequests',patrol:'slaAlerts',scores:'merchantScores'};
 const financeTypeLabels={PAYMENT:'支付收入',REFUND:'退款支出',PAYOUT:'商家打款'};
@@ -68,6 +68,38 @@ function serviceCollabs(){const rows=[...(state.data.phoneCardOrders||[]).map(it
   const priority=(item)=>{const collab=item.collaboration||{};return collab.intervention?.status==='REQUESTED'?0:(collab.messages||[]).some(message=>message.role==='USER')?1:2};
   return priority(a)-priority(b)||String(b.updatedAt||b.createdAt||'').localeCompare(String(a.updatedAt||a.createdAt||''));
 });return toolbar(rows.length)+table(['用户','业务','联系方式','状态','协同','操作'],rows,rows.length)}
+const reconciliationTypeLabels={
+  PROVIDER_PAYMENT_MISSING_LOCAL:'渠道有支付，本地缺失',
+  LOCAL_PAYMENT_MISSING_PROVIDER:'本地有支付，渠道缺失',
+  PAYMENT_AMOUNT_MISMATCH:'支付金额不一致',
+  PROVIDER_REFUND_MISSING_LOCAL:'渠道有退款，本地缺失',
+  LOCAL_REFUND_MISSING_PROVIDER:'本地有退款，渠道缺失',
+  REFUND_AMOUNT_MISMATCH:'退款金额不一致'
+};
+function localDateString(date){
+  const offset=date.getTimezoneOffset();
+  return new Date(date.getTime()-offset*60000).toISOString().slice(0,10);
+}
+function reconciliationPanel(){
+  const reports=state.data.paymentReconciliations||[];
+  const latest=reports[0];
+  const summary=latest?.summary||{};
+  const differences=latest?.differences||[];
+  const paymentDifferenceCount=differences.filter(item=>item.type.includes('PAYMENT')).length;
+  const refundDifferenceCount=differences.filter(item=>item.type.includes('REFUND')).length;
+  const yesterday=localDateString(new Date(Date.now()-24*60*60*1000));
+  const reportRows=reports.slice(0,8).map(report=>{
+    const currentDifferences=report.differences||[];
+    return `<tr><td><strong>${esc(report.billDate)}</strong><small>${esc(report.provider)}</small></td><td><span class="badge ${report.status==='MATCHED'?'green':'red'}">${report.status==='MATCHED'?'账实相符':'账实不符'}</span></td><td>${report.summary?.matchedPaymentCount||0} 匹配 / ${currentDifferences.filter(item=>item.type.includes('PAYMENT')).length} 差异</td><td>${report.summary?.matchedRefundCount||0} 匹配 / ${currentDifferences.filter(item=>item.type.includes('REFUND')).length} 差异</td><td>${currentDifferences.length}</td><td>${fmtDate(report.updatedAt||report.createdAt)}</td></tr>`;
+  }).join('');
+  const differenceRows=differences.slice(0,20).map(item=>`<tr><td>${esc(reconciliationTypeLabels[item.type]||item.type)}</td><td>${esc(item.paymentNo||'—')}</td><td>${esc(item.refundNo||'—')}</td><td>${item.localAmountInCents!==undefined?money(item.localAmountInCents):'—'}</td><td>${item.providerAmountInCents!==undefined?money(item.providerAmountInCents):item.amountInCents!==undefined?money(item.amountInCents):'—'}</td></tr>`).join('');
+  return `<section class="panel reconciliation-panel"><div class="panel-head"><h2>支付对账</h2><span>微信账单与本地支付/退款核对</span></div>
+    <div class="page-actions"><p>${latest?`最近对账：${esc(latest.billDate)} · ${latest.status==='MATCHED'?'账实相符':'账实不符'}`:'尚未执行对账'}</p><div><input id="reconciliation-date" type="date" value="${yesterday}"><button id="run-reconciliation" class="primary">执行对账</button></div></div>
+    <div class="metric-grid">${metric('支付匹配',summary.matchedPaymentCount||0,'渠道与本地一致')}${metric('支付差异',paymentDifferenceCount,'缺失或金额不一致')}${metric('退款匹配',summary.matchedRefundCount||0,'渠道与本地一致')}${metric('退款差异',refundDifferenceCount,'缺失或金额不一致')}</div>
+    <div class="table-wrap"><table><thead><tr><th>账单日期</th><th>结果</th><th>支付</th><th>退款</th><th>差异数</th><th>执行时间</th></tr></thead><tbody>${reportRows||'<tr><td colspan="6" class="empty">暂无对账报告</td></tr>'}</tbody></table></div>
+    ${latest?`<div class="panel-head secondary-panel-head"><h3>差异明细</h3><span>最近一次报告，最多展示 20 条</span></div><div class="table-wrap"><table><thead><tr><th>差异类型</th><th>支付单</th><th>退款单</th><th>本地金额</th><th>渠道金额</th></tr></thead><tbody>${differenceRows||'<tr><td colspan="5" class="empty">暂无差异</td></tr>'}</tbody></table></div>`:''}
+  </section>`;
+}
 function payments(){
   const items=(state.data.paymentOrders||[]).filter(match).filter(statusMatch);
   const merchantName=(id)=>(state.data.merchants||[]).find(x=>x.id===id)?.name||'平台自营';
@@ -80,7 +112,7 @@ function payments(){
     const refundText=refundPending?'退款处理中':refund.status==='FAILED'?'退款失败':'';
     return `<tr><td><strong>${esc(x.paymentNo)}</strong><small>${esc(x.orderNo)}</small></td><td>${money(x.amountInCents)}</td><td>${esc(x.channel)}</td><td><span class="badge ${badgeClass(x.status)}">${label(x.status)}</span>${refundText?`<small>${esc(refundText)}</small>`:''}<small>${fmtDate(x.paidAt||x.createdAt)}</small></td><td>${esc(settleText)}</td><td><div class="row-actions"><button class="text-button detail-button" data-view="payments" data-id="${x.id}">查看详情</button>${firstPending?`<button class="text-button settle-merchant" data-merchant="${firstPending.merchantId}">确认结算</button>`:''}${refundPending?`<button class="text-button refund-refresh" data-id="${x.id}">查询退款结果</button>`:''}${x.status==='PAID'&&!refundPending?`<button class="text-button danger refund-payment" data-id="${x.id}">退款</button>`:''}</div></td></tr>`;
   });
-  return toolbar(items.length,{statusesList:['PENDING','PAID','CANCELLED','REFUNDED']})+table(['支付单','金额','渠道','状态','商家分账','操作'],rows,items.length);
+  return reconciliationPanel()+toolbar(items.length,{statusesList:['PENDING','PAID','CANCELLED','REFUNDED']})+table(['支付单','金额','渠道','状态','商家分账','操作'],rows,items.length);
 }
 function findServiceCollab(id){
   const collections=[
@@ -171,6 +203,22 @@ bindView=function(){baseBindServiceCollab();document.querySelectorAll('.service-
 const originalBindView=bindView;
 function bindPayments(){document.querySelectorAll('.refund-payment').forEach(b=>b.addEventListener('click',async()=>{const note=prompt('请填写退款备注','已与用户确认退款');if(note===null)return;await api(`/api/admin/payment-orders/${b.dataset.id}/refund`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({note})});showToast('退款已完成');await load()}))}
 bindPayments=function(parent=document){
+  parent.querySelector('#run-reconciliation')?.addEventListener('click',async()=>{
+    const billDate=parent.querySelector('#reconciliation-date')?.value;
+    if(!billDate)return showToast('请选择对账日期');
+    try{
+      showToast('正在拉取微信账单并核对');
+      const result=await api('/api/admin/payment-reconciliations/run',{
+        method:'POST',
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({billDate})
+      });
+      showToast(result?.status==='MATCHED'?'对账完成，账实相符':'对账完成，请处理差异');
+      await load();
+    }catch(error){
+      showToast(error.message);
+    }
+  });
   parent.querySelectorAll('.refund-payment').forEach(b=>b.addEventListener('click',async()=>{
     const note=prompt('请填写退款备注','已与用户确认退款');
     if(note===null)return;

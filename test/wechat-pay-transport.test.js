@@ -206,6 +206,60 @@ test('wechat provider closes transaction by merchant order number', async () => 
   assert.ok(crypto.verify('sha256', Buffer.from(authMessage), merchantKeys.publicKey, Buffer.from(authValues.signature, 'base64')));
 });
 
+test('wechat provider downloads and parses trade and fund bills', async () => {
+  const requests = [];
+  const provider = createProvider(async (url, options) => {
+    requests.push({ url: String(url), options });
+    if (String(url).endsWith('/v3/bill/tradebill?bill_date=2026-09-07&account_type=BASIC&tar_type=ALL')) {
+      return textResponse({ download_url: 'https://api.mch.test/v3/billdownload/file?token=trade-token' });
+    }
+    if (String(url).endsWith('/v3/bill/fundbill?bill_date=2026-09-07&account_type=BASIC')) {
+      return textResponse({ download_url: 'https://api.mch.test/v3/billdownload/file?token=fund-token' });
+    }
+    if (String(url).includes('token=trade-token')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => [
+          '交易时间,微信订单号,商户订单号,交易状态,现金支付金额(元)',
+          '2026-09-07 10:00:00,4200001234567890,PAY1760000000001,SUCCESS,1299.00'
+        ].join('\n')
+      };
+    }
+    if (String(url).includes('token=fund-token')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => [
+          '记账时间,微信支付单号,微信退款单号,商户订单号,商户退款单号,收入金额(元),支出金额(元)',
+          '2026-09-07 11:00:00,4200001234567890,5000001234567890,PAY1760000000001,RF_PAY1760000000001,0.00,1299.00'
+        ].join('\n')
+      };
+    }
+    return textResponse({}, 500);
+  });
+
+  const bills = await provider.fetchBills('2026-09-07');
+  assert.equal(bills.billDate, '2026-09-07');
+  assert.equal(bills.tradeBill.length, 1);
+  assert.equal(bills.tradeBill[0].paymentNo, 'PAY1760000000001');
+  assert.equal(bills.tradeBill[0].providerTradeNo, '4200001234567890');
+  assert.equal(bills.tradeBill[0].status, 'SUCCESS');
+  assert.equal(bills.tradeBill[0].amountInCents, 129900);
+  assert.equal(bills.fundBill.length, 1);
+  assert.equal(bills.fundBill[0].paymentNo, 'PAY1760000000001');
+  assert.equal(bills.fundBill[0].refundNo, 'RF_PAY1760000000001');
+  assert.equal(bills.fundBill[0].providerTradeNo, '4200001234567890');
+  assert.equal(bills.fundBill[0].amountInCents, 129900);
+  assert.equal(bills.fundBill[0].status, 'REFUND');
+
+  assert.equal(requests.length, 4);
+  assert.ok(requests[0].options.headers.Authorization.startsWith('WECHATPAY2-SHA256-RSA2048 '));
+  assert.ok(requests[1].url.includes('token=trade-token'));
+  assert.ok(requests[2].options.headers.Authorization.startsWith('WECHATPAY2-SHA256-RSA2048 '));
+  assert.ok(requests[3].url.includes('token=fund-token'));
+});
+
 test('wechat provider queries refund state by out refund no', async () => {
   const requests = [];
   const provider = createProvider(async (url, options) => {

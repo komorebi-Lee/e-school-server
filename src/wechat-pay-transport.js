@@ -22,6 +22,36 @@ function callbackError(code, message) {
   return Object.assign(new Error(message), { code });
 }
 
+function splitCsvLine(line) {
+  const values = [];
+  let value = '';
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === '"') {
+      if (quoted && line[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (char === ',' && !quoted) {
+      values.push(value);
+      value = '';
+    } else {
+      value += char;
+    }
+  }
+  values.push(value);
+  return values.map((item) => item.trim());
+}
+
+function yuanToCents(value) {
+  const amount = Number(String(value || '').replace(/[¥,\s]/g, ''));
+  if (!Number.isFinite(amount)) return 0;
+  return Math.round(amount * 100);
+}
+
 class WeChatPayTransport {
   constructor(options) {
     this.appid = options.appid;
@@ -152,6 +182,90 @@ class WeChatPayTransport {
       providerTradeNo: payment.providerTradeNo || payment.paymentNo,
       payload: null
     };
+  }
+
+  async fetchBills(billDate) {
+    const date = String(billDate || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw Object.assign(new Error('bill date must be YYYY-MM-DD'), { code: 'WECHAT_PAY_BILL_DATE_INVALID' });
+    }
+    const tradeBill = await this.downloadBill(
+      `/v3/bill/tradebill?bill_date=${date}&account_type=BASIC&tar_type=ALL`,
+      'trade'
+    );
+    const fundBill = await this.downloadBill(
+      `/v3/bill/fundbill?bill_date=${date}&account_type=BASIC`,
+      'fund'
+    );
+    return { billDate: date, tradeBill, fundBill };
+  }
+
+  async downloadBill(pathname, billType) {
+    const result = await this.request('GET', pathname);
+    if (!result.download_url) {
+      throw Object.assign(new Error('WeChat Pay bill response is missing download_url'), {
+        code: 'WECHAT_PAY_RESPONSE_INVALID'
+      });
+    }
+
+    let response;
+    try {
+      response = await this.fetch(result.download_url, {
+        headers: {
+          Accept: 'text/csv',
+          'User-Agent': 'campus-go-server'
+        }
+      });
+    } catch (error) {
+      throw Object.assign(new Error(error.message), { code: 'WECHAT_PAY_NETWORK_ERROR' });
+    }
+    const text = await response.text();
+    if (!response.ok) {
+      throw Object.assign(new Error(`WeChat Pay bill download returned ${response.status}`), {
+        code: 'WECHAT_PAY_API_ERROR',
+        status: response.status
+      });
+    }
+    return this.parseBill(text, billType);
+  }
+
+  parseBill(text, billType) {
+    const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean);
+    const headerIndex = lines.findIndex((line) => (
+      billType === 'trade' ? line.includes('商户订单号') : line.includes('商户退款单号')
+    ));
+    if (headerIndex < 0) {
+      throw Object.assign(new Error(`WeChat Pay ${billType} bill has no header row`), {
+        code: 'WECHAT_PAY_RESPONSE_INVALID'
+      });
+    }
+    const headers = splitCsvLine(lines[headerIndex]);
+    const rows = lines.slice(headerIndex + 1)
+      .filter((line) => !line.startsWith('总') && !line.startsWith('合计'))
+      .map((line) => {
+        const values = splitCsvLine(line);
+        return Object.fromEntries(headers.map((header, index) => [header, values[index] || '']));
+      });
+
+    if (billType === 'trade') {
+      return rows.map((row) => ({
+        paymentNo: row['商户订单号'] || '',
+        providerTradeNo: row['微信订单号'] || '',
+        status: row['交易状态'] || '',
+        amountInCents: yuanToCents(row['现金支付金额(元)'] || row['应结订单金额(元)']),
+        paidAt: row['交易时间'] || ''
+      }));
+    }
+
+    return rows.map((row) => ({
+      paymentNo: row['商户订单号'] || row['商户支付单号'] || '',
+      providerTradeNo: row['微信支付单号'] || '',
+      refundNo: row['商户退款单号'] || '',
+      providerRefundNo: row['微信退款单号'] || '',
+      status: row['商户退款单号'] ? 'REFUND' : 'PAYMENT',
+      amountInCents: yuanToCents(row['支出金额(元)'] || row['收入金额(元)']),
+      refundedAt: row['记账时间'] || ''
+    }));
   }
 
   async refund(payment) {
