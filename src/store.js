@@ -156,6 +156,7 @@ function initialData() {
     slaAlerts: [],
     patrolState: { lastRunAt: '', runCount: 0, lastCreated: 0, lastResolved: 0, lastOpen: 0 },
     merchantScoreLogs: [],
+    settingChangeLogs: [],
     afterSales: [],
     productReviews: seedProductReviews,
     rechargePromos: seedRechargePromos,
@@ -226,7 +227,7 @@ class JsonStore {
       if (!data || !Array.isArray(data.products)) throw new Error('invalid database');
       const defaults = initialData();
       let changed = false;
-      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'notifications', 'slaAlerts', 'merchantScoreLogs', 'adminUsers', 'adminSessions', 'adminLoginFailures']) {
+      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'notifications', 'slaAlerts', 'merchantScoreLogs', 'settingChangeLogs', 'adminUsers', 'adminSessions', 'adminLoginFailures']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) { data.adminSettings = defaults.adminSettings; changed = true; }

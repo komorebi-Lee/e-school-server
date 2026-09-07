@@ -344,6 +344,46 @@ test('business rules configure public commitments and delivery fees', async () =
   assert.equal(restored.body.data.deliveryFeeInCents, 0);
 });
 
+test('admin settings changes are versioned with field differences', async () => {
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = {
+    'content-type': 'application/json',
+    authorization: `Bearer ${adminLogin.body.data.token}`
+  };
+
+  const logsBefore = store.read().settingChangeLogs || [];
+  const changed = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ commissionRatePercent: 3, payoutMinimumInCents: 20000 })
+  });
+  assert.equal(changed.response.status, 200);
+
+  const unchanged = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ commissionRatePercent: 3, payoutMinimumInCents: 20000 })
+  });
+  assert.equal(unchanged.response.status, 200);
+
+  const logs = store.read().settingChangeLogs || [];
+  assert.equal(logs.length, logsBefore.length + 1);
+  const log = logs[0];
+  assert.equal(log.operator.username, process.env.ADMIN_USERNAME);
+  assert.equal(log.changes.length, 2);
+  assert.ok(log.changes.find((item) => item.field === 'commissionRatePercent' && item.before === 2 && item.after === 3));
+  assert.ok(log.changes.find((item) => item.field === 'payoutMinimumInCents' && item.before === 10000 && item.after === 20000));
+  assert.equal(log.snapshot.commissionRatePercent, 3);
+  assert.equal(log.snapshot.payoutMinimumInCents, 20000);
+
+  const overview = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.equal(overview.response.status, 200);
+  assert.equal(overview.body.data.settingChangeLogs.length, Math.min(logs.length, 20));
+  assert.equal(overview.body.data.settingChangeLogs[0].id, log.id);
+  assert.ok(overview.body.data.settingChangeLogs[0].snapshot);
+});
+
 test('phone plans and recharge promos are centrally configurable', async () => {
   const products = await api('/api/products?category=PHONE_PLAN');
   assert.equal(products.response.status, 200);

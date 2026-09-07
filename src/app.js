@@ -3851,6 +3851,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               .map((merchant) => ({ merchantId: merchant.id, merchantName: merchant.name, ...merchant.serviceScore })),
             merchantScoreSummary: serviceScoreSummary(data.merchants || []),
             merchantScoreLogs: (data.merchantScoreLogs || []).slice(0, 50),
+            settingChangeLogs: (data.settingChangeLogs || []).slice(0, 20),
             serviceScoreCases: (data.serviceScoreCases || []).slice(0, 80),
             autoDelistedProducts: (data.products || [])
               .filter((product) => product.autoDelistRule === 'LOW_QUALITY' && !product.active)
@@ -4850,8 +4851,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (request.method === 'POST' && pathname === '/api/admin/settings') {
         const body = await readJson(request);
+        const actor = requireAdmin(request, 'CONFIG_MANAGE');
         const settings = store.update((data) => {
           const current = data.adminSettings || {};
+          const previous = { ...current };
           for (const field of ['brandName', 'schoolName', 'campusName', 'servicePhone', 'serviceWechat']) if (body[field] !== undefined) current[field] = requireString(body[field], field, { maxLength: 80 });
           if (body.externalPlateFeeInCents !== undefined) { const fee = Number(body.externalPlateFeeInCents); if (!Number.isInteger(fee) || fee < 0) throw new ApiError(400, 'VALIDATION_ERROR', '服务费格式不正确'); current.externalPlateFeeInCents = fee; }
           if (body.deliveryFeeInCents !== undefined) { const fee = Number(body.deliveryFeeInCents); if (!Number.isInteger(fee) || fee < 0 || fee > 10000000) throw new ApiError(400, 'VALIDATION_ERROR', '配送费格式不正确'); current.deliveryFeeInCents = fee; }
@@ -4931,7 +4934,29 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             current.deliveryTimeSlots = slots;
           }
           if (body.platformNotice !== undefined) current.platformNotice = requireString(body.platformNotice, 'platformNotice', { maxLength: 200 });
-          data.adminSettings = current; addAudit(data, '更新系统设置', '运营配置'); return current;
+          data.adminSettings = current;
+          const changes = Object.keys(current)
+            .filter((field) => JSON.stringify(current[field]) !== JSON.stringify(previous[field]))
+            .map((field) => ({ field, before: previous[field], after: current[field] }));
+          if (changes.length > 0) {
+            data.settingChangeLogs = Array.isArray(data.settingChangeLogs) ? data.settingChangeLogs : [];
+            data.settingChangeLogs.unshift({
+              id: `setting_log_${randomUUID()}`,
+              version: data.settingChangeLogs.length + 1,
+              operator: {
+                id: actor.id,
+                username: actor.username,
+                displayName: actor.displayName,
+                role: actor.role
+              },
+              changes,
+              snapshot: { ...current },
+              createdAt: new Date().toISOString()
+            });
+            data.settingChangeLogs = data.settingChangeLogs.slice(0, 50);
+            addAudit(data, '更新系统设置', changes.map((item) => item.field).join(', '));
+          }
+          return current;
         });
         return sendJson(response, 200, { data: settings, requestId });
       }
