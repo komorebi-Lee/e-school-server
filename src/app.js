@@ -97,6 +97,11 @@ const scoreNotificationTemplates = {
     id: 'stock_low_stock',
     keywords: ['库存', '补货', '商品'],
     description: '商品可售库存达到补货阈值时提醒商家及时补货'
+  },
+  SLA_WARNING: {
+    id: 'sla_warning',
+    keywords: ['履约', '超时', '预警'],
+    description: '订单、激活、核验或工单接近超时时提醒责任商家及时处理'
   }
 };
 
@@ -1557,12 +1562,16 @@ function createApp({ store, wechatAuth = exchangeWeChatCode, wechatSubscribeSend
       ? `已超时 ${alert.overdueMinutes >= 60 ? `${Math.floor(alert.overdueMinutes / 60)} 小时` : `${alert.overdueMinutes} 分钟`}`
       : '即将超时';
     const content = `${alert.ruleLabel}：${alert.businessNo} ${overdueText}，请尽快处理。${alert.detail ? `（${alert.detail}）` : ''}`.slice(0, 300);
-    if (alert.ownerRole === 'MERCHANT' && alert.merchantId) {
-      notifyMerchant(data, alert.merchantId, 'SLA', alert.level === 'OVERDUE' ? '履约已超时' : '履约即将超时', content);
-    }
-    if (alert.ownerRole === 'PLATFORM' && alert.merchantId) {
-      notifyMerchant(data, alert.merchantId, 'SLA', '平台正在处理中', `${alert.ruleLabel}：${alert.businessNo} ${overdueText}，平台已收到提醒。`);
-    }
+    const merchant = (data.merchants || []).find((item) => item.id === alert.merchantId);
+    const isMerchantOwner = alert.ownerRole === 'MERCHANT' && alert.merchantId;
+    if (!merchant?.userId) return;
+    const title = isMerchantOwner
+      ? (alert.level === 'OVERDUE' ? '履约已超时' : '履约即将超时')
+      : '平台正在处理中';
+    const message = isMerchantOwner
+      ? content
+      : `${alert.ruleLabel}：${alert.businessNo} ${overdueText}，平台已收到提醒。`;
+    sendScoreNotification(data, merchant.userId, 'SLA_WARNING', title, message, alert.updatedAt || alert.createdAt, 'SLA');
   }
 
   function patrolOnce() {
@@ -2489,7 +2498,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           score_appeal_result: settings.scoreAppealResultTemplateId || ''
           ,product_auto_delist: settings.productAutoDelistTemplateId || '',
           product_compliance_restored: settings.productComplianceRestoredTemplateId || '',
-          stock_low_stock: settings.stockLowStockTemplateId || ''
+          stock_low_stock: settings.stockLowStockTemplateId || '',
+          sla_warning: settings.slaWarningTemplateId || ''
         };
         const configuredUserIds = {
           order_status: settings.orderStatusTemplateId || '',
@@ -4291,7 +4301,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 score_appeal_result: data.adminSettings?.scoreAppealResultTemplateId || '',
                 product_auto_delist: data.adminSettings?.productAutoDelistTemplateId || '',
                 product_compliance_restored: data.adminSettings?.productComplianceRestoredTemplateId || '',
-                stock_low_stock: data.adminSettings?.stockLowStockTemplateId || ''
+                stock_low_stock: data.adminSettings?.stockLowStockTemplateId || '',
+                sla_warning: data.adminSettings?.slaWarningTemplateId || ''
               })[item.id] || ''
             })),
             ...Object.entries(orderNotificationTemplates).map(([key, item]) => ({
@@ -4333,6 +4344,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           ,product_auto_delist: settings.productAutoDelistTemplateId || '',
           product_compliance_restored: settings.productComplianceRestoredTemplateId || ''
           ,stock_low_stock: settings.stockLowStockTemplateId || ''
+          ,sla_warning: settings.slaWarningTemplateId || ''
           ,order_status: settings.orderStatusTemplateId || '',
           order_service: settings.orderServiceTemplateId || '',
           after_sale: settings.afterSaleTemplateId || ''
@@ -4523,7 +4535,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isFinite(value) || value < 1 || value > 4.5) throw new ApiError(400, 'VALIDATION_ERROR', '均分下架阈值需为 1-4.5 分');
             current.productComplianceAverageRatingThreshold = Math.round(value * 10) / 10;
           }
-          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'afterSaleTemplateId']) {
+          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'slaWarningTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'afterSaleTemplateId']) {
             if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);
           }
           if (body.paymentTimeoutMinutes !== undefined) {

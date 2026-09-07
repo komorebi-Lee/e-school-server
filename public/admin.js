@@ -615,6 +615,7 @@ function scoresView() {
     <label>商品下架提醒模板 ID<input id="productAutoDelistTemplate" value="${esc(state.data.settings?.productAutoDelistTemplateId || '')}"></label>
     <label>商品恢复提醒模板 ID<input id="productComplianceRestoredTemplate" value="${esc(state.data.settings?.productComplianceRestoredTemplateId || '')}"></label>
     <label>低库存提醒模板 ID<input id="stockLowStockTemplate" value="${esc(state.data.settings?.stockLowStockTemplateId || '')}"></label>
+    <label>履约超时提醒模板 ID<input id="slaWarningTemplate" value="${esc(state.data.settings?.slaWarningTemplateId || '')}"></label>
     <label>订单状态模板 ID<input id="orderStatusTemplate" value="${esc(state.data.settings?.orderStatusTemplateId || '')}"></label>
     <label>订单客服模板 ID<input id="orderServiceTemplate" value="${esc(state.data.settings?.orderServiceTemplateId || '')}"></label>
     <label>售后进度模板 ID<input id="afterSaleTemplate" value="${esc(state.data.settings?.afterSaleTemplateId || '')}"></label>
@@ -740,6 +741,7 @@ bindView = function () {
         productAutoDelistTemplateId: document.querySelector('#productAutoDelistTemplate').value.trim(),
         productComplianceRestoredTemplateId: document.querySelector('#productComplianceRestoredTemplate').value.trim(),
         stockLowStockTemplateId: document.querySelector('#stockLowStockTemplate').value.trim(),
+        slaWarningTemplateId: document.querySelector('#slaWarningTemplate').value.trim(),
         orderStatusTemplateId: document.querySelector('#orderStatusTemplate').value.trim(),
         orderServiceTemplateId: document.querySelector('#orderServiceTemplate').value.trim(),
         afterSaleTemplateId: document.querySelector('#afterSaleTemplate').value.trim()

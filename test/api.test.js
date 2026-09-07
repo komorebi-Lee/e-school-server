@@ -2366,7 +2366,7 @@ test('operations patrol raises overdue alerts and closes them when work moves on
   const adminHeaders = await loginAdmin();
   const configured = await api('/api/admin/settings', {
     method: 'POST', headers: adminHeaders,
-    body: JSON.stringify({ deliveryResponseHours: 2, phoneCardActivationHours: 2, patrolIntervalMinutes: 1 })
+    body: JSON.stringify({ deliveryResponseHours: 2, phoneCardActivationHours: 2, patrolIntervalMinutes: 1, slaWarningTemplateId: 'wx_test_sla_warning' })
   });
   assert.equal(configured.response.status, 200);
 
@@ -2429,6 +2429,32 @@ test('operations patrol raises overdue alerts and closes them when work moves on
   assert.equal(merchantSubscription.response.status, 200);
   assert.equal(merchantSubscription.body.data.subscribed, true);
 
+  // 商家开启订阅后，新产生的履约预警应进入微信订阅消息队列，而不只留在站内通知。
+  const subscribeBuyer = await loginWeChat('patrol_subscribe_buyer');
+  const subscribeOrder = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${subscribeBuyer.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_001', quantity: 1 }] })
+  });
+  assert.equal(subscribeOrder.response.status, 201);
+  await confirmPayment(subscribeOrder.body.paymentOrder.id, subscribeBuyer.token);
+  const subscribeStaleAt = new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString();
+  store.update((data) => {
+    const paidOrder = data.orders.find((item) => item.id === subscribeOrder.body.data.id);
+    paidOrder.paidAt = subscribeStaleAt;
+    paidOrder.updatedAt = subscribeStaleAt;
+  });
+  const subscribeRun = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(subscribeRun.response.status, 200);
+  const slaQueued = (store.read().subscribeMessages || [])
+    .find((item) => item.templateId === 'sla_warning' && item.status === 'QUEUED'
+      && item.title === '履约已超时');
+  assert.ok(slaQueued);
+  const subscribeDetail = await api(`/api/orders/${subscribeOrder.body.data.id}`, { headers: { authorization: `Bearer ${subscribeBuyer.token}` } });
+  await api(`/api/merchant/orders/${subscribeOrder.body.data.id}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', ...merchantHeaders },
+    body: JSON.stringify({ status: 'COMPLETED', deliveryCode: subscribeDetail.body.data.deliveryCode })
+  });
+
   const complianceConfig = await api('/api/admin/settings', {
     method: 'POST', headers: adminHeaders,
     body: JSON.stringify({
@@ -2445,7 +2471,8 @@ test('operations patrol raises overdue alerts and closes them when work moves on
     method: 'POST', headers: adminHeaders,
     body: JSON.stringify({
       productAutoDelistTemplateId: 'wx_test_product_delist',
-      productComplianceRestoredTemplateId: 'wx_test_product_restore'
+      productComplianceRestoredTemplateId: 'wx_test_product_restore',
+      slaWarningTemplateId: 'wx_test_sla_warning'
     })
   });
   assert.equal(templateConfig.response.status, 200);

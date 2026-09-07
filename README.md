@@ -216,6 +216,8 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 | `PAYOUT_REVIEW` | 提现单 `PENDING_REVIEW` | `payoutReviewHours`（48h） | 平台 |
 | `LEAD_FOLLOW_UP` | 线索 `SUBMITTED` / `FOLLOW_UP` | 线索上的 `slaDueAt`（`leadResponseHours`，24h） | 平台 |
 
+超时预警会同步写商家站内通知；商家开启服务分提醒后，还会进入微信订阅消息队列。模板 ID 由管理端「商家服务分 → 微信订阅消息模板」的「履约超时提醒模板 ID」配置。
+
 预警工单状态机：
 
 ```
@@ -229,6 +231,7 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 同一条业务在同一规则下只会有一张未关闭的预警，重复巡检不会重复开单。
 - 从 `WARNING` 升级为 `OVERDUE` 时会再提醒一次，同一等级只提醒一次（记录在 `notifiedLevels`）。
 - 责任方是商家的预警会写一条 `SLA` 类型站内通知给该商家；责任方是平台但涉及某商家的预警，会给商家一条「平台正在处理中」的知会。
+- 开启提醒后，责任商家的预警会额外生成一条 `sla_warning` 订阅消息，派发后统一跳转商家工作台。
 - 巡检不改变任何业务状态，只维护预警工单，因此重复运行是安全的。
 
 `GET /api/admin/sla-alerts`（可选 `?status=OPEN|ACKNOWLEDGED|RESOLVED`）返回预警列表、`summary` 汇总与 `patrolState`。
@@ -298,5 +301,5 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 超时关单依赖读接口触发的惰性清扫（商品、订单、概览接口），没有独立定时任务；长时间无人访问时订单会在下一次访问时统一关闭。
 - 分账账期到期依赖读接口惰性清扫；运营巡检已有独立定时任务（`patrolIntervalMinutes`），但仍是单进程内的 `setInterval`，多实例部署时会重复执行，需要改为分布式任务或选主。
 - 提现审核与打款仍是人工在管理端确认的模拟动作，未接入真实企业付款/企业转账接口，也没有银行回单附件上传与批量打款。
-- 超时预警只做站内通知，未接入微信订阅消息、短信或企业微信告警；也没有把履约超时率沉淀成店铺评分。
+- 超时预警已接入站内通知、微信订阅消息和店铺服务分；短信或企业微信告警仍未接入。
 - 服务分低质扣分使用 30 天窗口，但仓库仅保留 `merchantScoreLogs` 与商品风控字段；多实例事务数据库下应迁移为独立风控事件表。
