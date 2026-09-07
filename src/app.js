@@ -614,7 +614,6 @@ function createApp({
     corsAllowedOrigins ?? process.env.CORS_ALLOWED_ORIGINS ?? 'http://localhost:3000,http://127.0.0.1:3000'
   );
   const merchantSessions = new Map();
-  const adminLoginFailures = new Map();
   const {
     maxFailures: adminLoginMaxFailures = 5,
     lockDurationMs: adminLoginLockDurationMs = 15 * 60 * 1000
@@ -631,32 +630,48 @@ function createApp({
   }
 
   function getActiveAdminLoginLock(lockKey, now) {
-    const state = adminLoginFailures.get(lockKey);
+    const state = (store.read().adminLoginFailures || []).find((item) => item.key === lockKey);
     if (!state) return null;
     if (state.lockedUntil > now) return state;
     if (state.lastFailedAt + adminLoginLockDurationMs <= now) {
-      adminLoginFailures.delete(lockKey);
       return null;
     }
     return state.lockedUntil ? null : state;
   }
 
   function recordAdminLoginFailure(lockKey, now) {
-    const state = adminLoginFailures.get(lockKey) || {
-      failures: 0,
-      lockedUntil: 0,
-      lastFailedAt: 0
-    };
-    if (state.lastFailedAt + adminLoginLockDurationMs <= now) {
-      state.failures = 0;
-      state.lockedUntil = 0;
-    }
-    state.failures += 1;
-    state.lastFailedAt = now;
-    if (state.failures >= adminLoginMaxFailures) {
-      state.lockedUntil = now + adminLoginLockDurationMs;
-    }
-    adminLoginFailures.set(lockKey, state);
+    return store.update((data) => {
+      data.adminLoginFailures = Array.isArray(data.adminLoginFailures) ? data.adminLoginFailures : [];
+      data.adminLoginFailures = data.adminLoginFailures.filter((item) => (
+        item.lockedUntil > now || item.lastFailedAt + adminLoginLockDurationMs > now
+      ));
+      const state = data.adminLoginFailures.find((item) => item.key === lockKey) || {
+        key: lockKey,
+        failures: 0,
+        lockedUntil: 0,
+        lastFailedAt: 0
+      };
+      if (state.lastFailedAt + adminLoginLockDurationMs <= now) {
+        state.failures = 0;
+        state.lockedUntil = 0;
+      }
+      state.failures += 1;
+      state.lastFailedAt = now;
+      if (state.failures >= adminLoginMaxFailures) {
+        state.lockedUntil = now + adminLoginLockDurationMs;
+      }
+      if (!data.adminLoginFailures.includes(state)) {
+        data.adminLoginFailures.push(state);
+      }
+      return state;
+    });
+  }
+
+  function clearAdminLoginFailure(lockKey) {
+    store.update((data) => {
+      data.adminLoginFailures = (data.adminLoginFailures || []).filter((item) => item.key !== lockKey);
+      return true;
+    });
   }
 
   function verifyAdminPassword(suppliedPassword) {
@@ -2454,7 +2469,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           recordAdminLoginFailure(lockKey, now);
           throw new ApiError(401, 'INVALID_CREDENTIALS', '账号或密码错误');
         }
-        adminLoginFailures.delete(lockKey);
+        clearAdminLoginFailure(lockKey);
         const token = createHash('sha256').update(`${username}:${randomUUID()}`).digest('hex');
         const expiresAt = Date.now() + 8 * 60 * 60 * 1000;
         saveAdminSession(token, username, expiresAt);

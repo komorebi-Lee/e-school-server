@@ -134,6 +134,45 @@ test('admin login lock expires and allows another attempt', async () => {
   }
 });
 
+test('admin login lock survives a service restart', async () => {
+  const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-lock-restart-'));
+  const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));
+  const startServer = async () => {
+    const restartServer = http.createServer(createApp({ store }));
+    await new Promise((resolve) => restartServer.listen(0, '127.0.0.1', resolve));
+    return restartServer;
+  };
+  const firstServer = await startServer();
+  const firstBaseUrl = `http://127.0.0.1:${firstServer.address().port}`;
+  const login = (baseUrl, password) => fetch(`${baseUrl}/api/admin/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: ADMIN_USERNAME, password })
+  });
+
+  try {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      assert.equal((await login(firstBaseUrl, 'wrong-password')).status, 401);
+    }
+
+    await new Promise((resolve) => firstServer.close(resolve));
+    const secondServer = await startServer();
+    const secondBaseUrl = `http://127.0.0.1:${secondServer.address().port}`;
+    try {
+      const locked = await login(secondBaseUrl, ADMIN_PASSWORD);
+      assert.equal(locked.status, 429);
+      assert.equal((await locked.json()).error.code, 'ADMIN_LOGIN_LOCKED');
+    } finally {
+      await new Promise((resolve) => secondServer.close(resolve));
+    }
+  } finally {
+    if (firstServer.listening) {
+      await new Promise((resolve) => firstServer.close(resolve));
+    }
+    fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test('admin login verifies a configured scrypt password hash', async () => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-hash-'));
   const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));

@@ -31,7 +31,7 @@ http://localhost:3000/admin
 
 管理端账号密码来自环境变量，不再写入前端页面或代码。复制 `.env.example` 为 `.env` 后配置 `ADMIN_USERNAME`；生产环境推荐先运行 `npm run hash-admin-password`，输入密码并回车，把输出的 `scrypt$salt$hash` 配置为 `ADMIN_PASSWORD_HASH`。配置哈希后登录会使用时间安全比较，并忽略 `ADMIN_PASSWORD`；明文 `ADMIN_PASSWORD` 仅保留为本地演示兼容。微信云托管请在服务“环境变量”中配置同名变量，不要把真实密码或哈希提交到 Git。
 
-管理端登录内置防暴力破解：同一来源地址和账号在 15 分钟内连续失败 5 次后锁定 15 分钟，期间即使密码正确也会返回 `ADMIN_LOGIN_LOCKED`；登录成功会清空失败计数，锁定到期后自动恢复。
+管理端登录内置防暴力破解：同一来源地址和账号在 15 分钟内连续失败 5 次后锁定 15 分钟，期间即使密码正确也会返回 `ADMIN_LOGIN_LOCKED`；登录成功会清空失败计数，锁定到期后自动恢复。失败计数和锁定状态会持久化到 JSON/MySQL 数据存储，服务重启后不会清零。
 
 管理端会话会持久化到 JSON/MySQL 数据存储中，服务重启后 8 小时有效期内的登录态仍然可用；存储中只保存 token 的 SHA-256 哈希，不保存明文 token。
 
