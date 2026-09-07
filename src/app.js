@@ -4396,8 +4396,24 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           return true;
         });
         addAudit(store.read(), '派发微信订阅消息', `成功 ${sent} · 失败 ${failed}`);
-        const remaining = (store.read().subscribeMessages || []).filter((item) => item.status === 'QUEUED').length;
-        return sendJson(response, 200, { data: { sent, failed, remaining }, requestId });
+      const remaining = (store.read().subscribeMessages || []).filter((item) => item.status === 'QUEUED').length;
+      return sendJson(response, 200, { data: { sent, failed, remaining }, requestId });
+    }
+
+      const subscribeRetryMatch = pathname.match(/^\/api\/admin\/subscribe-messages\/([^/]+)\/retry$/);
+      if (request.method === 'POST' && subscribeRetryMatch) {
+        const result = store.update((data) => {
+          const message = (data.subscribeMessages || []).find((item) => item.id === subscribeRetryMatch[1]);
+          if (!message) throw new ApiError(404, 'SUBSCRIBE_MESSAGE_NOT_FOUND', '订阅消息不存在');
+          if (message.status !== 'FAILED') throw new ApiError(409, 'SUBSCRIBE_MESSAGE_NOT_FAILED', '仅发送失败的消息可以重试');
+          message.status = 'QUEUED';
+          message.error = '';
+          message.sentAt = '';
+          message.updatedAt = new Date().toISOString();
+          addAudit(data, '重试微信订阅消息', message.templateId);
+          return message;
+        });
+        return sendJson(response, 200, { data: result, requestId });
       }
 
       if (request.method === 'POST' && adminProductMatch) {

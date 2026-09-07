@@ -2861,6 +2861,57 @@ test('order notifications queue and dispatch to subscribed users', async () => {
     && message.page === 'pages/orders/orders'));
 });
 
+test('failed subscribe messages can be retried after template configuration', async () => {
+  const adminHeaders = await loginAdmin();
+  const session = await loginWeChat('retry_user');
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ orderStatusTemplateId: '' })
+  });
+
+  const card = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_001', quantity: 1 }] })
+  });
+  assert.equal(card.response.status, 201);
+  await confirmPayment(card.body.paymentOrder.id, session.token);
+  const queued = (store.read().subscribeMessages || [])
+    .find((item) => item.templateId === 'order_status' && item.userId === 'wx_retry_user' && ['QUEUED', 'FAILED'].includes(item.status));
+  assert.ok(queued);
+
+  const firstDispatch = await api('/api/admin/subscribe-messages/dispatch', {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ limit: 100 })
+  });
+  assert.equal(firstDispatch.response.status, 200);
+  const failed = (store.read().subscribeMessages || [])
+    .find((item) => item.id === queued.id && item.status === 'FAILED');
+  assert.ok(failed);
+  assert.ok(failed.error.includes('SUBSCRIBE_TEMPLATE_NOT_CONFIGURED'));
+
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ orderStatusTemplateId: 'wx_test_order_status' })
+  });
+  const retried = await api(`/api/admin/subscribe-messages/${queued.id}/retry`, { method: 'POST', headers: adminHeaders });
+  assert.equal(retried.response.status, 200);
+  assert.equal(retried.body.data.status, 'QUEUED');
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const result = await api('/api/admin/subscribe-messages/dispatch', {
+      method: 'POST', headers: adminHeaders, body: JSON.stringify({ limit: 100 })
+    });
+    assert.equal(result.response.status, 200);
+    const sent = (store.read().subscribeMessages || [])
+      .find((item) => item.id === queued.id && item.status === 'SENT');
+    if (sent) break;
+  }
+  const sent = (store.read().subscribeMessages || [])
+    .find((item) => item.id === queued.id && item.status === 'SENT');
+  assert.ok(sent);
+  assert.ok(sentSubscribeMessages.some((message) => message.template_id === 'wx_test_order_status'
+    && message.touser === 'openid_retry_user'));
+});
+
 test('low stock reaches merchants exactly once and clears after restocking', async () => {
   const merchantSession = await loginWeChat('merchant_demo');
   const merchantLogin = await api('/api/merchant/login', {

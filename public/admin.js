@@ -128,11 +128,11 @@ function notifications(){
   const rows=items.slice(0,80).map(x=>`<tr><td><strong>${esc(x.title)}</strong><small>${esc(x.type)}</small></td><td>${esc(x.content)}</td><td><span class="badge ${x.read?'green':'orange'}">${x.read?'已读':'未读'}</span></td><td>${fmtDate(x.createdAt)}</td></tr>`).join('');
   const stats=state.data.subscribeStats||{queued:0,sent:0,failed:0};
   const messages=(state.data.subscribeMessages||[]).filter(match).slice(0,50);
-  const queueRows=messages.map(x=>`<tr><td><strong>${esc(x.title)}</strong><small>${esc(x.templateId)}</small></td><td>${esc(x.content)}</td><td><span class="badge ${x.status==='SENT'?'green':x.status==='FAILED'?'red':'orange'}">${x.status==='SENT'?'已发送':x.status==='FAILED'?'发送失败':'待发送'}</span>${x.error?`<small>${esc(x.error)}</small>`:''}</td><td>${fmtDate(x.createdAt)}</td><td>${fmtDate(x.sentAt)}</td></tr>`).join('');
+  const queueRows=messages.map(x=>`<tr><td><strong>${esc(x.title)}</strong><small>${esc(x.templateId)}</small></td><td>${esc(x.content)}</td><td><span class="badge ${x.status==='SENT'?'green':x.status==='FAILED'?'red':'orange'}">${x.status==='SENT'?'已发送':x.status==='FAILED'?'发送失败':'待发送'}</span>${x.error?`<small>${esc(x.error)}</small>`:''}</td><td>${fmtDate(x.createdAt)}</td><td>${fmtDate(x.sentAt)}</td><td>${x.status==='FAILED'?`<button class="text-button retry-subscribe" data-id="${esc(x.id)}">重试</button>`:''}</td></tr>`).join('');
   return `<div class="metric-grid">${metric('待发送',stats.queued||0,'商家与用户提醒队列')}${metric('已发送',stats.sent||0,'微信已确认')}${metric('失败',stats.failed||0,'可修正配置后重试')}${metric('订阅用户',(state.data.orderMessageSubscribers||0)+(state.data.serviceMessageSubscribers||0),'订单与服务分提醒')}</div>
-  <section class="panel"><div class="panel-head"><h2>订阅消息队列</h2><span>服务分与订单进度提醒</span></div>
+  <section class="panel"><div class="panel-head"><h2>订阅消息队列</h2><span>服务分、预警与订单进度提醒</span></div>
     <div class="page-actions"><p>仅发送已配置模板的消息，失败原因会保留在队列中。</p><div><button id="dispatchSubscribe" class="primary">派发前 20 条</button></div></div>
-    <div class="table-wrap"><table><thead><tr><th>消息</th><th>内容</th><th>发送状态</th><th>创建时间</th><th>发送时间</th></tr></thead><tbody>${queueRows||'<tr><td colspan="5" class="empty">暂无订阅消息</td></tr>'}</tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>消息</th><th>内容</th><th>发送状态</th><th>创建时间</th><th>发送时间</th><th>操作</th></tr></thead><tbody>${queueRows||'<tr><td colspan="6" class="empty">暂无订阅消息</td></tr>'}</tbody></table></div>
   </section>` + toolbar(items.length)+table(['通知','内容','状态','时间'],rows,items.length);
 }
 function finance(){const f=state.data.financeSummary||{paymentInCents:0,refundOutCents:0,payoutOutCents:0,netInCents:0};const items=(state.data.financeEvents||[]).filter(match).filter(x=>state.status==='ALL'||x.eventType===state.status).slice(0,100);const rows=items.map(x=>`<tr><td><strong>${esc(financeTypeLabels[x.eventType]||x.eventType)}</strong><small>${esc(x.referenceId)}</small></td><td>${money(x.amountInCents)}</td><td>${esc(x.merchantName||'平台自营')}</td><td>${esc(x.orderNo||x.paymentNo||'—')}</td><td>${esc(x.settlementReference||'—')}</td><td>${fmtDate(x.createdAt)}</td></tr>`);return `<div class="metric-grid">${metric('支付收入',money(f.paymentInCents),'累计支付单入账')}${metric('退款支出',money(f.refundOutCents),'累计退款冲减')}${metric('商家打款',money(f.payoutOutCents),'累计结算出账')}${metric('资金净额',money(f.netInCents),'支付 - 退款 - 打款',true)}</div>`+toolbar(items.length,{statusesList:['PAYMENT','REFUND','PAYOUT']})+table(['类型','金额','商家','关联单据','打款凭证','时间'],rows,items.length)}
@@ -674,6 +674,11 @@ bindView = function () {
     showToast(`派发完成：成功 ${result.sent} · 失败 ${result.failed} · 剩余 ${result.remaining}`);
     await load();
   });
+  document.querySelectorAll('.retry-subscribe').forEach((button) => button.addEventListener('click', async () => {
+    await api(`/api/admin/subscribe-messages/${button.dataset.id}/retry`, { method: 'POST' });
+    showToast('已加入发送队列');
+    await load();
+  }));
   document.querySelectorAll('.adjust-score').forEach((button) => button.addEventListener('click', async () => {
     const raw = prompt('人工调整分值（-20 到 20 的整数）', '-5');
     if (raw === null) return;

@@ -232,6 +232,7 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 从 `WARNING` 升级为 `OVERDUE` 时会再提醒一次，同一等级只提醒一次（记录在 `notifiedLevels`）。
 - 责任方是商家的预警会写一条 `SLA` 类型站内通知给该商家；责任方是平台但涉及某商家的预警，会给商家一条「平台正在处理中」的知会。
 - 开启提醒后，责任商家的预警会额外生成一条 `sla_warning` 订阅消息，派发后统一跳转商家工作台。
+- 微信订阅消息派发失败后，可在管理端「站内通知 → 订阅消息队列」单独重试；模板 ID 修复后消息会回到 `QUEUED` 状态。
 - 巡检不改变任何业务状态，只维护预警工单，因此重复运行是安全的。
 
 `GET /api/admin/sla-alerts`（可选 `?status=OPEN|ACKNOWLEDGED|RESOLVED`）返回预警列表、`summary` 汇总与 `patrolState`。
