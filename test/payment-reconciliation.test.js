@@ -140,4 +140,9 @@ test('payment reconciliation compares provider bills with local payment and refu
   assert.equal(overview.body.data.paymentReconciliations.length, 1);
   assert.equal(overview.body.data.paymentReconciliations[0].id, reportId);
   assert.equal(overview.body.data.paymentReconciliations[0].status, 'DIFFERENCES');
+  assert.equal(overview.body.data.financeTasks.length, 1);
+  assert.equal(overview.body.data.financeTasks[0].type, 'PAYMENT_RECONCILIATION');
+  assert.equal(overview.body.data.financeTasks[0].reportId, reportId);
+  assert.equal(overview.body.data.financeTasks[0].status, 'PENDING');
+  assert.equal(overview.body.data.financeTasks[0].differenceCount, 2);
 });

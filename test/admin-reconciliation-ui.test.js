@@ -64,6 +64,19 @@ test('admin payments view renders reconciliation controls and differences', () =
         createdAt: '2026-09-07T08:00:00.000Z',
         updatedAt: '2026-09-07T08:00:00.000Z'
       }
+    ],
+    financeTasks: [
+      {
+        id: 'fin_001',
+        type: 'PAYMENT_RECONCILIATION',
+        reportId: 'rec_001',
+        billDate: '2026-09-06',
+        provider: 'wechat',
+        differenceCount: 1,
+        status: 'PENDING',
+        createdAt: '2026-09-07T08:00:00.000Z',
+        updatedAt: '2026-09-07T08:00:00.000Z'
+      }
     ]
   };
 
@@ -78,4 +91,8 @@ test('admin payments view renders reconciliation controls and differences', () =
   assert.ok(html.includes('渠道有支付，本地缺失'));
   assert.ok(html.includes('PAY_PROVIDER_ONLY'));
   assert.ok(html.includes('¥1,299.00'));
+  assert.ok(html.includes('对账待办'));
+  assert.ok(html.includes('待处理'));
+  assert.ok(html.includes('认领处理'));
+  assert.ok(html.includes('完成处理'));
 });

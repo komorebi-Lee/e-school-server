@@ -49,7 +49,13 @@ function operationsReportPanel(){
 function dashboard(){const m=state.data.metrics;const d=state.data;return`<div class="welcome"><div><h2>上午好，运营管理员</h2><p>这里汇总了今天最需要关注的交易与履约事项。</p></div><div class="date-chip">${new Date().toLocaleDateString('zh-CN',{month:'long',day:'numeric',weekday:'long'})}</div></div><div class="metric-grid">${metric('累计成交额',money(m.revenueInCents),'仅统计已支付业务',true)}${metric('已支付订单',m.paidOrders,'电瓶车、电话卡与牌照')}${metric('待处理事项',m.pending,'不含待支付和已取消')}${metric('可售偏低商品',m.lowStock,'可售库存已达到补货阈值')}${metric('售后超时',m.afterSaleOverdue||0,'超过承诺响应时限')}${metric('履约超时预警',(state.data.slaSummary?.overdueCount||0),`即将超时 ${state.data.slaSummary?.warningCount||0} 条`)}${metric('商家服务分均值',(state.data.merchantScoreSummary?.averageScore||0),`限流 ${state.data.merchantScoreSummary?.limitedCount||0} · 暂停上新 ${state.data.merchantScoreSummary?.restrictedCount||0}`)}</div><div class="dashboard-grid"><section class="panel"><div class="panel-head"><h2>运营待办</h2><span>点击进入业务列表</span></div><div class="task-list">${task('商家入驻审核','审核新入驻商家资质',(d.merchants||[]).filter(x=>x.status==='REVIEWING').length,'merchants')}${task('电瓶车履约跟进','处理已支付和售后订单',(d.orders||[]).filter(x=>['PAID','FULFILLING','AFTER_SALE'].includes(x.status)).length,'orders')}${task('电话卡实名激活','核对运营商实名结果',(d.phoneCardOrders||[]).filter(x=>x.status==='PENDING_REALNAME').length,'phones')}${task('校园牌照辅助','跟进材料与审核进度',(d.plateApplications||[]).filter(x=>['MATERIAL_PENDING','REVIEWING'].includes(x.status)).length,'plates')}${task('双人宽带资格','核验两位同学购卡状态',(d.broadbandApplications||[]).filter(x=>x.status==='PENDING_VERIFY').length,'broadband')}${task('话费权益到账','确认充值优惠到账',(d.rechargeOrders||[]).filter(x=>x.status==='PENDING_CREDIT').length,'recharges')}${task('超时预警认领','巡检发现的逾期与临期事项',(state.data.slaSummary?.openCount||0),'patrol')}${task('商家提现审核','核对收款账户后确认打款',(d.payoutRequests||[]).filter(x=>x.status==='PENDING_REVIEW').length,'payouts')}${task('服务分整改跟进','限流或暂停上新的商家',((state.data.merchantScoreSummary?.limitedCount||0)+(state.data.merchantScoreSummary?.restrictedCount||0)),'scores')}${task('商品复核','限流商家新增商品待复核',(state.data.pendingPublishProducts||[]).length,'scores')}</div></section><section class="panel"><div class="panel-head"><h2>库存预警</h2><span>阈值 ${lowStockThreshold} 件</span></div><div class="stock-list">${(d.products||[]).filter(p=>p.active!==false&&Number(p.availableStock??p.stock??0)<=lowStockThreshold).sort((a,b)=>Number(a.availableStock??a.stock??0)-Number(b.availableStock??b.stock??0)).slice(0,8).map(p=>{const available=Number(p.availableStock??p.stock??0);return`<div class="stock-item"><span>${esc(p.name)}</span><strong class="${available<=lowStockThreshold?'low':''}">${available}件</strong></div>`}).join('')||'<p class="muted-empty">暂无达到阈值的商品</p>'}</div></section></div><section class="panel" style="margin-top:16px"><div class="panel-head"><h2>最近操作</h2><span>系统留痕</span></div><div class="log-list">${(d.auditLogs||[]).slice(0,5).map(log=>`<div class="log-item"><div><strong>${esc(log.action)}</strong><p>${esc(log.operator)} · ${esc(log.target)}</p></div><small>${fmtDate(log.createdAt)}</small></div>`).join('')}</div></section>`}
 
 const baseDashboard=dashboard;
-dashboard=function(){return baseDashboard().replace('<div class="dashboard-grid">',operationsReportPanel()+'<div class="dashboard-grid">')};
+dashboard=function(){
+  const dashboardData=state.data;
+  const reconciliationTask=task('支付对账差异','核对微信账单与本地流水',(dashboardData.financeTasks||[]).filter(x=>x.type==='PAYMENT_RECONCILIATION'&&x.status!=='RESOLVED').length,'payments');
+  return baseDashboard()
+    .replace('<div class="task-list">',`<div class="task-list">${reconciliationTask}`)
+    .replace('<div class="dashboard-grid">',operationsReportPanel()+'<div class="dashboard-grid">');
+};
 function toolbar(count,{add=false,statusesList=[]}={}){return`<div class="page-actions"><p>共 ${count} 条记录</p><div>${add?'<button id="addProduct" class="primary">＋ 新增商品</button>':''}</div></div><div class="filterbar"><div class="filters"><input id="listSearch" class="search" value="${esc(state.query)}" placeholder="搜索当前列表">${statusesList.length?`<select id="statusFilter" class="filter-select"><option value="ALL">全部状态</option>${statusesList.map(x=>`<option value="${x}" ${state.status===x?'selected':''}>${label(x)}</option>`).join('')}</select>`:''}</div><button id="exportButton" class="export-button">导出 CSV</button></div>`}
 function table(headers,rows,count){return`<div class="table-wrap"><table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')||`<tr><td colspan="${headers.length}" class="empty">没有符合条件的记录</td></tr>`}</tbody></table><div class="pagination"><span>显示 1-${Math.min(count,20)}，共 ${count} 条</span><div><button disabled>上一页</button> <button disabled>下一页</button></div></div></div>`}
 function match(item){return!state.query||JSON.stringify(item).toLowerCase().includes(state.query.toLowerCase())}function statusMatch(item){return state.status==='ALL'||item.status===state.status}
@@ -82,6 +88,7 @@ function localDateString(date){
 }
 function reconciliationPanel(){
   const reports=state.data.paymentReconciliations||[];
+  const financeTasks=(state.data.financeTasks||[]).filter(item=>item.type==='PAYMENT_RECONCILIATION');
   const latest=reports[0];
   const summary=latest?.summary||{};
   const differences=latest?.differences||[];
@@ -93,11 +100,18 @@ function reconciliationPanel(){
     return `<tr><td><strong>${esc(report.billDate)}</strong><small>${esc(report.provider)}</small></td><td><span class="badge ${report.status==='MATCHED'?'green':'red'}">${report.status==='MATCHED'?'账实相符':'账实不符'}</span></td><td>${report.summary?.matchedPaymentCount||0} 匹配 / ${currentDifferences.filter(item=>item.type.includes('PAYMENT')).length} 差异</td><td>${report.summary?.matchedRefundCount||0} 匹配 / ${currentDifferences.filter(item=>item.type.includes('REFUND')).length} 差异</td><td>${currentDifferences.length}</td><td>${fmtDate(report.updatedAt||report.createdAt)}</td></tr>`;
   }).join('');
   const differenceRows=differences.slice(0,20).map(item=>`<tr><td>${esc(reconciliationTypeLabels[item.type]||item.type)}</td><td>${esc(item.paymentNo||'—')}</td><td>${esc(item.refundNo||'—')}</td><td>${item.localAmountInCents!==undefined?money(item.localAmountInCents):'—'}</td><td>${item.providerAmountInCents!==undefined?money(item.providerAmountInCents):item.amountInCents!==undefined?money(item.amountInCents):'—'}</td></tr>`).join('');
+  const taskStatusLabels={PENDING:'待处理',ACKNOWLEDGED:'已认领',RESOLVED:'已完成'};
+  const taskRows=financeTasks.slice(0,8).map(task=>{
+    const actions=task.status==='PENDING'?`<button class="text-button ack-finance-task" data-id="${esc(task.id)}">认领处理</button>`:'';
+    const resolveAction=task.status!=='RESOLVED'?`<button class="text-button resolve-finance-task" data-id="${esc(task.id)}">完成处理</button>`:'';
+    return `<tr><td><strong>${esc(task.billDate)}</strong><small>${esc(task.provider)} · ${esc(task.reportId)}</small></td><td>${task.differenceCount}<small>${esc(task.detail||'')}</small></td><td><span class="badge ${task.status==='RESOLVED'?'green':task.status==='ACKNOWLEDGED'?'blue':'orange'}">${esc(taskStatusLabels[task.status]||task.status)}</span><small>${esc(task.acknowledgeNote||task.resolutionNote||task.resolvedReason||'')}</small></td><td>${fmtDate(task.updatedAt||task.createdAt)}</td><td><div class="row-actions">${actions}${resolveAction}</div></td></tr>`;
+  }).join('');
   return `<section class="panel reconciliation-panel"><div class="panel-head"><h2>支付对账</h2><span>微信账单与本地支付/退款核对</span></div>
     <div class="page-actions"><p>${latest?`最近对账：${esc(latest.billDate)} · ${latest.status==='MATCHED'?'账实相符':'账实不符'}`:'尚未执行对账'}</p><div><input id="reconciliation-date" type="date" value="${yesterday}"><button id="run-reconciliation" class="primary">执行对账</button></div></div>
-    <div class="metric-grid">${metric('支付匹配',summary.matchedPaymentCount||0,'渠道与本地一致')}${metric('支付差异',paymentDifferenceCount,'缺失或金额不一致')}${metric('退款匹配',summary.matchedRefundCount||0,'渠道与本地一致')}${metric('退款差异',refundDifferenceCount,'缺失或金额不一致')}</div>
+    <div class="metric-grid">${metric('支付匹配',summary.matchedPaymentCount||0,'渠道与本地一致')}${metric('支付差异',paymentDifferenceCount,'缺失或金额不一致')}${metric('退款匹配',summary.matchedRefundCount||0,'渠道与本地一致')}${metric('退款差异',refundDifferenceCount,'缺失或金额不一致')}${metric('待处理对账',financeTasks.filter(item=>item.status!=='RESOLVED').length,'平台财务待跟进',true)}</div>
     <div class="table-wrap"><table><thead><tr><th>账单日期</th><th>结果</th><th>支付</th><th>退款</th><th>差异数</th><th>执行时间</th></tr></thead><tbody>${reportRows||'<tr><td colspan="6" class="empty">暂无对账报告</td></tr>'}</tbody></table></div>
     ${latest?`<div class="panel-head secondary-panel-head"><h3>差异明细</h3><span>最近一次报告，最多展示 20 条</span></div><div class="table-wrap"><table><thead><tr><th>差异类型</th><th>支付单</th><th>退款单</th><th>本地金额</th><th>渠道金额</th></tr></thead><tbody>${differenceRows||'<tr><td colspan="5" class="empty">暂无差异</td></tr>'}</tbody></table></div>`:''}
+    <div class="panel-head secondary-panel-head"><h3>对账待办</h3><span>差异报告自动生成，处理结论留痕</span></div><div class="table-wrap"><table><thead><tr><th>账单</th><th>差异</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>${taskRows||'<tr><td colspan="5" class="empty">暂无对账待办</td></tr>'}</tbody></table></div>
   </section>`;
 }
 function payments(){
@@ -225,6 +239,38 @@ bindPayments=function(parent=document){
     const result=await api(`/api/admin/payment-orders/${b.dataset.id}/refund`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({note})});
     showToast(result?.data?.paymentOrder?.refund?.status==='PENDING'?'退款申请已提交，等待渠道处理':'退款已完成');
     await load();
+  }));
+  parent.querySelectorAll('.ack-finance-task').forEach(b=>b.addEventListener('click',async()=>{
+    const note=prompt('请填写对账待办处理说明','已联系财务核对渠道流水');
+    if(note===null)return;
+    if(!note.trim())return showToast('请填写处理说明');
+    try{
+      await api(`/api/admin/finance-tasks/${b.dataset.id}/acknowledge`,{
+        method:'POST',
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({note:note.trim()})
+      });
+      showToast('对账待办已认领');
+      await load();
+    }catch(error){
+      showToast(error.message);
+    }
+  }));
+  parent.querySelectorAll('.resolve-finance-task').forEach(b=>b.addEventListener('click',async()=>{
+    const note=prompt('请填写差异处理结论','已核对渠道流水并修正本地记录');
+    if(note===null)return;
+    if(!note.trim())return showToast('请填写处理结论');
+    try{
+      await api(`/api/admin/finance-tasks/${b.dataset.id}/resolve`,{
+        method:'POST',
+        headers:{'content-type':'application/json'},
+        body:JSON.stringify({note:note.trim()})
+      });
+      showToast('对账待办已完成');
+      await load();
+    }catch(error){
+      showToast(error.message);
+    }
   }));
   parent.querySelectorAll('.refund-refresh').forEach(b=>b.addEventListener('click',async()=>{
     const result=await api(`/api/admin/payment-orders/${b.dataset.id}/refund/refresh`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({})});

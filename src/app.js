@@ -159,6 +159,78 @@ function withAvailableStock(product) {
   return { ...product, reservedStock: Number(product.reservedStock || 0), availableStock: availableStock(product) };
 }
 
+function buildPaymentReconciliationTaskDetail(report) {
+  const detail = report.differences
+    .slice(0, 3)
+    .map((item) => `${item.paymentNo || item.refundNo}：${item.type}`)
+    .join('；');
+  return report.differences.length > 3 ? `${detail}；等 ${report.differences.length} 项差异` : detail;
+}
+
+function upsertPaymentReconciliationTask(data, report, now = new Date().toISOString(), addAuditLog = () => {}) {
+  if (!Array.isArray(data.financeTasks)) data.financeTasks = [];
+  if (!Array.isArray(data.auditLogs)) data.auditLogs = [];
+  const existing = data.financeTasks.find((item) => (
+    item.type === 'PAYMENT_RECONCILIATION'
+    && item.billDate === report.billDate
+    && item.provider === report.provider
+  ));
+  const differenceCount = report.differences.length;
+  if (!differenceCount) {
+    if (existing && existing.status !== 'RESOLVED') {
+      existing.status = 'RESOLVED';
+      existing.resolvedAt = now;
+      existing.resolvedReason = '重新对账后账实相符，待办自动关闭';
+      existing.updatedAt = now;
+      addAuditLog(data, '关闭支付对账待办', `${report.billDate} ${report.provider}`);
+    }
+    return existing || null;
+  }
+
+  const detail = buildPaymentReconciliationTaskDetail(report);
+  if (!existing) {
+    const task = {
+      id: `fin_${randomUUID()}`,
+      type: 'PAYMENT_RECONCILIATION',
+      reportId: report.id,
+      billDate: report.billDate,
+      provider: report.provider,
+      channel: report.channel,
+      differenceCount,
+      detail: differenceCount > 3 ? `${detail}；等 ${differenceCount} 项差异` : detail,
+      status: 'PENDING',
+      ownerRole: 'PLATFORM',
+      acknowledgeNote: '',
+      acknowledgedAt: '',
+      resolutionNote: '',
+      resolvedAt: '',
+      resolvedReason: '',
+      reopenCount: 0,
+      createdAt: now,
+      updatedAt: now
+    };
+    data.financeTasks.unshift(task);
+    addAuditLog(data, '生成支付对账待办', `${report.billDate} ${report.provider} ${differenceCount} 项差异`);
+    return task;
+  }
+
+  existing.reportId = report.id;
+  existing.differenceCount = differenceCount;
+  existing.detail = differenceCount > 3 ? `${detail}；等 ${differenceCount} 项差异` : detail;
+  existing.updatedAt = now;
+  if (existing.status === 'RESOLVED') {
+    existing.status = 'PENDING';
+    existing.acknowledgeNote = '';
+    existing.acknowledgedAt = '';
+    existing.resolutionNote = '';
+    existing.resolvedAt = '';
+    existing.resolvedReason = '';
+    existing.reopenCount = Number(existing.reopenCount || 0) + 1;
+    addAuditLog(data, '重新打开支付对账待办', `${report.billDate} ${report.provider}`);
+  }
+  return existing;
+}
+
 function lowStockThreshold(data) {
   const value = Number(data?.adminSettings?.lowStockThreshold ?? 10);
   return Number.isInteger(value) && value >= 0 && value <= 999 ? value : 10;
@@ -649,6 +721,7 @@ function adminPermissionForRequest(pathname) {
     || pathname.startsWith('/api/admin/subscribe-templates')) return 'CONFIG_MANAGE';
   if (pathname.startsWith('/api/admin/payment-orders')
     || pathname.startsWith('/api/admin/payment-reconciliations')
+    || pathname.startsWith('/api/admin/finance-tasks')
     || pathname.startsWith('/api/admin/payout-requests')
     || pathname.startsWith('/api/admin/finance-events')) return 'FINANCE_MANAGE';
   if (pathname.startsWith('/api/admin/products')
@@ -4207,10 +4280,56 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             data.paymentReconciliations.unshift(report);
           }
           data.paymentReconciliations = data.paymentReconciliations.slice(0, 500);
+          const financeTask = upsertPaymentReconciliationTask(data, report, new Date().toISOString(), addAudit);
           addAudit(data, '执行支付对账', `${billDate} ${paymentProvider.name}`);
-          return report;
+          return { ...report, financeTask };
         });
         return sendJson(response, 200, { data: persisted, requestId });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/admin/finance-tasks') {
+        const data = store.read();
+        const status = url.searchParams.get('status') || '';
+        const items = (data.financeTasks || []).filter((item) => !status || item.status === status);
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
+      const financeTaskAckMatch = pathname.match(/^\/api\/admin\/finance-tasks\/([^/]+)\/acknowledge$/);
+      if (request.method === 'POST' && financeTaskAckMatch) {
+        const body = await readJson(request);
+        const note = requireString(body.note, 'note', { maxLength: 200 });
+        const task = store.update((data) => {
+          const item = (data.financeTasks || []).find((row) => row.id === financeTaskAckMatch[1]);
+          if (!item) throw new ApiError(404, 'FINANCE_TASK_NOT_FOUND', '财务待办不存在');
+          if (item.status === 'RESOLVED') throw new ApiError(409, 'FINANCE_TASK_RESOLVED', '该财务待办已关闭');
+          const now = new Date().toISOString();
+          item.status = 'ACKNOWLEDGED';
+          item.acknowledgeNote = note;
+          item.acknowledgedAt = now;
+          item.updatedAt = now;
+          addAudit(data, '认领支付对账待办', `${item.billDate} ${item.provider}`);
+          return item;
+        });
+        return sendJson(response, 200, { data: task, requestId });
+      }
+
+      const financeTaskResolveMatch = pathname.match(/^\/api\/admin\/finance-tasks\/([^/]+)\/resolve$/);
+      if (request.method === 'POST' && financeTaskResolveMatch) {
+        const body = await readJson(request);
+        const note = requireString(body.note, 'note', { maxLength: 200 });
+        const task = store.update((data) => {
+          const item = (data.financeTasks || []).find((row) => row.id === financeTaskResolveMatch[1]);
+          if (!item) throw new ApiError(404, 'FINANCE_TASK_NOT_FOUND', '财务待办不存在');
+          if (item.status === 'RESOLVED') throw new ApiError(409, 'FINANCE_TASK_RESOLVED', '该财务待办已关闭');
+          const now = new Date().toISOString();
+          item.status = 'RESOLVED';
+          item.resolutionNote = note;
+          item.resolvedAt = now;
+          item.updatedAt = now;
+          addAudit(data, '完成支付对账待办', `${item.billDate} ${item.provider}`);
+          return item;
+        });
+        return sendJson(response, 200, { data: task, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/api/admin/notifications') {
@@ -4462,6 +4581,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             plateApplications: data.plateApplications,
             paymentOrders: data.paymentOrders || [],
             paymentReconciliations: data.paymentReconciliations || [],
+            financeTasks: data.financeTasks || [],
             notifications: data.notifications || [],
             afterSales: data.afterSales,
             productReviews: data.productReviews || [],

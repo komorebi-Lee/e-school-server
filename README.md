@@ -43,6 +43,14 @@ POST /api/admin/payment-reconciliations/run
 
 该接口需要 `FINANCE_MANAGE` 权限。`mock` 支付提供方只返回空账单用于演示；真实环境必须启用 `wechat` provider，并在商户平台开通账单下载权限。
 
+存在差异的对账报告会自动生成一条平台财务待办（`financeTasks`），同一天和同一支付提供方重复对账会复用同一条待办；待办被人工关闭后再次出现差异会自动重开。重新对账且账实相符时，未关闭待办会自动关闭。运营可在管理端「支付单 → 对账待办」认领或填写结论完成处理，相关动作会写入审计日志。接口为：
+
+```text
+GET /api/admin/finance-tasks
+POST /api/admin/finance-tasks/:id/acknowledge
+POST /api/admin/finance-tasks/:id/resolve
+```
+
 ### 支付回调
 
 `POST /api/payment-callbacks/:provider`
