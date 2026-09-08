@@ -132,6 +132,11 @@ const orderNotificationTemplates = {
     id: 'after_sale',
     keywords: ['售后', '退款', '处理'],
     description: '售后受理、处理和完成提醒'
+  },
+  LEAD_FOLLOW_UP: {
+    id: 'lead_follow_up',
+    keywords: ['咨询', '客服', '跟进'],
+    description: '客服跟进咨询结果时提醒用户查看订单'
   }
 };
 
@@ -1609,6 +1614,9 @@ function createApp({
     if ((notificationType === 'ORDER' || notificationType === 'AFTER_SALE') && metadata?.orderId) {
       return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.orderId))}`;
     }
+    if (metadata?.focusId) {
+      return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.focusId))}`;
+    }
     return '';
   }
 
@@ -1621,6 +1629,27 @@ function createApp({
       userId,
       templateId: orderNotificationTemplates[templateKey]?.id || templateKey,
       page: subscribeMessagePage(templateKey === 'AFTER_SALE' ? 'AFTER_SALE' : 'ORDER', metadata, false) || undefined,
+      status: 'QUEUED',
+      title,
+      content,
+      error: '',
+      createdAt: now,
+      sentAt: ''
+    });
+    data.subscribeMessages = data.subscribeMessages.slice(0, 500);
+    return { notification, subscribeMessage: data.subscribeMessages[0] };
+  }
+
+  function sendLeadFollowUpNotification(data, userId, notificationType, title, content, now = new Date().toISOString(), metadata = null) {
+    const notification = addNotification(data, userId, notificationType, title, content, metadata);
+    if (!notification) return null;
+    if (!(data.orderMessageSubscribers || []).includes(userId)) return { notification, subscribeMessage: null };
+    if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
+    data.subscribeMessages.unshift({
+      id: `sub_${randomUUID()}`,
+      userId,
+      templateId: orderNotificationTemplates.LEAD_FOLLOW_UP.id,
+      page: subscribeMessagePage('LEAD_FOLLOW_UP', metadata, false) || undefined,
       status: 'QUEUED',
       title,
       content,
@@ -4280,6 +4309,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           sla_warning: settings.slaWarningTemplateId || ''
         };
         const configuredUserIds = {
+          lead_follow_up: settings.leadFollowUpTemplateId || '',
           favorite_price_notice: settings.favoritePriceNoticeTemplateId || '',
           order_status: settings.orderStatusTemplateId || '',
           order_service: settings.orderServiceTemplateId || '',
@@ -6424,9 +6454,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (source) {
             if (item.sourceType === 'ORDER') appendCollaborationEvent(source, 'PLATFORM', 'LEAD_FOLLOW_UP', text);
             else appendServiceRecordEvent(source, 'PLATFORM', 'LEAD_FOLLOW_UP', text);
-            addNotification(data, item.userId, item.sourceType, '咨询跟进更新', `${item.businessType}：${text}`, { focusId: source.id });
+            sendLeadFollowUpNotification(data, item.userId, item.sourceType, '咨询跟进更新', `${item.businessType}：${text}`, now, { focusId: source.id });
           } else {
-            addNotification(data, item.userId, 'LEAD', '咨询跟进更新', `${item.businessType}：${text}`);
+            sendLeadFollowUpNotification(data, item.userId, 'LEAD', '咨询跟进更新', `${item.businessType}：${text}`, now);
           }
           addAudit(data, '线索跟进', item.leadNo);
           return item;
@@ -6876,6 +6906,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               audience: 'USER',
               keywords: item.keywords.join('；'),
               configuredId: ({
+                lead_follow_up: data.adminSettings?.leadFollowUpTemplateId || '',
                 favorite_price_notice: data.adminSettings?.favoritePriceNoticeTemplateId || '',
                 order_status: data.adminSettings?.orderStatusTemplateId || '',
                 order_service: data.adminSettings?.orderServiceTemplateId || '',
@@ -6917,6 +6948,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           order_service: settings.orderServiceTemplateId || '',
           restock_notice: settings.restockNoticeTemplateId || '',
           after_sale: settings.afterSaleTemplateId || ''
+          ,lead_follow_up: settings.leadFollowUpTemplateId || ''
         };
         let sent = 0;
         let failed = 0;
@@ -7153,7 +7185,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isFinite(value) || value < 1 || value > 4.5) throw new ApiError(400, 'VALIDATION_ERROR', '均分下架阈值需为 1-4.5 分');
             current.productComplianceAverageRatingThreshold = Math.round(value * 10) / 10;
           }
-          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'slaWarningTemplateId', 'favoritePriceNoticeTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'restockNoticeTemplateId', 'afterSaleTemplateId']) {
+          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'slaWarningTemplateId', 'favoritePriceNoticeTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'restockNoticeTemplateId', 'afterSaleTemplateId', 'leadFollowUpTemplateId']) {
             if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);
           }
           if (body.paymentTimeoutMinutes !== undefined) {

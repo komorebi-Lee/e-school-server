@@ -94,11 +94,21 @@ test('lead follow-up result rejects unsupported status', async () => {
   assert.equal(created.body.data.sourceType, 'RECHARGE');
   assert.equal(created.body.data.sourceId, recharge.body.data.id);
 
+  await api('/api/order-message-subscriptions', {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ accepted: true })
+  });
+
   const login = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
   });
   assert.equal(login.response.status, 200);
+
+  await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${login.body.data.token}` },
+    body: JSON.stringify({ leadFollowUpTemplateId: 'wx_test_lead_follow_up' })
+  });
 
   const followed = await api(`/api/admin/leads/${created.body.data.id}/follow-ups`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${login.body.data.token}` },
@@ -115,6 +125,22 @@ test('lead follow-up result rejects unsupported status', async () => {
   assert.equal(notice.type, 'RECHARGE');
   assert.equal(notice.title, '咨询跟进更新');
   assert.ok(notice.content.includes('客服已确认充值将在24小时内到账。'));
+
+  const subscribeMessage = (store.read().subscribeMessages || [])
+    .find((item) => item.templateId === 'lead_follow_up' && item.userId === session.userId && item.status === 'QUEUED');
+  assert.ok(subscribeMessage, 'subscribed users should receive a WeChat follow-up message');
+  assert.equal(subscribeMessage.page, `/pages/orders/orders?focusId=${encodeURIComponent(recharge.body.data.id)}`);
+
+  const dispatch = await api('/api/admin/subscribe-messages/dispatch', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${login.body.data.token}` },
+    body: JSON.stringify({ limit: 100 })
+  });
+  assert.equal(dispatch.response.status, 200);
+  assert.ok(dispatch.body.data.sent >= 1);
+  assert.ok(sentSubscribeMessages.some((message) => message.template_id === 'wx_test_lead_follow_up'
+    && message.touser === 'openid_lead_user'
+    && message.page === `/pages/orders/orders?focusId=${encodeURIComponent(recharge.body.data.id)}`));
 
   const orders = await api('/api/my/orders', {
     headers: { authorization: `Bearer ${session.token}` }

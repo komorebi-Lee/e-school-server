@@ -783,6 +783,7 @@ function scoresView() {
     <label>订单客服模板 ID<input id="orderServiceTemplate" value="${esc(state.data.settings?.orderServiceTemplateId || '')}"></label>
     <label>到货提醒模板 ID<input id="restockNoticeTemplate" value="${esc(state.data.settings?.restockNoticeTemplateId || '')}"></label>
     <label>售后进度模板 ID<input id="afterSaleTemplate" value="${esc(state.data.settings?.afterSaleTemplateId || '')}"></label>
+    <label>咨询跟进模板 ID<input id="leadFollowUpTemplate" value="${esc(state.data.settings?.leadFollowUpTemplateId || '')}"></label>
   </div><button class="primary" style="margin-top:12px" id="saveScoreTemplates">保存模板配置</button></section>`;
   const pendingPanel = pending.length
     ? `<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>商品复核</h2><span>限流商家新增的商品</span></div><div class="table-wrap"><table><thead><tr><th>商品</th><th>商家</th><th>价格</th><th>说明</th><th>操作</th></tr></thead><tbody>${pending.map((product) => `<tr>
@@ -914,7 +915,8 @@ bindView = function () {
         orderStatusTemplateId: document.querySelector('#orderStatusTemplate').value.trim(),
         orderServiceTemplateId: document.querySelector('#orderServiceTemplate').value.trim(),
         restockNoticeTemplateId: document.querySelector('#restockNoticeTemplate').value.trim(),
-        afterSaleTemplateId: document.querySelector('#afterSaleTemplate').value.trim()
+        afterSaleTemplateId: document.querySelector('#afterSaleTemplate').value.trim(),
+        leadFollowUpTemplateId: document.querySelector('#leadFollowUpTemplate').value.trim()
       })
     });
     showToast('订阅模板已保存');
