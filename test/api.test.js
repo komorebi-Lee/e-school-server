@@ -4148,6 +4148,61 @@ test('restock alerts notify waiting users after merchant restocking', async () =
   assert.equal(repeated.body.data.filter((item) => item.title === '你登记的商品已到货').length, noticeCount);
 });
 
+test('favorite users are notified once when a sold-out product is restocked', async () => {
+  const userSession = await loginWeChat('favorite_restock_user');
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+
+  const created = await api('/api/merchant/products', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ name: '收藏补货测试车', category: 'E_BIKE_NEW', description: '验证收藏用户补货召回', priceInCents: 220000, stock: 1 })
+  });
+  assert.equal(created.response.status, 201);
+  const productId = created.body.data.id;
+
+  await api(`/api/products/${productId}/favorite`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ favorited: true })
+  });
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === productId);
+    product.stock = 0;
+    product.reservedStock = 0;
+    product.lastFavoriteRestockNoticeAt = '';
+  });
+
+  const restock = await api(`/api/merchant/products/${productId}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ stock: 2 })
+  });
+  assert.equal(restock.response.status, 200);
+
+  const notifications = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  const notice = notifications.body.data.find((item) => item.title === '收藏商品已补货');
+  assert.ok(notice);
+  assert.ok(notice.content.includes('收藏补货测试车'));
+  assert.equal(notice.metadata.productId, productId);
+  const queued = (store.read().subscribeMessages || []).find((item) => (
+    item.userId === userSession.userId && item.templateId === 'restock_notice' && item.page === 'pages/detail/detail'
+  ));
+  assert.ok(queued);
+
+  await api(`/api/merchant/products/${productId}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ stock: 3 })
+  });
+  const repeated = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  assert.equal(repeated.body.data.filter((item) => item.title === '收藏商品已补货').length, 1);
+});
+
 test('approved merchants expose a public storefront without private data', async () => {
   const storefront = await api('/api/merchants/merchant_001/storefront');
   assert.equal(storefront.response.status, 200);

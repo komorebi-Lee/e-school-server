@@ -1640,6 +1640,41 @@ function createApp({
     return waiting;
   }
 
+  function notifyFavoriteRestockSubscribers(data, product, merchantName = '', now = new Date().toISOString()) {
+    if (!product || product.active === false || availableStock(product) <= 0) return [];
+    const registeredUserIds = new Set((data.productRestockAlerts || [])
+      .filter((item) => item.productId === product.id && item.status === 'WAITING')
+      .map((item) => item.userId));
+    const favorites = (data.productFavorites || []).filter((item) => (
+      item.productId === product.id
+      && !registeredUserIds.has(item.userId)
+      && item.lastRestockNoticeAt !== product.lastFavoriteRestockNoticeAt
+    ));
+    for (const favorite of favorites) {
+      const title = '收藏商品已补货';
+      const content = `你收藏的「${product.name}」已重新有货${merchantName ? `，来自 ${merchantName}` : ''}，先到先得。`;
+      const notification = addNotification(data, favorite.userId, 'PROMOTION', title, content, { productId: product.id });
+      if (!notification) continue;
+      if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
+      data.subscribeMessages.unshift({
+        id: `sub_${randomUUID()}`,
+        userId: favorite.userId,
+        templateId: 'restock_notice',
+        page: 'pages/detail/detail',
+        status: 'QUEUED',
+        title,
+        content,
+        error: '',
+        createdAt: now,
+        sentAt: ''
+      });
+      data.subscribeMessages = data.subscribeMessages.slice(0, 500);
+      favorite.lastRestockNoticeAt = now;
+    }
+    if (favorites.length) product.lastFavoriteRestockNoticeAt = now;
+    return favorites;
+  }
+
 
   function notifyMerchantScore(data, merchantId, templateKey, title, content, now = new Date().toISOString()) {
     const merchant = (data.merchants || []).find((item) => item.id === merchantId);
@@ -4927,6 +4962,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           if (body.priceInCents !== undefined) item.priceInCents = requirePositiveInteger(body.priceInCents, 'priceInCents');
           const previousPromotion = withProductSale(item).promotion;
+          const availableBefore = availableStock(item);
           const sale = normalizeProductSaleCampaign(body, item);
           if (sale) {
             if (sale.salePriceInCents >= item.priceInCents) throw new ApiError(400, 'VALIDATION_ERROR', '促销价必须低于商品原价');
@@ -4962,6 +4998,15 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             data.merchants.find((merchant) => merchant.id === merchantSession.merchantId)?.name || '',
             item.updatedAt
           );
+          if (availableBefore === 0 && availableStock(item) > 0) {
+            notifyFavoriteRestockSubscribers(
+              data,
+              item,
+              data.merchants.find((merchant) => merchant.id === merchantSession.merchantId)?.name || '',
+              item.updatedAt
+            );
+          }
+          if (availableStock(item) === 0) item.lastFavoriteRestockNoticeAt = '';
           const currentPromotion = withProductSale(item, now).promotion;
           const saleSignature = `${item.salePriceInCents || 0}:${item.saleStartsAt || ''}:${item.saleEndsAt || ''}`;
           if (currentPromotion && sale && previousPromotion !== currentPromotion && item.lastSaleNoticeKey !== saleSignature) {
