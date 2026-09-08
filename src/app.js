@@ -737,6 +737,7 @@ function adminPermissionForRequest(pathname) {
     || pathname.startsWith('/api/admin/recharge-promos')
     || pathname.startsWith('/api/admin/product-reviews')) return 'CATALOG_MANAGE';
   if (pathname.startsWith('/api/admin/merchants')
+    || pathname.startsWith('/api/admin/qualification-renewals')
     || pathname.startsWith('/api/admin/merchant-scores')
     || pathname.startsWith('/api/admin/score-cases')) return 'MERCHANT_MANAGE';
   if (pathname.startsWith('/api/admin/orders')
@@ -764,8 +765,17 @@ function publicAdminUser(user) {
     role: user.role,
     status: user.status,
     createdAt: user.createdAt,
-    updatedAt: user.updatedAt
+  updatedAt: user.updatedAt
   };
+}
+
+function normalizeQualificationExpireDate(value) {
+  const date = typeof value === 'string' ? value.trim() : '';
+  if (!date) return '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(new Date(`${date}T00:00:00.000Z`).getTime())) {
+    throw new ApiError(400, 'VALIDATION_ERROR', '资质有效期格式需为 YYYY-MM-DD');
+  }
+  return date;
 }
 
 function createApp({
@@ -2168,6 +2178,27 @@ function createApp({
         userId: '',
         dueAt: record.dueAt || financeTaskDueAt(data, record.createdAt),
         detail: `${record.differenceCount} 项差异 · ${record.detail || ''}`.slice(0, 120)
+      });
+    }
+
+    // 资质有效期是长期经营风险：复审要提前完成，不能等到执照过期后再处理。
+    for (const merchant of data.merchants || []) {
+      if (merchant.status !== 'APPROVED' || !merchant.licenseExpireDate) continue;
+      const expireMs = new Date(`${merchant.licenseExpireDate}T00:00:00.000Z`).getTime();
+      if (!Number.isFinite(expireMs)) continue;
+      const dueMs = expireMs - 30 * 24 * 60 * 60 * 1000;
+      targets.push({
+        ruleKey: 'MERCHANT_QUALIFICATION',
+        ruleLabel: '商家资质复审',
+        businessType: 'MERCHANT_QUALIFICATION',
+        businessId: merchant.id,
+        businessNo: merchant.applicationNo || merchant.id,
+        ownerRole: 'MERCHANT',
+        merchantId: merchant.id,
+        merchantName: merchant.name,
+        userId: merchant.userId || '',
+        dueAt: new Date(dueMs).toISOString(),
+        detail: `资质有效期 ${merchant.licenseExpireDate} · 请提前提交新执照复审`
       });
     }
 
@@ -3646,6 +3677,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const licenseUrl = merchantType === 'PERSONAL'
           ? (typeof body.licenseUrl === 'string' ? body.licenseUrl.trim() : '')
           : requireString(body.licenseUrl, 'licenseUrl', { maxLength: 200 });
+        const licenseExpireDate = normalizeQualificationExpireDate(body.licenseExpireDate);
         if (body.agreeAgreement !== true || body.agreePrivacy !== true) {
           throw new ApiError(400, 'VALIDATION_ERROR', '请先同意入驻协议和隐私保护指引');
         }
@@ -3675,6 +3707,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             phone,
             licenseNo,
             licenseUrl,
+            licenseExpireDate,
             category,
             serviceArea,
             description,
@@ -3723,6 +3756,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const licenseUrl = typeof body.licenseUrl === 'string' && body.licenseUrl.trim()
           ? requireString(body.licenseUrl, 'licenseUrl', { maxLength: 200 })
           : '';
+        const licenseExpireDate = normalizeQualificationExpireDate(body.licenseExpireDate);
         if (licenseUrl && !licenseUrl.startsWith('/api/uploads/')) {
           throw new ApiError(400, 'VALIDATION_ERROR', '资质图片必须来自平台上传目录');
         }
@@ -3744,6 +3778,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             item.licenseNo = licenseNo;
           }
           item.licenseUrl = licenseUrl;
+          if (licenseExpireDate) item.licenseExpireDate = licenseExpireDate;
           for (const [field, key] of [
             ['settlementAccountName', 'settlementAccountName'],
             ['settlementBank', 'settlementBank'],
@@ -3791,6 +3826,47 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (pathname.startsWith('/api/merchant/')) {
         var merchantSession = requireMerchant(request);
+      }
+
+      // 商家定期上传新执照，平台审核通过后才更新正式资质。
+      if (request.method === 'POST' && pathname === '/api/merchant/qualification-renewals') {
+        const body = await readJson(request);
+        const licenseNo = requireString(body.licenseNo, 'licenseNo', { maxLength: 30 });
+        if (!/^[0-9A-Z]{15,18}$/.test(licenseNo)) throw new ApiError(400, 'VALIDATION_ERROR', 'licenseNo 格式不正确');
+        const licenseUrl = requireString(body.licenseUrl, 'licenseUrl', { maxLength: 200 });
+        if (!licenseUrl.startsWith('/api/uploads/')) throw new ApiError(400, 'VALIDATION_ERROR', '资质图片必须来自平台上传目录');
+        const licenseExpireDate = normalizeQualificationExpireDate(body.licenseExpireDate);
+        if (!licenseExpireDate) throw new ApiError(400, 'VALIDATION_ERROR', '请填写资质有效期');
+        const note = typeof body.note === 'string' ? body.note.trim().slice(0, 300) : '';
+        const renewal = store.update((data) => {
+          const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
+          if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(403, 'MERCHANT_NOT_APPROVED', '商家账号不可用');
+          data.qualificationRenewals ||= [];
+          if (data.qualificationRenewals.some((item) => item.merchantId === merchant.id && item.status === 'PENDING_REVIEW')) {
+            throw new ApiError(409, 'QUALIFICATION_RENEWAL_EXISTS', '已有资质复审申请待平台审核');
+          }
+          const now = new Date().toISOString();
+          const record = {
+            id: `qual_${randomUUID()}`,
+            merchantId: merchant.id,
+            merchantName: merchant.name,
+            merchantUserId: merchant.userId,
+            licenseNo,
+            licenseUrl,
+            licenseExpireDate,
+            note,
+            status: 'PENDING_REVIEW',
+            reviewNote: '',
+            reviewedAt: '',
+            createdAt: now,
+            updatedAt: now
+          };
+          data.qualificationRenewals.unshift(record);
+          addAudit(data, '商家提交资质复审', `${merchant.name} ${licenseExpireDate}`);
+          notifyMerchant(data, merchant.id, 'SCORE', '资质复审已提交', `新执照有效期 ${licenseExpireDate}，平台审核通过后会更新店铺资质。`);
+          return record;
+        });
+        return sendJson(response, 201, { data: renewal, requestId });
       }
 
       if (request.method === 'GET' && pathname === '/api/merchant/overview') {
@@ -3845,6 +3921,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           ...settlementSummary(settlements)
         };
         const afterSales = (data.afterSales || []).filter((record) => orders.some((order) => order.id === record.orderId));
+        const qualificationRenewals = (data.qualificationRenewals || [])
+          .filter((record) => record.merchantId === merchant.id)
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
         // 商家只看得到需要自己处理的超时预警，平台内部事项不下发。
         const slaAlerts = (data.slaAlerts || [])
           .filter((alert) => alert.status !== 'RESOLVED' && alert.ownerRole === 'MERCHANT' && alert.merchantId === merchant.id)
@@ -3857,6 +3936,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             serviceScore: merchant.serviceScore || null,
             lowStockThreshold: stockThreshold,
             scoreCases: (data.serviceScoreCases || []).filter((item) => item.merchantId === merchant.id),
+            qualificationRenewals,
             metrics: {
               revenueInCents,
               orderCount: orders.length,
@@ -4713,6 +4793,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             adminUsers: (data.adminUsers || []).map(publicAdminUser),
             rechargePromos: data.rechargePromos || [],
             merchants: data.merchants,
+            qualificationRenewals: data.qualificationRenewals || [],
             orders: data.orders,
             phoneCardOrders: data.phoneCardOrders,
             rechargeOrders: data.rechargeOrders,
@@ -5387,6 +5468,53 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           return item;
         });
         return sendJson(response, 200, { data: merchant, requestId });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/admin/qualification-renewals') {
+        const data = store.read();
+        const items = (data.qualificationRenewals || [])
+          .slice()
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
+      const qualificationReviewMatch = pathname.match(/^\/api\/admin\/qualification-renewals\/([^/]+)\/review$/);
+      if (request.method === 'POST' && qualificationReviewMatch) {
+        const body = await readJson(request);
+        const decision = requireString(body.decision, 'decision', { maxLength: 20 });
+        if (!['APPROVE', 'REJECT'].includes(decision)) throw new ApiError(400, 'VALIDATION_ERROR', 'decision 需为 APPROVE 或 REJECT');
+        const reviewNote = typeof body.reviewNote === 'string' ? body.reviewNote.trim().slice(0, 300) : '';
+        if (decision === 'REJECT' && !reviewNote) throw new ApiError(400, 'VALIDATION_ERROR', '驳回需要填写原因');
+        const renewal = store.update((data) => {
+          const item = (data.qualificationRenewals || []).find((row) => row.id === qualificationReviewMatch[1]);
+          if (!item) throw new ApiError(404, 'QUALIFICATION_RENEWAL_NOT_FOUND', '资质复审申请不存在');
+          if (item.status !== 'PENDING_REVIEW') throw new ApiError(409, 'QUALIFICATION_RENEWAL_CLOSED', '该资质复审申请已处理');
+          const merchant = (data.merchants || []).find((row) => row.id === item.merchantId);
+          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          const now = new Date().toISOString();
+          item.status = decision === 'APPROVE' ? 'APPROVED' : 'REJECTED';
+          item.reviewNote = reviewNote || (decision === 'APPROVE' ? '资质复审通过' : '');
+          item.reviewedAt = now;
+          item.updatedAt = now;
+          merchant.timeline = merchant.timeline || [];
+          if (decision === 'APPROVE') {
+            merchant.licenseNo = item.licenseNo;
+            merchant.licenseUrl = item.licenseUrl;
+            merchant.licenseExpireDate = item.licenseExpireDate;
+            merchant.timeline.push({ status: 'APPROVED', note: `资质复审通过，有效期 ${item.licenseExpireDate}`, createdAt: now });
+            addAudit(data, '资质复审通过', merchant.name);
+          } else {
+            merchant.timeline.push({ status: 'REVIEWING', note: `资质复审未通过：${reviewNote}`, createdAt: now });
+            addAudit(data, '资质复审未通过', merchant.name);
+          }
+          merchant.updatedAt = now;
+          notifyMerchant(data, merchant.id, 'SCORE', decision === 'APPROVE' ? '资质复审通过' : '资质复审未通过',
+            decision === 'APPROVE'
+              ? `新资质有效期 ${item.licenseExpireDate} 已生效。`
+              : `复审未通过：${reviewNote}。请补充材料后重新提交。`);
+          return item;
+        });
+        return sendJson(response, 200, { data: renewal, requestId });
       }
 
       const adminProductMatch = pathname.match(/^\/api\/admin\/products\/([^/]+)$/);

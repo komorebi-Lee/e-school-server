@@ -963,6 +963,148 @@ test('rejected merchant can resubmit evidence for platform review', async () => 
   assert.equal(owned.body.data[0].timeline.at(-1).status, 'APPROVED');
 });
 
+test('approved merchants can renew qualifications for platform review', async () => {
+  const session = await loginWeChat('merchant_renewal');
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(2048, 3)]);
+  const upload = await api('/api/uploads', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ dataBase64: png.toString('base64'), mimeType: 'image/png' })
+  });
+  assert.equal(upload.response.status, 201);
+
+  const applied = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      merchantType: 'INDIVIDUAL', name: '资质到期测试店', ownerName: '到期店主',
+      phone: '15527110011', licenseNo: '92420111MAKMT4535S', category: 'LIFE_SERVICE',
+      serviceArea: '狮山校区', description: '资质到期复审测试',
+      licenseUrl: '/api/uploads/current-license.jpg', licenseExpireDate: '2027-12-31',
+      settlementAccountName: '到期店主', settlementBank: '校园演示银行', settlementAccount: '6222000000001111',
+      agreeAgreement: true, agreePrivacy: true
+    })
+  });
+  assert.equal(applied.response.status, 201);
+  assert.equal(applied.body.data.licenseExpireDate, '2027-12-31');
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(adminLogin.response.status, 200);
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  const approved = await api(`/api/admin/merchants/${applied.body.data.id}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'APPROVED', reviewNote: '资质有效期已核对' })
+  });
+  assert.equal(approved.response.status, 200);
+
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ merchantId: applied.body.data.id })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const missingDate = await api('/api/merchant/qualification-renewals', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ licenseNo: '92420111MAKMT4535S', licenseUrl: upload.body.data.url })
+  });
+  assert.equal(missingDate.response.status, 400);
+
+  const invalidDate = await api('/api/merchant/qualification-renewals', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ licenseNo: '92420111MAKMT4535S', licenseUrl: upload.body.data.url, licenseExpireDate: '2027-13-01' })
+  });
+  assert.equal(invalidDate.response.status, 400);
+
+  const externalImage = await api('/api/merchant/qualification-renewals', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ licenseNo: '92420111MAKMT4535S', licenseUrl: 'https://example.com/license.png', licenseExpireDate: '2027-12-31' })
+  });
+  assert.equal(externalImage.response.status, 400);
+
+  const renewal = await api('/api/merchant/qualification-renewals', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({
+      licenseNo: '92420111MAKMT4535S', licenseUrl: upload.body.data.url,
+      licenseExpireDate: '2028-12-31', note: '新执照已上传'
+    })
+  });
+  assert.equal(renewal.response.status, 201);
+  assert.equal(renewal.body.data.status, 'PENDING_REVIEW');
+  assert.equal(renewal.body.data.licenseExpireDate, '2028-12-31');
+
+  const overview = await api('/api/merchant/overview', { headers: merchantHeaders });
+  assert.equal(overview.body.data.qualificationRenewals.length, 1);
+  assert.equal(overview.body.data.qualificationRenewals[0].status, 'PENDING_REVIEW');
+
+  const adminOverview = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.equal(adminOverview.body.data.qualificationRenewals.length, 1);
+  assert.equal(adminOverview.body.data.qualificationRenewals[0].id, renewal.body.data.id);
+
+  const duplicate = await api('/api/merchant/qualification-renewals', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ licenseNo: '92420111MAKMT4535S', licenseUrl: upload.body.data.url, licenseExpireDate: '2028-12-31' })
+  });
+  assert.equal(duplicate.response.status, 409);
+  assert.equal(duplicate.body.error.code, 'QUALIFICATION_RENEWAL_EXISTS');
+
+  const adminList = await api('/api/admin/qualification-renewals', { headers: adminHeaders });
+  assert.equal(adminList.response.status, 200);
+  const pendingRenewal = adminList.body.data.find((item) => item.id === renewal.body.data.id);
+  assert.ok(pendingRenewal);
+
+  const reviewed = await api(`/api/admin/qualification-renewals/${renewal.body.data.id}/review`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ decision: 'APPROVE', reviewNote: '新执照有效期已核对' })
+  });
+  assert.equal(reviewed.response.status, 200);
+  assert.equal(reviewed.body.data.status, 'APPROVED');
+  const refreshed = await api('/api/merchant/overview', { headers: merchantHeaders });
+  assert.equal(refreshed.body.data.merchant.licenseExpireDate, '2028-12-31');
+  assert.equal(refreshed.body.data.qualificationRenewals[0].status, 'APPROVED');
+});
+
+test('qualification expiry enters operations patrol before the license lapses', async () => {
+  const session = await loginWeChat('merchant_expiry');
+  const applied = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      merchantType: 'INDIVIDUAL', name: '快到期商家', ownerName: '快到期店主',
+      phone: '15527110012', licenseNo: '92420111MAKMT4536T', category: 'LIFE_SERVICE',
+      serviceArea: '狮山校区', description: '资质到期巡检测试',
+      licenseUrl: '/api/uploads/expiring-license.jpg', licenseExpireDate: '2027-01-01',
+      settlementAccountName: '快到期店主', settlementBank: '校园演示银行', settlementAccount: '6222000000001212',
+      agreeAgreement: true, agreePrivacy: true
+    })
+  });
+  assert.equal(applied.response.status, 201);
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  await api(`/api/admin/merchants/${applied.body.data.id}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'APPROVED', reviewNote: '资质已核对' })
+  });
+
+  const expiredDate = new Date(Date.now() + 25 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  store.update((data) => {
+    const merchant = data.merchants.find((item) => item.id === applied.body.data.id);
+    merchant.licenseExpireDate = expiredDate;
+  });
+
+  const patrol = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(patrol.response.status, 200);
+  const alerts = await api('/api/admin/sla-alerts', { headers: adminHeaders });
+  const alert = alerts.body.data.find((item) => item.ruleKey === 'MERCHANT_QUALIFICATION' && item.businessId === applied.body.data.id);
+  assert.ok(alert, '快到期资质应生成商家提醒');
+  assert.equal(alert.ownerRole, 'MERCHANT');
+  assert.equal(alert.merchantId, applied.body.data.id);
+  assert.ok(alert.detail.includes(expiredDate));
+});
+
 test('phone card service record can apply for broadband once', async () => {
   const session = await loginWeChat('linked_user');
   const created = await api('/api/phone-card-orders', {

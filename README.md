@@ -96,6 +96,8 @@ MYSQL_HOST、MYSQL_PORT、MYSQL_DATABASE、MYSQL_USERNAME、MYSQL_PASSWORD
 
 资质被驳回的商家可调用 `POST /api/merchants/:id/resubmit` 补充平台上传的新资质图片、执照编号和收款账户，随后进入 `REVIEWING` 复审队列；平台再次通过审核后才会开通商家工作台。该流程避免“驳回后只能新建申请、历史驳回原因丢失”。
 
+已核准商家可调用 `POST /api/merchant/qualification-renewals` 上传新营业执照、执照编号和资质有效期，发起资质复审；同一商家同时只允许一条 `PENDING_REVIEW` 申请。平台通过 `GET /api/admin/qualification-renewals` 复核，调用 `POST /api/admin/qualification-renewals/:id/review` 审批：通过后平台会把新执照信息写回商家正式资质，驳回则会把原因同步给商家。管理端「资质复审」页提供待审统计、凭证查看、通过与驳回操作。
+
 ```powershell
 $env:PORT=3100
 $env:DB_FILE='C:\temp\campus-go-db.json'
@@ -276,6 +278,7 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 | `PAYOUT_REVIEW` | 提现单 `PENDING_REVIEW` | `payoutReviewHours`（48h） | 平台 |
 | `FINANCE_RECONCILIATION` | 支付对账差异待办未关闭 | `financeTaskResponseHours`（24h） | 平台 |
 | `LEAD_FOLLOW_UP` | 线索 `SUBMITTED` / `FOLLOW_UP` | 线索上的 `slaDueAt`（`leadResponseHours`，24h） | 平台 |
+| `MERCHANT_QUALIFICATION` | 已核准商家登记了 `licenseExpireDate` | 资质到期前 30 天 | 商家 |
 
 超时预警会同步写责任商家站内通知；商家开启服务分提醒后，还会进入微信订阅消息队列。平台责任的预警会写一条带业务名称、时限状态和差异/跟进详情的运营站内通知。模板 ID 由管理端「商家服务分 → 微信订阅消息模板」的「履约超时提醒模板 ID」配置。
 
