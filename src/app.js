@@ -2923,6 +2923,82 @@ function createApp({
     return log;
   }
 
+  // 每天最多保留一次服务分快照，这样趋势图反映真实日常变化，而不是被巡检频率放大。
+  function refreshMerchantScoreSnapshots(data, now) {
+    const date = String(now || '').slice(0, 10);
+    if (!date) return;
+    data.merchantScoreSnapshots = Array.isArray(data.merchantScoreSnapshots) ? data.merchantScoreSnapshots : [];
+    let changed = false;
+    for (const merchant of data.merchants || []) {
+      if (merchant.status !== 'APPROVED' || !merchant.serviceScore) continue;
+      const existing = data.merchantScoreSnapshots.find((item) => item.merchantId === merchant.id && item.date === date);
+      if (existing) {
+        if (existing.score === merchant.serviceScore.score && existing.stage === merchant.serviceScore.stage) continue;
+        existing.score = merchant.serviceScore.score;
+        existing.stage = merchant.serviceScore.stage;
+        existing.updatedAt = now;
+        changed = true;
+        continue;
+      }
+      data.merchantScoreSnapshots.unshift({
+        id: `mss_${randomUUID()}`,
+        merchantId: merchant.id,
+        date,
+        score: merchant.serviceScore.score,
+        stage: merchant.serviceScore.stage,
+        createdAt: now,
+        updatedAt: now
+      });
+      changed = true;
+    }
+    if (changed) {
+      data.merchantScoreSnapshots.sort((a, b) => b.date.localeCompare(a.date));
+      const kept = new Set();
+      data.merchantScoreSnapshots = data.merchantScoreSnapshots.filter((item) => {
+        const key = `${item.merchantId}:${item.date}`;
+        if (kept.has(key)) return false;
+        kept.add(key);
+        return true;
+      });
+    }
+  }
+
+  function merchantScoreTrend(data, merchantId, days = 14) {
+    const count = Number.isInteger(days) && days >= 2 && days <= 90 ? days : 14;
+    const today = new Date().toISOString().slice(0, 10);
+    const byDate = new Map();
+    for (const item of data.merchantScoreSnapshots || []) {
+      if (item.merchantId === merchantId) byDate.set(item.date, item);
+    }
+    const rows = [];
+    for (let index = count - 1; index >= 0; index -= 1) {
+      const date = new Date(`${today}T00:00:00.000Z`);
+      date.setUTCDate(date.getUTCDate() - index);
+      const key = date.toISOString().slice(0, 10);
+      rows.push({ date: key, score: byDate.has(key) ? byDate.get(key).score : null, stage: byDate.has(key) ? byDate.get(key).stage : null });
+    }
+    let lastKnown = null;
+    for (let index = 0; index < rows.length; index += 1) {
+      if (rows[index].score !== null) lastKnown = rows[index].score;
+      else if (lastKnown !== null) rows[index].score = lastKnown;
+    }
+    lastKnown = null;
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      if (rows[index].score !== null) lastKnown = rows[index].score;
+      else if (lastKnown !== null) rows[index].score = lastKnown;
+    }
+    const points = rows.filter((item) => item.score !== null);
+    const first = points[0];
+    const latest = points[points.length - 1];
+    return {
+      days: count,
+      range: [rows[0]?.date || today, rows[rows.length - 1]?.date || today],
+      change: first && latest ? latest.score - first.score : 0,
+      trendText: first && latest ? `${latest.score - first.score >= 0 ? '+' : ''}${latest.score - first.score} 分` : '暂无趋势',
+      points: rows
+    };
+  }
+
   // 分档变化才通知和留痕，避免每轮巡检都刷一遍相同结论。
   function refreshMerchantScores(data, now = new Date().toISOString()) {
     const changes = [];
@@ -3257,6 +3333,10 @@ function createApp({
 
   function refreshScoresNow() {
     return store.update((data) => refreshMerchantScores(data, new Date().toISOString()));
+  }
+
+  function refreshScoreSnapshotsNow() {
+    return store.update((data) => refreshMerchantScoreSnapshots(data, new Date().toISOString()));
   }
 
   function productComplianceMetrics(product, data) {
@@ -4543,6 +4623,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         sweepMaturedSettlements();
         sweepOperationsPatrol();
         refreshScoresNow();
+        refreshScoreSnapshotsNow();
         const data = store.read();
             const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
             if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
@@ -4608,6 +4689,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           data: {
             merchant: merchantPublic(merchant),
             serviceScore: merchant.serviceScore || null,
+            scoreTrend: merchantScoreTrend(data, merchant.id),
             lowStockThreshold: stockThreshold,
             scoreCases: (data.serviceScoreCases || []).filter((item) => item.merchantId === merchant.id),
             qualificationRenewals,

@@ -2403,6 +2403,42 @@ test('merchant workspace receives operational notifications and metrics', async 
   assert.equal(readNotifications.body.unreadCount, 0);
 });
 
+test('merchant workspace receives service score trend snapshots', async () => {
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const today = new Date().toISOString().slice(0, 10);
+  const yesterdayDate = new Date(Date.now() - 24 * 3600 * 1000).toISOString().slice(0, 10);
+  store.update((data) => {
+    data.merchantScoreSnapshots = (data.merchantScoreSnapshots || [])
+      .filter((item) => !(item.merchantId === 'merchant_001' && [today, yesterdayDate].includes(item.date)));
+    data.merchantScoreSnapshots.unshift({
+      merchantId: 'merchant_001', date: yesterdayDate, score: 72, stage: 'LIMITED',
+      createdAt: `${yesterdayDate}T10:00:00.000Z`, updatedAt: `${yesterdayDate}T10:00:00.000Z`
+    });
+  });
+
+  const overview = await api('/api/merchant/overview', { headers: merchantHeaders });
+  assert.equal(overview.response.status, 200);
+  const trend = overview.body.data.scoreTrend;
+  assert.ok(trend, 'merchant overview should expose score trend');
+  assert.ok(Array.isArray(trend.points));
+  const first = trend.points.find((item) => item.date === yesterdayDate);
+  const latest = trend.points[trend.points.length - 1];
+  assert.ok(first, 'trend should include the seeded snapshot');
+  assert.equal(first.score, 72);
+  assert.ok(latest.score !== null, 'trend should include the latest snapshot');
+  assert.equal(trend.change, latest.score - 72);
+  const snapshots = (store.read().merchantScoreSnapshots || [])
+    .filter((item) => item.merchantId === 'merchant_001');
+  assert.ok(snapshots.some((item) => item.date === today), 'merchant overview should persist today snapshot');
+});
+
 test('after-sale evidence and merchant resolution note are persisted', async () => {
   const session = await loginWeChat('after_sale_evidence_user');
   const merchantSession = await loginWeChat('merchant_demo');
