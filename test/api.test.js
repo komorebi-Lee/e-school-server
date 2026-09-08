@@ -142,6 +142,55 @@ test('merchant overview exposes product sales and restock hints', async () => {
   assert.equal(typeof merchantProduct.restockHint, 'string');
 });
 
+test('merchant product campaigns use enforced sale pricing', async () => {
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+  const now = Date.now();
+  const created = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({
+      name: '商家限时特价品', category: 'DIGITAL', description: '商家自配促销', priceInCents: 1800, stock: 3,
+      salePriceInCents: 1200,
+      saleStartsAt: new Date(now - 3600 * 1000).toISOString(),
+      saleEndsAt: new Date(now + 3600 * 1000).toISOString()
+    })
+  });
+  assert.equal(created.response.status, 201);
+  const productId = created.body.data.id;
+
+  const overview = await api('/api/merchant/overview', { headers: merchantAuth });
+  const merchantProduct = overview.body.data.products.find((item) => item.id === productId);
+  assert.equal(merchantProduct.effectivePriceInCents, 1200);
+  assert.equal(merchantProduct.promotion.originalPriceInCents, 1800);
+  assert.equal(merchantProduct.promotion.statusText, '限时直降');
+
+  const invalidSale = await api(`/api/merchant/products/${productId}`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ salePriceInCents: 1800, saleStartsAt: new Date(now - 3600 * 1000).toISOString(), saleEndsAt: new Date(now + 3600 * 1000).toISOString() })
+  });
+  assert.equal(invalidSale.response.status, 400);
+  assert.equal(invalidSale.body.error.code, 'VALIDATION_ERROR');
+
+  const updated = await api(`/api/merchant/products/${productId}`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({
+      salePriceInCents: 1500,
+      saleStartsAt: new Date(now + 24 * 3600 * 1000).toISOString(),
+      saleEndsAt: new Date(now + 48 * 3600 * 1000).toISOString()
+    })
+  });
+  assert.equal(updated.response.status, 200);
+  const refreshed = await api('/api/merchant/overview', { headers: merchantAuth });
+  const scheduledProduct = refreshed.body.data.products.find((item) => item.id === productId);
+  assert.equal(scheduledProduct.effectivePriceInCents, 1800);
+  assert.equal(scheduledProduct.promotion, null);
+});
+
 test('product list supports commerce sorting and sales metrics', async () => {
   const rating = await api('/api/products?campusId=campus_demo&sort=rating');
   assert.equal(rating.response.status, 200);

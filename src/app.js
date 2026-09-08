@@ -4120,9 +4120,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const complianceCase = complianceCases.find((item) => item.productId === product.id
                 && item.id === product.autoDelistCaseId);
             const salesCount = productSalesCounts.get(product.id) || 0;
+            const campaign = withProductSale(product);
             return withAvailableStock({
-                ...product,
-                salesCount,
+              ...product,
+              effectivePriceInCents: campaign.effectivePriceInCents,
+              promotion: campaign.promotion,
+              salesCount,
                 restockHint: productRestockHint(product, salesCount, stockThreshold),
                 complianceCase: product.autoDelistRule === 'LOW_QUALITY' && complianceCase ? {
                   id: complianceCase.id,
@@ -4397,6 +4400,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (imageUrl && !imageUrl.startsWith('/api/uploads/')) throw new ApiError(400, 'VALIDATION_ERROR', '商品图片必须来自平台上传目录');
           // 限流整改期间新增商品先进入待复核，避免低分商家继续放量。
           const autoPublish = serviceScoreStages[stage].autoPublish;
+          const sale = normalizeProductSaleCampaign(body);
+          if (sale && sale.salePriceInCents >= priceInCents) throw new ApiError(400, 'VALIDATION_ERROR', '促销价必须低于商品原价');
           const item = {
             id: `prod_${randomUUID()}`,
             name: requireString(body.name, 'name', { maxLength: 80 }),
@@ -4409,7 +4414,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             merchantId: merchant.id,
             active: autoPublish ? body.active !== false : false,
             publishReviewStatus: autoPublish ? 'AUTO' : 'PENDING_REVIEW',
-            publishReviewNote: autoPublish ? '' : '商家服务分处于限流整改，商品需平台复核后上架'
+            ...(sale || {})
+            ,
+            publishReviewNote: autoPublish ? '' : '服务分处限期间，商品需平台复核后上架'
           };
           data.products.unshift(item);
           recordStockMovement(data, item, {
@@ -4450,6 +4457,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             item.imageUrl = imageUrl;
           }
           if (body.priceInCents !== undefined) item.priceInCents = requirePositiveInteger(body.priceInCents, 'priceInCents');
+          const sale = normalizeProductSaleCampaign(body, item);
+          if (sale) {
+            if (sale.salePriceInCents >= item.priceInCents) throw new ApiError(400, 'VALIDATION_ERROR', '促销价必须低于商品原价');
+            item.salePriceInCents = sale.salePriceInCents;
+            item.saleStartsAt = sale.saleStartsAt;
+            item.saleEndsAt = sale.saleEndsAt;
+          }
           if (body.stock !== undefined) {
             const stockBefore = Number(item.stock || 0);
             item.stock = requirePositiveInteger(body.stock, 'stock', { max: 999999 });
