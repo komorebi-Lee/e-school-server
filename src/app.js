@@ -57,6 +57,7 @@ function isTlsInterceptionError(error) {
     leadResponseHours: Number.isInteger(settings.leadResponseHours) && settings.leadResponseHours >= 1 && settings.leadResponseHours <= 168 ? settings.leadResponseHours : 24,
     phoneCardActivationHours: Number.isInteger(settings.phoneCardActivationHours) && settings.phoneCardActivationHours >= 1 && settings.phoneCardActivationHours <= 168 ? settings.phoneCardActivationHours : 24,
     paymentTimeoutMinutes: settings.paymentTimeoutMinutes || 30,
+    paymentTimeoutText: `${settings.paymentTimeoutMinutes || 30} 分钟`,
     settlementPeriodDays: Number.isInteger(settings.settlementPeriodDays) ? settings.settlementPeriodDays : 7,
     deliveryTimeSlots: Array.isArray(settings.deliveryTimeSlots) && settings.deliveryTimeSlots.length ? settings.deliveryTimeSlots : ['尽快配送'],
     platformNotice: settings.platformNotice || '服务范围和办理结果以学校及合作方最终确认为准。'
