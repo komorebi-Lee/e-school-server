@@ -2126,6 +2126,73 @@ test('product sale campaigns use server-calculated promotion prices', async () =
   assert.equal(ended.body.data.promotion, null);
 });
 
+test('product campaigns expose operational promotion metrics', async () => {
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+  const now = Date.now();
+  const activeWindow = {
+    saleStartsAt: new Date(now - 3600 * 1000).toISOString(),
+    saleEndsAt: new Date(now + 24 * 3600 * 1000).toISOString()
+  };
+  const campaignProduct = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ name: '复盘演示商品', category: 'DIGITAL', description: '促销成效核对', priceInCents: 2000, stock: 10, salePriceInCents: 1600, ...activeWindow })
+  });
+  assert.equal(campaignProduct.response.status, 201);
+  const productId = campaignProduct.body.data.id;
+
+  const buyer = await loginWeChat('campaign_metrics_buyer');
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ items: [{ productId, quantity: 2 }] })
+  });
+  assert.equal(order.response.status, 201);
+  assert.equal((await confirmPayment(order.body.paymentOrder.id, buyer.token)).response.status, 200);
+
+  const phoneProduct = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ name: '复盘演示套餐', category: 'PHONE_PLAN', description: '促销套餐成效核对', priceInCents: 3000, stock: 10, salePriceInCents: 2400, ...activeWindow })
+  });
+  assert.equal(phoneProduct.response.status, 201);
+  const phoneOrder = await api('/api/phone-card-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ productId: phoneProduct.body.data.id, customerName: '测试同学', phone: '13800001234' })
+  });
+  assert.equal(phoneOrder.response.status, 201);
+  assert.equal(phoneOrder.body.data.amountInCents, 2400);
+  assert.equal((await confirmPayment(phoneOrder.body.paymentOrder.id, buyer.token)).response.status, 200);
+
+  const [merchantOverview, adminOverview] = await Promise.all([
+    api('/api/merchant/overview', { headers: merchantAuth }),
+    api('/api/admin/overview', { headers: { authorization: `Bearer ${(await api('/api/admin/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+    })).body.data.token}` } })
+  ]);
+  assert.equal(merchantOverview.response.status, 200);
+  assert.equal(adminOverview.response.status, 200);
+  const merchantProduct = merchantOverview.body.data.products.find((item) => item.id === productId);
+  const adminProduct = adminOverview.body.data.products.find((item) => item.id === productId);
+  assert.equal(merchantProduct.promotionSummary, undefined);
+  assert.equal(adminProduct.promotionSummary, undefined);
+  assert.equal(merchantProduct.campaignOrderCount, 1);
+  assert.equal(adminProduct.campaignOrderCount, 1);
+  assert.equal(adminProduct.campaignSalesQuantity, 2);
+  assert.equal(adminProduct.campaignAmountInCents, 3200);
+  assert.equal(adminProduct.campaignDiscountInCents, 800);
+  assert.equal(adminProduct.campaignStatus, 'ACTIVE');
+  const adminPhone = adminOverview.body.data.products.find((item) => item.id === phoneProduct.body.data.id);
+  assert.equal(adminPhone.campaignOrderCount, 1);
+  assert.equal(adminPhone.campaignAmountInCents, 2400);
+  assert.ok(adminOverview.body.data.promotionSummary.some((item) => item.id === productId));
+  assert.ok(merchantOverview.body.data.promotionSummary.some((item) => item.id === productId));
+});
+
 test('admin after-sale closure refunds paid orders and notifies users', async () => {
   const session = await loginWeChat('refund_after_sale');
   const created = await api('/api/orders', {

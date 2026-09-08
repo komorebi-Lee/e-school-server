@@ -763,6 +763,69 @@ function withProductSale(product, now = new Date().toISOString()) {
   };
 }
 
+function productPromotionOrderMetrics(product, data, now = new Date().toISOString()) {
+  if (!product?.salePriceInCents) {
+    return {
+      campaignOrderCount: 0,
+      campaignPaidOrderCount: 0,
+      campaignSalesQuantity: 0,
+      campaignAmountInCents: 0,
+      campaignDiscountInCents: 0,
+      campaignStatus: null,
+      campaignStatusLabel: ''
+    };
+  }
+  const startsAt = product.saleStartsAt ? new Date(product.saleStartsAt).getTime() : null;
+  const endsAt = product.saleEndsAt ? new Date(product.saleEndsAt).getTime() : null;
+  const current = new Date(now).getTime();
+  const campaignStatus = startsAt && current < startsAt ? 'SCHEDULED'
+    : endsAt && current >= endsAt ? 'ENDED'
+      : 'ACTIVE';
+  const campaignStatusLabel = campaignStatus === 'SCHEDULED' ? '未开始'
+    : campaignStatus === 'ENDED' ? '已结束' : '进行中';
+  let campaignOrderCount = 0;
+  let campaignPaidOrderCount = 0;
+  let campaignSalesQuantity = 0;
+  let campaignAmountInCents = 0;
+  let campaignDiscountInCents = 0;
+  for (const order of data.orders || []) {
+    let matchedQuantity = 0;
+    let matchedAmount = 0;
+    for (const item of order.items || []) {
+      if (item.productId !== product.id) continue;
+      matchedQuantity += Number(item.quantity || 1);
+      matchedAmount += Number(item.subtotalInCents || 0);
+    }
+    if (!matchedQuantity) continue;
+    const paid = ['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(order.status);
+    if (!paid) continue;
+    campaignOrderCount += 1;
+    campaignPaidOrderCount += 1;
+    campaignSalesQuantity += matchedQuantity;
+    campaignAmountInCents += matchedAmount;
+    campaignDiscountInCents += matchedQuantity * Math.max(Number(product.priceInCents) - Number(product.salePriceInCents), 0);
+  }
+  for (const order of data.phoneCardOrders || []) {
+    if (order.productId !== product.id
+      || !['PENDING_REALNAME', 'ACTIVATED'].includes(order.status)
+      || order.paymentStatus !== 'PAID') continue;
+    campaignOrderCount += 1;
+    campaignPaidOrderCount += 1;
+    campaignSalesQuantity += 1;
+    campaignAmountInCents += Number(order.amountInCents || 0);
+    campaignDiscountInCents += Math.max(Number(product.priceInCents) - Number(product.salePriceInCents), 0);
+  }
+  return {
+    campaignOrderCount,
+    campaignPaidOrderCount,
+    campaignSalesQuantity,
+    campaignAmountInCents,
+    campaignDiscountInCents,
+    campaignStatus,
+    campaignStatusLabel
+  };
+}
+
 function createCollaboration(order, merchantId) {
   return {
     merchantId,
@@ -4121,10 +4184,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 && item.id === product.autoDelistCaseId);
             const salesCount = productSalesCounts.get(product.id) || 0;
             const campaign = withProductSale(product);
+            const campaignMetrics = productPromotionOrderMetrics(product, data, new Date().toISOString());
             return withAvailableStock({
               ...product,
               effectivePriceInCents: campaign.effectivePriceInCents,
               promotion: campaign.promotion,
+              ...campaignMetrics,
               salesCount,
                 restockHint: productRestockHint(product, salesCount, stockThreshold),
                 complianceCase: product.autoDelistRule === 'LOW_QUALITY' && complianceCase ? {
@@ -4140,6 +4205,20 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 } : null
               });
             }),
+            promotionSummary: products
+              .filter((product) => Number(product.salePriceInCents || 0) > 0)
+              .map((product) => ({
+                id: product.id,
+                name: product.name,
+                merchantId: product.merchantId || '',
+                merchantName: merchant.name,
+                priceInCents: Number(product.priceInCents || 0),
+                salePriceInCents: Number(product.salePriceInCents || 0),
+                saleStartsAt: product.saleStartsAt || '',
+                saleEndsAt: product.saleEndsAt || '',
+                ...productPromotionOrderMetrics(product, data, new Date().toISOString())
+              }))
+              .sort((a, b) => b.campaignAmountInCents - a.campaignAmountInCents),
             lowStockProducts: products
               .filter((product) => product.active !== false && availableStock(product) <= stockThreshold)
               .sort((a, b) => availableStock(a) - availableStock(b))
@@ -5018,7 +5097,24 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 alertedAt: item.lowStockAlertedAt || '',
                 status: item.lowStockAlertStatus || ''
               })),
-            products: data.products.map(withAvailableStock),
+            products: data.products.map((product) => ({
+              ...withAvailableStock(product),
+              ...productPromotionOrderMetrics(product, data, new Date().toISOString())
+            })),
+            promotionSummary: (data.products || [])
+              .filter((product) => Number(product.salePriceInCents || 0) > 0)
+              .map((product) => ({
+                id: product.id,
+                name: product.name,
+                merchantId: product.merchantId || '',
+                merchantName: (data.merchants || []).find((merchant) => merchant.id === product.merchantId)?.name || '平台自营',
+                priceInCents: Number(product.priceInCents || 0),
+                salePriceInCents: Number(product.salePriceInCents || 0),
+                saleStartsAt: product.saleStartsAt || '',
+                saleEndsAt: product.saleEndsAt || '',
+                ...productPromotionOrderMetrics(product, data, new Date().toISOString())
+              }))
+              .sort((a, b) => b.campaignAmountInCents - a.campaignAmountInCents),
             stockMovements: data.stockMovements || [],
             adminUsers: (data.adminUsers || []).map(publicAdminUser),
             rechargePromos: (data.rechargePromos || [])
@@ -5248,7 +5344,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const productId = requireString(body.productId, 'productId', { maxLength: 100 });
         const planProduct = store.read().products.find((item) => item.id === productId && item.category === 'PHONE_PLAN' && item.active);
         if (!planProduct) throw new ApiError(404, 'PHONE_PLAN_NOT_FOUND', '套餐不存在或已下架');
-        const amountInCents = Number(planProduct.priceInCents || 0);
+        const amountInCents = withProductSale(planProduct).effectivePriceInCents;
         const cardIdempotencyKey = String(request.headers['idempotency-key'] || '');
         if (cardIdempotencyKey) {
           const compoundKey = `card:${userId}:${cardIdempotencyKey}`;
@@ -5260,7 +5356,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }
         const now = new Date().toISOString();
         const paymentTimeoutMinutes = Number(store.read().adminSettings?.paymentTimeoutMinutes || 30);
-        const record = { id:`tel_${randomUUID()}`, userId, customerName:requireString(body.customerName,'customerName',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), productId, planName:planProduct.name, amountInCents, status:'PENDING_PAYMENT', paymentStatus:'UNPAID', paymentExpiresAt:new Date(new Date(now).getTime() + paymentTimeoutMinutes * 60 * 1000).toISOString(), relatedIds:{}, createdAt:now, updatedAt:now };
+        const record = { id:`tel_${randomUUID()}`, userId, customerName:requireString(body.customerName,'customerName',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), productId, planName:planProduct.name, amountInCents, originalPriceInCents:planProduct.priceInCents, status:'PENDING_PAYMENT', paymentStatus:'UNPAID', paymentExpiresAt:new Date(new Date(now).getTime() + paymentTimeoutMinutes * 60 * 1000).toISOString(), relatedIds:{}, createdAt:now, updatedAt:now };
         const result = store.update(data=>{
           (data.phoneCardOrders=data.phoneCardOrders||[]).unshift(record);
           (data.rechargeOrders||[]).forEach(item=>{if(item.userId===userId&&item.phone===record.phone&&!item.relatedIds?.phoneCardOrderId)item.relatedIds={...(item.relatedIds||{}),phoneCardOrderId:record.id};});
