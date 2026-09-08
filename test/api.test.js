@@ -207,6 +207,22 @@ test('stock movements record inventory truth across lifecycle', async () => {
   assert.equal(restore.quantity, 2);
   assert.equal(restore.stockBefore, stockBefore - 2);
   assert.equal(restore.stockAfter, stockBefore);
+
+  const merchantLedger = await api(`/api/merchant/stock-movements?productId=${productId}`, { headers: merchantAuth });
+  assert.equal(merchantLedger.response.status, 200);
+  assert.equal(merchantLedger.body.total, 5);
+  assert.ok(merchantLedger.body.data.every((item) => item.merchantId === 'merchant_001'));
+  assert.equal(merchantLedger.body.data[0].movementType, 'RESTORE');
+  assert.ok(merchantLedger.body.data.some((item) => item.movementType === 'INITIAL'));
+
+  const consumedLedger = await api(`/api/merchant/stock-movements?productId=${productId}&type=CONSUME`, { headers: merchantAuth });
+  assert.equal(consumedLedger.response.status, 200);
+  assert.equal(consumedLedger.body.total, 1);
+  assert.equal(consumedLedger.body.data[0].referenceNo, order.body.data.orderNo);
+
+  const invalidType = await api(`/api/merchant/stock-movements?productId=${productId}&type=BAD`, { headers: merchantAuth });
+  assert.equal(invalidType.response.status, 400);
+  assert.equal(invalidType.body.error.code, 'VALIDATION_ERROR');
 });
 
 test('active product detail exposes merchant and stock', async () => {

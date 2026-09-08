@@ -199,6 +199,8 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 
 每条流水包含商品、商家、变更类型、数量、变更前后 `stock` / `reservedStock`、关联订单或商品单号、操作来源和时间。最新 500 条会随 `GET /api/admin/overview` 的 `stockMovements` 返回；管理端“商品交易 → 库存流水”提供倒序展示和检索。
 
+商家端通过 `GET /api/merchant/stock-movements` 读取同一份台账，仅返回本店数据，支持 `productId`、`type`、`referenceNo` 和 `limit`（1-100）过滤；小程序商家商品页会把台账分为全部、入库、调整、订单和售后，便于补货后核对“库存为什么变化”。
+
 - `GET /api/orders?userId=user_demo`
 - `GET /api/orders/:id?userId=user_demo`
 

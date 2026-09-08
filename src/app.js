@@ -4122,6 +4122,26 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }
       }
 
+      if (request.method === 'GET' && pathname === '/api/merchant/stock-movements') {
+        const allowedTypes = new Set(['INITIAL', 'ADJUST_IN', 'ADJUST_OUT', 'RESERVE', 'RELEASE', 'CONSUME', 'RESTORE']);
+        const data = store.read();
+        let items = (data.stockMovements || []).filter((item) => item.merchantId === merchantSession.merchantId);
+        const productId = url.searchParams.get('productId') || '';
+        const movementType = url.searchParams.get('type') || '';
+        const referenceNo = url.searchParams.get('referenceNo') || '';
+        const limitRaw = Number(url.searchParams.get('limit') || 50);
+        if (productId && !items.some((item) => item.productId === productId)) {
+          throw new ApiError(404, 'PRODUCT_NOT_FOUND', '未找到本店库存商品');
+        }
+        if (movementType && !allowedTypes.has(movementType)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported stock movement type');
+        if (!Number.isInteger(limitRaw) || limitRaw < 1 || limitRaw > 100) throw new ApiError(400, 'VALIDATION_ERROR', 'limit 需为 1-100 的整数');
+        if (productId) items = items.filter((item) => item.productId === productId);
+        if (movementType) items = items.filter((item) => item.movementType === movementType);
+        if (referenceNo) items = items.filter((item) => item.referenceNo === referenceNo);
+        const total = items.length;
+        return sendJson(response, 200, { data: items.slice(0, limitRaw), total, requestId });
+      }
+
       if (request.method === 'GET' && pathname === '/api/merchant/notifications') {
         const data = store.read();
         const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
