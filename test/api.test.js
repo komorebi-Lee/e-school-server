@@ -4265,6 +4265,19 @@ test('favorite users receive a conversion notice when a product goes on sale', a
   ));
   assert.ok(queued);
   assert.equal(queued.page, 'pages/detail/detail');
+  assert.equal(notice.metadata.productId, productId);
+
+  const noticeAction = await api(`/api/my/notifications/${notice.id}/action`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({})
+  });
+  assert.equal(noticeAction.response.status, 200);
+  assert.equal(noticeAction.body.data.productId, productId);
+  const notificationsAfterAction = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  assert.equal(notificationsAfterAction.body.data.find((item) => item.id === notice.id).read, true);
 
   const admin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },

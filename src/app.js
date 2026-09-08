@@ -1533,7 +1533,7 @@ function createApp({
     data.auditLogs = data.auditLogs.slice(0, 200);
   }
 
-  function addNotification(data, userId, type, title, content) {
+  function addNotification(data, userId, type, title, content, metadata = null) {
     if (!userId) return null;
     if (!Array.isArray(data.notifications)) data.notifications = [];
     const notification = {
@@ -1543,7 +1543,8 @@ function createApp({
       title: String(title).slice(0, 80),
       content: String(content).slice(0, 300),
       read: false,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      ...(metadata ? { metadata } : {})
     };
     data.notifications.unshift(notification);
     data.notifications = data.notifications.slice(0, 500);
@@ -1594,7 +1595,7 @@ function createApp({
     const savedInCents = Math.max(0, Number(promotion.originalPriceInCents || 0) - Number(promotion.salePriceInCents || 0));
     const title = '收藏商品降价';
     const content = `「${product.name}」开始限时特价 ¥${(Number(promotion.salePriceInCents) / 100).toFixed(2).replace(/\.00$/, '')}，较原价节省 ¥${(savedInCents / 100).toFixed(2).replace(/\.00$/, '')}，库存有限先到先得。`;
-    const notification = addNotification(data, userId, 'PROMOTION', title, content);
+    const notification = addNotification(data, userId, 'PROMOTION', title, content, { productId: product.id });
     if (!notification) return null;
     if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
     data.subscribeMessages.unshift({
@@ -5765,6 +5766,22 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         });
         return sendJson(response, 200, { data: updated, requestId });
       }
+
+      const favoriteNoticeMatch = pathname.match(/^\/api\/my\/notifications\/([^/]+)\/action$/);
+      if (request.method === 'POST' && favoriteNoticeMatch) {
+        const { userId } = requireUser(request);
+        const result = store.update((data) => {
+          const notification = (data.notifications || []).find((item) => item.id === favoriteNoticeMatch[1]);
+          if (!notification || notification.userId !== userId) throw new ApiError(404, 'NOTIFICATION_NOT_FOUND', '通知不存在');
+          if (!notification.read) notification.read = true;
+          const productId = notification.metadata?.productId;
+          const product = productId ? (data.products || []).find((item) => item.id === productId) : null;
+          if (!product || !product.active) throw new ApiError(404, 'PRODUCT_NOT_FOUND', '商品已下架');
+          return { productId: product.id };
+        });
+        return sendJson(response, 200, { data: result, requestId });
+      }
+
       if (request.method === 'POST' && pathname === '/api/phone-card-orders') {
         const { userId } = requireUser(request);
         const body = await readJson(request);
