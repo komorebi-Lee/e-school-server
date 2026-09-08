@@ -2421,6 +2421,10 @@ test('merchant workspace receives service score trend snapshots', async () => {
       merchantId: 'merchant_001', date: yesterdayDate, score: 72, stage: 'LIMITED',
       createdAt: `${yesterdayDate}T10:00:00.000Z`, updatedAt: `${yesterdayDate}T10:00:00.000Z`
     });
+    data.merchantScoreLogs = [{
+      merchantId: 'merchant_001', type: 'RECTIFY_APPROVED', caseNo: 'SC_TEST_TREND',
+      scoreBefore: 72, scoreAfter: 92, createdAt: `${yesterdayDate}T11:00:00.000Z`
+    }, ...(data.merchantScoreLogs || [])];
   });
 
   const overview = await api('/api/merchant/overview', { headers: merchantHeaders });
@@ -2434,6 +2438,10 @@ test('merchant workspace receives service score trend snapshots', async () => {
   assert.equal(first.score, 72);
   assert.ok(latest.score !== null, 'trend should include the latest snapshot');
   assert.equal(trend.change, latest.score - 72);
+  assert.equal(trend.effect.caseNo, 'SC_TEST_TREND');
+  assert.equal(trend.effect.scoreBefore, 72);
+  assert.equal(trend.effect.scoreAfter, 92);
+  assert.equal(trend.effect.gain, 20);
   const snapshots = (store.read().merchantScoreSnapshots || [])
     .filter((item) => item.merchantId === 'merchant_001');
   assert.ok(snapshots.some((item) => item.date === today), 'merchant overview should persist today snapshot');

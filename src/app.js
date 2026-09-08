@@ -2990,11 +2990,25 @@ function createApp({
     const points = rows.filter((item) => item.score !== null);
     const first = points[0];
     const latest = points[points.length - 1];
+    const rangeStart = rows[0]?.date || today;
+    const effectLog = (data.merchantScoreLogs || []).find((item) => item.merchantId === merchantId
+      && item.type === 'RECTIFY_APPROVED'
+      && Number.isInteger(item.scoreBefore)
+      && Number.isInteger(item.scoreAfter)
+      && String(item.createdAt || '').slice(0, 10) >= rangeStart);
+    const effect = effectLog ? {
+      caseNo: effectLog.caseNo || '',
+      approvedDate: String(effectLog.createdAt || '').slice(0, 10),
+      scoreBefore: effectLog.scoreBefore,
+      scoreAfter: effectLog.scoreAfter,
+      gain: effectLog.scoreAfter - effectLog.scoreBefore
+    } : null;
     return {
       days: count,
       range: [rows[0]?.date || today, rows[rows.length - 1]?.date || today],
       change: first && latest ? latest.score - first.score : 0,
       trendText: first && latest ? `${latest.score - first.score >= 0 ? '+' : ''}${latest.score - first.score} 分` : '暂无趋势',
+      effect,
       points: rows
     };
   }
@@ -6587,10 +6601,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           if (decision === 'APPROVE' && caseRecord.type === 'RECTIFY') {
             const previous = merchant.serviceScore || computeMerchantScore(data, merchant, now);
+            const scoreBefore = previous.score;
             merchant.serviceScore = { ...previous, manualAdjustment: Math.max(-20, Math.min(20, (previous.manualAdjustment || 0) + 5)) };
             merchant.serviceScore = computeMerchantScore(data, merchant, now);
             addMerchantScoreLog(data, merchant, {
               type: 'RECTIFY_APPROVED',
+              caseNo: caseRecord.caseNo,
+              scoreBefore,
+              scoreAfter: merchant.serviceScore.score,
               note: `整改验收通过：${note}`
             }, now);
           }
