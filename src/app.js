@@ -3570,6 +3570,76 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       const restockAlertMatch = pathname.match(/^\/api\/products\/([^/]+)\/restock-alert$/);
+      const productFavoriteMatch = pathname.match(/^\/api\/products\/([^/]+)\/favorite$/);
+      if (request.method === 'GET' && pathname === '/api/my/favorites') {
+        const { userId } = requireUser(request);
+        const data = store.read();
+        const favoriteProductIds = new Set(
+          (data.productFavorites || [])
+            .filter((item) => item.userId === userId)
+            .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+            .map((item) => item.productId)
+        );
+        const now = new Date().toISOString();
+        const items = data.products
+          .filter((product) => product.active && favoriteProductIds.has(product.id))
+          .map((product) => withProductSale(
+            withMerchantScore(
+              withAvailableStock(
+                withProductReviewSummary(
+                  withMerchantName(product, data.merchants || []),
+                  data.productReviews || []
+                )
+              ),
+              data.merchants || []
+            ),
+            now
+          ));
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
+      if (productFavoriteMatch) {
+        requireUser(request);
+        if (request.method === 'GET') {
+          const { userId } = requireUser(request);
+          const data = store.read();
+          const favorited = (data.productFavorites || []).some((item) => (
+            item.productId === productFavoriteMatch[1]
+            && item.userId === userId
+          ));
+          return sendJson(response, 200, { data: { favorited }, requestId });
+        }
+        if (request.method === 'POST') {
+          const { userId } = requireUser(request);
+          const body = await readJson(request);
+          if (body.favorited === false) {
+            const result = store.update((data) => {
+              data.productFavorites = (data.productFavorites || []).filter((item) => !(
+                item.productId === productFavoriteMatch[1] && item.userId === userId
+              ));
+              return { favorited: false };
+            });
+            return sendJson(response, 200, { data: result, requestId });
+          }
+          const result = store.update((data) => {
+            const product = data.products.find((item) => item.id === productFavoriteMatch[1] && item.active);
+            if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+            data.productFavorites = data.productFavorites || [];
+            const existing = data.productFavorites.find((item) => (
+              item.productId === product.id && item.userId === userId
+            ));
+            if (existing) {
+              existing.updatedAt = new Date().toISOString();
+            } else {
+              const now = new Date().toISOString();
+              data.productFavorites.unshift({ productId: product.id, userId, createdAt: now, updatedAt: now });
+            }
+            return { favorited: true };
+          });
+          return sendJson(response, 200, { data: result, requestId });
+        }
+      }
+
       if (request.method === 'GET' && restockAlertMatch) {
         const { userId } = requireUser(request);
         const data = store.read();

@@ -4144,3 +4144,37 @@ test('approved merchants expose a public storefront without private data', async
   const hidden = await api('/api/merchants/merchant_002/storefront');
   assert.equal(hidden.response.status, 404);
 });
+
+test('users can favorite products and revisit them from profile', async () => {
+  const session = await loginWeChat('favorite_user');
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+
+  const missing = await api('/api/products/not_a_product/favorite', {
+    method: 'POST', headers: auth, body: JSON.stringify({ favorited: true })
+  });
+  assert.equal(missing.response.status, 404);
+
+  const add = await api('/api/products/prod_ebike_001/favorite', {
+    method: 'POST', headers: auth, body: JSON.stringify({ favorited: true })
+  });
+  assert.equal(add.response.status, 200);
+  assert.equal(add.body.data.favorited, true);
+
+  const state = await api('/api/products/prod_ebike_001/favorite', { headers: auth });
+  assert.equal(state.body.data.favorited, true);
+
+  const list = await api('/api/my/favorites', { headers: auth });
+  assert.equal(list.response.status, 200);
+  assert.equal(list.body.data.length, 1);
+  assert.equal(list.body.data[0].id, 'prod_ebike_001');
+  assert.equal(list.body.data[0].merchantName, '狮山校园车行');
+  assert.ok('availableStock' in list.body.data[0]);
+  assert.ok('ratingSummary' in list.body.data[0]);
+
+  const remove = await api('/api/products/prod_ebike_001/favorite', {
+    method: 'POST', headers: auth, body: JSON.stringify({ favorited: false })
+  });
+  assert.equal(remove.body.data.favorited, false);
+  const removedList = await api('/api/my/favorites', { headers: auth });
+  assert.equal(removedList.body.data.length, 0);
+});
