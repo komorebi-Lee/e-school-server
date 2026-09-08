@@ -376,6 +376,7 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 商家工作台展示总分、评级、平台处置、五个维度进度条、低质风控扣分、最弱项提示和待平台复核商品。
 - 商品详情页展示店铺服务分、评级、按时交付率、已购评价数和平台处置说明，帮助学生下单前判断履约可信度。
 - `GET /api/merchant/overview` 返回 `serviceScore` 与 `pendingPublishProducts`；`GET /api/products/:id` 返回 `merchantServiceScore`。
+- 商家概览和公开商品列表统一按 `salesCount` 汇总有效订单销量（含已支付、履约中、已完成、售后中与有效电话卡订单）。商品可售库存不高于低库存阈值时，商家概览会返回 `restockHint`：已有销量显示“热销·需补货”，否则显示“可售偏低”。
 
 ## 当前边界
 

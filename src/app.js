@@ -2897,7 +2897,7 @@ function createApp({
     return { ...product, salesCount: salesCounts.get(product.id) || 0 };
   }
 
-  function orderProductsForList(data, products, sort = 'recommend') {
+  function calculateProductSalesCounts(data) {
     const salesCounts = new Map();
     for (const order of data.orders || []) {
       if (!['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(order.status)) continue;
@@ -2909,6 +2909,16 @@ function createApp({
       if (!['PENDING_REALNAME', 'ACTIVATED'].includes(order.status) || !order.productId) continue;
       salesCounts.set(order.productId, (salesCounts.get(order.productId) || 0) + 1);
     }
+    return salesCounts;
+  }
+
+  function productRestockHint(product, salesCount, threshold) {
+    if (availableStock(product) > threshold) return '';
+    return salesCount > 0 ? '热销·需补货' : '可售偏低';
+  }
+
+  function orderProductsForList(data, products, sort = 'recommend') {
+    const salesCounts = calculateProductSalesCounts(data);
     const entries = products.map((product, index) => {
       const salesCount = salesCounts.get(product.id) || 0;
       const rating = product.ratingSummary?.average || 0.1;
@@ -3465,7 +3475,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const ranked = sort === 'recommend'
           ? orderProductsByExposure(data, summarized)
           : orderProductsForList(data, summarized, sort);
-        return sendJson(response, 200, { data: ranked.map((product) => withMerchantScore(withAvailableStock(product), data.merchants || [])), total: ranked.length, requestId });
+        const salesCounts = calculateProductSalesCounts(data);
+        return sendJson(response, 200, {
+          data: ranked.map((product) => withMerchantScore(
+            withAvailableStock(withProductSales(product, salesCounts)), data.merchants || []
+          )),
+          total: ranked.length,
+          requestId
+        });
       }
 
       if (request.method === 'GET' && pathname === '/api/recharge-promos') {
@@ -3956,6 +3973,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
         const products = data.products.filter((item) => item.merchantId === merchant.id);
         const stockThreshold = lowStockThreshold(data);
+        const productSalesCounts = calculateProductSalesCounts(data);
         const complianceCases = (data.serviceScoreCases || [])
           .filter((item) => item.merchantId === merchant.id && item.productId);
         const merchantProductIds = new Set(products.map((product) => product.id));
@@ -4029,10 +4047,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               settlementMetrics
             },
             products: products.map((product) => {
-              const complianceCase = complianceCases.find((item) => item.productId === product.id
+            const complianceCase = complianceCases.find((item) => item.productId === product.id
                 && item.id === product.autoDelistCaseId);
-              return withAvailableStock({
+            const salesCount = productSalesCounts.get(product.id) || 0;
+            return withAvailableStock({
                 ...product,
+                salesCount,
+                restockHint: productRestockHint(product, salesCount, stockThreshold),
                 complianceCase: product.autoDelistRule === 'LOW_QUALITY' && complianceCase ? {
                   id: complianceCase.id,
                   caseNo: complianceCase.caseNo,

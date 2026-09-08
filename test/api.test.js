@@ -102,6 +102,46 @@ test('health and product list are available', async () => {
   assert.equal(products.body.data.filter((item) => item.category === 'PHONE_PLAN').length, 3);
 });
 
+test('merchant overview exposes product sales and restock hints', async () => {
+  const session = await loginWeChat('sales_metrics_buyer');
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const product = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ name: '销量口径演示品', category: 'DIGITAL', description: '用于核对商家销量', priceInCents: 1200, stock: 2 })
+  });
+  assert.equal(product.response.status, 201);
+
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ userId: session.userId, items: [{ productId: product.body.data.id, quantity: 2 }] })
+  });
+  assert.equal(created.response.status, 201);
+  const payment = await confirmPayment(created.body.paymentOrder.id, session.token);
+  assert.equal(payment.response.status, 200);
+
+  const [merchantOverview, publicProducts] = await Promise.all([
+    api('/api/merchant/overview', { headers: merchantAuth }),
+    api('/api/products?campusId=campus_demo')
+  ]);
+  assert.equal(merchantOverview.response.status, 200);
+  assert.ok(merchantOverview.body.data.products.every((item) => Number.isInteger(item.salesCount)));
+
+  const merchantProduct = merchantOverview.body.data.products.find((item) => item.id === product.body.data.id);
+  const publicProduct = publicProducts.body.data.find((item) => item.id === product.body.data.id);
+  assert.equal(merchantProduct.salesCount, publicProduct.salesCount);
+  assert.equal(merchantProduct.salesCount, 2);
+  assert.equal(merchantProduct.restockHint, '热销·需补货');
+  assert.ok('restockHint' in merchantProduct);
+  assert.equal(typeof merchantProduct.restockHint, 'string');
+});
+
 test('product list supports commerce sorting and sales metrics', async () => {
   const rating = await api('/api/products?campusId=campus_demo&sort=rating');
   assert.equal(rating.response.status, 200);
