@@ -3384,6 +3384,104 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }
       }
 
+      const addressMatch = pathname.match(/^\/api\/my\/addresses\/([^/]+)$/);
+      if (pathname === '/api/my/addresses' || addressMatch) {
+        const { userId } = requireUser(request);
+        const contactPhonePattern = /^1\d{10}$/;
+        const normalizeAddress = (input = {}) => ({
+          contactName: requireString(input.contactName, 'contactName', { maxLength: 40 }),
+          contactPhone: requireString(input.contactPhone, 'contactPhone', { maxLength: 20 }),
+          address: requireString(input.address, 'address', { maxLength: 120 }),
+          campusName: typeof input.campusName === 'string' ? input.campusName.trim().slice(0, 40) : ''
+        });
+        const sortAddresses = (items) => [...items].sort((a, b) => {
+          if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
+          return b.createdAt.localeCompare(a.createdAt);
+        });
+
+        if (request.method === 'GET' && pathname === '/api/my/addresses') {
+          const data = store.read();
+          const items = sortAddresses((data.addresses || []).filter((item) => item.userId === userId));
+          return sendJson(response, 200, { data: items, total: items.length, requestId });
+        }
+
+        if (request.method === 'POST' && pathname === '/api/my/addresses') {
+          const body = await readJson(request);
+          const normalized = normalizeAddress(body);
+          if (!contactPhonePattern.test(normalized.contactPhone)) {
+            throw new ApiError(400, 'VALIDATION_ERROR', '请输入正确的手机号');
+          }
+          const created = store.update((data) => {
+            data.addresses ||= [];
+            const userAddresses = data.addresses.filter((item) => item.userId === userId);
+            if (userAddresses.length >= 10) {
+              throw new ApiError(409, 'ADDRESS_LIMIT_REACHED', '最多保存 10 个常用地址');
+            }
+            const isDefault = body.isDefault === true || userAddresses.length === 0;
+            if (isDefault) {
+              for (const item of data.addresses) {
+                if (item.userId === userId) item.isDefault = false;
+              }
+            }
+            const item = {
+              id: `addr_${randomUUID()}`,
+              userId,
+              ...normalized,
+              isDefault,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            };
+            data.addresses.push(item);
+            return item;
+          });
+          return sendJson(response, 201, { data: created, requestId });
+        }
+
+        if (request.method === 'POST' && addressMatch) {
+          const body = await readJson(request);
+          const address = body.address === undefined ? undefined : requireString(body.address, 'address', { maxLength: 120 });
+          const contactName = body.contactName === undefined ? undefined : requireString(body.contactName, 'contactName', { maxLength: 40 });
+          const contactPhone = body.contactPhone === undefined ? undefined : requireString(body.contactPhone, 'contactPhone', { maxLength: 20 });
+          if (contactPhone !== undefined && !contactPhonePattern.test(contactPhone)) {
+            throw new ApiError(400, 'VALIDATION_ERROR', '请输入正确的手机号');
+          }
+          const campusName = body.campusName === undefined ? undefined : String(body.campusName || '').trim().slice(0, 40);
+          const updated = store.update((data) => {
+            const item = (data.addresses || []).find((row) => row.id === addressMatch[1] && row.userId === userId);
+            if (!item) throw new ApiError(404, 'ADDRESS_NOT_FOUND', 'Address not found');
+            if (address !== undefined) item.address = address;
+            if (contactName !== undefined) item.contactName = contactName;
+            if (contactPhone !== undefined) item.contactPhone = contactPhone;
+            if (campusName !== undefined) item.campusName = campusName;
+            if (body.isDefault === true) {
+              for (const row of data.addresses) {
+                if (row.userId === userId) row.isDefault = false;
+              }
+              item.isDefault = true;
+            }
+            item.updatedAt = new Date().toISOString();
+            return item;
+          });
+          return sendJson(response, 200, { data: updated, requestId });
+        }
+
+        if (request.method === 'DELETE' && addressMatch) {
+          const removed = store.update((data) => {
+            data.addresses ||= [];
+            const before = data.addresses.length;
+            data.addresses = data.addresses.filter((item) => !(item.id === addressMatch[1] && item.userId === userId));
+            if (data.addresses.length === before) throw new ApiError(404, 'ADDRESS_NOT_FOUND', 'Address not found');
+            const remaining = data.addresses.filter((item) => item.userId === userId);
+            if (remaining.length && !remaining.some((item) => item.isDefault)) {
+              const nextDefault = sortAddresses(remaining)[0];
+              nextDefault.isDefault = true;
+            }
+            return { id: addressMatch[1] };
+          });
+          return sendJson(response, 200, { data: removed, requestId });
+        }
+      }
+
       if (request.method === 'POST' && pathname === '/api/uploads') {
         requireUser(request);
         const body = await readJson(request);

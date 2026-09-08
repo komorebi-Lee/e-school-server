@@ -4010,3 +4010,57 @@ test('merchant score notifications require a persisted subscription', async () =
     && message.touser === 'openid_merchant_demo'
     && message.page === 'pages/merchant/index'));
 });
+
+test('saved delivery addresses are scoped to the logged-in user', async () => {
+  const userSession = await loginWeChat('address_user');
+  const otherSession = await loginWeChat('address_stranger');
+
+  const created = await api('/api/my/addresses', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({
+      contactName: '陈同学', contactPhone: '15527110006', address: '荟园 12 栋',
+      campusName: '华中农业大学狮山校区', isDefault: true
+    })
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.data.contactName, '陈同学');
+  assert.equal(created.body.data.isDefault, true);
+
+  const duplicate = await api('/api/my/addresses', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ contactName: '陈同学', contactPhone: '15527110006', address: '荟园 12 栋', isDefault: false })
+  });
+  assert.equal(duplicate.response.status, 201);
+  assert.equal(duplicate.body.data.isDefault, false);
+
+  const list = await api('/api/my/addresses', { headers: { authorization: `Bearer ${userSession.token}` } });
+  assert.equal(list.response.status, 200);
+  assert.equal(list.body.data.length, 2);
+  assert.equal(list.body.data[0].id, created.body.data.id);
+  assert.equal(list.body.data[1].isDefault, false);
+
+  const updated = await api(`/api/my/addresses/${duplicate.body.data.id}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ address: '桃园 8 栋', isDefault: true })
+  });
+  assert.equal(updated.response.status, 200);
+  assert.equal(updated.body.data.address, '桃园 8 栋');
+  assert.equal(updated.body.data.isDefault, true);
+
+  const refreshed = await api('/api/my/addresses', { headers: { authorization: `Bearer ${userSession.token}` } });
+  assert.equal(refreshed.body.data.find((item) => item.id === created.body.data.id).isDefault, false);
+
+  const foreign = await api(`/api/my/addresses/${duplicate.body.data.id}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${otherSession.token}` },
+    body: JSON.stringify({ address: '伪造地址' })
+  });
+  assert.equal(foreign.response.status, 404);
+
+  const removed = await api(`/api/my/addresses/${duplicate.body.data.id}`, {
+    method: 'DELETE', headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  assert.equal(removed.response.status, 200);
+
+  const missing = await api('/api/my/addresses', { headers: { authorization: `Bearer ${userSession.token}` } });
+  assert.equal(missing.body.data.length, 1);
+});

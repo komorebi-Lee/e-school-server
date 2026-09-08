@@ -163,6 +163,7 @@ function initialData() {
     productReviews: seedProductReviews,
     rechargePromos: seedRechargePromos,
     leads: [],
+    addresses: [],
     phoneCardOrders: [
       { id: 'tel_1001', customerName: '张同学', phone: '138****3201', planName: '校园畅享卡', amountInCents: 2900, status: 'PENDING_REALNAME', createdAt: '2026-08-28T08:20:00.000Z' },
       { id: 'tel_1002', customerName: '李同学', phone: '156****7812', planName: '校园畅联卡', amountInCents: 3900, status: 'ACTIVATED', createdAt: '2026-08-28T07:10:00.000Z' }
@@ -230,7 +231,7 @@ class JsonStore {
       if (!data || !Array.isArray(data.products)) throw new Error('invalid database');
       const defaults = initialData();
       let changed = false;
-      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'paymentReconciliations', 'financeTasks', 'notifications', 'slaAlerts', 'merchantScoreLogs', 'settingChangeLogs', 'adminUsers', 'adminSessions', 'adminLoginFailures']) {
+      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'addresses', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'paymentReconciliations', 'financeTasks', 'notifications', 'slaAlerts', 'merchantScoreLogs', 'settingChangeLogs', 'adminUsers', 'adminSessions', 'adminLoginFailures']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) {
