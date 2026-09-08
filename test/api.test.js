@@ -3857,6 +3857,7 @@ test('order notifications queue and dispatch to subscribed users', async () => {
   const queuedMessage = (store.read().subscribeMessages || [])
     .find((item) => item.templateId === 'order_status' && item.status === 'QUEUED');
   assert.ok(queuedMessage);
+  assert.equal(queuedMessage.page, `/pages/orders/orders?focusId=${encodeURIComponent(created.body.data.id)}`);
 
   const dispatch = await api('/api/admin/subscribe-messages/dispatch', {
     method: 'POST', headers: adminHeaders,
@@ -3866,7 +3867,7 @@ test('order notifications queue and dispatch to subscribed users', async () => {
   assert.ok(dispatch.body.data.sent >= 1);
   assert.ok(sentSubscribeMessages.some((message) => message.template_id === 'wx_test_order_status'
     && message.touser === 'openid_message_user'
-    && message.page === 'pages/orders/orders'));
+    && message.page === `/pages/orders/orders?focusId=${encodeURIComponent(created.body.data.id)}`));
 });
 
 test('failed subscribe messages can be retried after template configuration', async () => {
@@ -4011,6 +4012,7 @@ test('low stock reaches merchants exactly once and clears after restocking', asy
   assert.equal(reset.body.data.lowStockThreshold, 10);
 
   store.update((data) => {
+    data.subscribeMessages = (data.subscribeMessages || []).filter((item) => item.templateId !== 'stock_low_stock');
     for (const item of data.products || []) {
       if (item.id === 'prod_ebike_rent_001') {
         item.stock = 5;
@@ -4035,7 +4037,7 @@ test('low stock reaches merchants exactly once and clears after restocking', asy
   assert.ok(sentLowStock);
   assert.ok(sentSubscribeMessages.some((message) => message.template_id === 'wx_test_low_stock'
     && message.touser === 'openid_merchant_demo'
-    && message.page === 'pages/merchant/index'));
+    && message.page === `/pages/merchant/products?focusId=${encodeURIComponent(sentLowStock.metadata.productId)}&filter=LOW`));
 });
 
 test('merchant score notifications require a persisted subscription', async () => {

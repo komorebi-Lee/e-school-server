@@ -291,6 +291,8 @@ function evaluateLowStockAlert(data, product, now = new Date().toISOString()) {
         id: `sub_${randomUUID()}`,
         userId: merchant.userId,
         templateId: 'stock_low_stock',
+        page: `/pages/merchant/products?focusId=${encodeURIComponent(product.id)}&filter=LOW`,
+        metadata: { productId: product.id },
         status: 'QUEUED',
         title,
         content,
@@ -1365,7 +1367,8 @@ function createApp({
         createdAt: now
       });
       addAudit(data, source === 'PROVIDER_CALLBACK' ? '支付回调成功' : '支付成功', order.orderNo);
-      sendOrderNotification(data, paymentOrder.userId, 'ORDER_STATUS', '支付成功', `订单 ${order.orderNo} 支付成功，商家将尽快确认履约。`);
+      sendOrderNotification(data, paymentOrder.userId, 'ORDER_STATUS', '支付成功', `订单 ${order.orderNo} 支付成功，商家将尽快确认履约。`,
+        now, { orderId: order.id });
       notifyOrderMerchant(data, order, 'ORDER', '新订单已支付', `订单 ${order.orderNo} 已支付，请尽快确认履约。`);
       return { order, paymentOrder };
     });
@@ -1552,7 +1555,7 @@ function createApp({
     return notification;
   }
 
-  function sendScoreNotification(data, userId, templateKey, title, content, now = new Date().toISOString(), notificationType = 'SCORE') {
+  function sendScoreNotification(data, userId, templateKey, title, content, now = new Date().toISOString(), notificationType = 'SCORE', metadata = null) {
     const notification = addNotification(data, userId, notificationType, title, content);
     if (!notification) return null;
     if (!(data.serviceMessageSubscribers || []).includes(userId)) return { notification, subscribeMessage: null };
@@ -1561,6 +1564,7 @@ function createApp({
       id: `sub_${randomUUID()}`,
       userId,
       templateId: scoreNotificationTemplates[templateKey]?.id || templateKey,
+      page: subscribeMessagePage(notificationType, metadata, true) || undefined,
       status: 'QUEUED',
       title,
       content,
@@ -1572,7 +1576,15 @@ function createApp({
     return { notification, subscribeMessage: data.subscribeMessages[0] };
   }
 
-  function sendOrderNotification(data, userId, templateKey, title, content, now = new Date().toISOString()) {
+  function subscribeMessagePage(notificationType, metadata, isMerchantMessage) {
+    if (isMerchantMessage) return merchantNotificationLink({ type: notificationType, metadata });
+    if ((notificationType === 'ORDER' || notificationType === 'AFTER_SALE') && metadata?.orderId) {
+      return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.orderId))}`;
+    }
+    return '';
+  }
+
+  function sendOrderNotification(data, userId, templateKey, title, content, now = new Date().toISOString(), metadata = null) {
     const notification = addNotification(data, userId, templateKey === 'AFTER_SALE' ? 'AFTER_SALE' : 'ORDER', title, content);
     if (!notification) return null;
     if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
@@ -1580,6 +1592,7 @@ function createApp({
       id: `sub_${randomUUID()}`,
       userId,
       templateId: orderNotificationTemplates[templateKey]?.id || templateKey,
+      page: subscribeMessagePage(templateKey === 'AFTER_SALE' ? 'AFTER_SALE' : 'ORDER', metadata, false) || undefined,
       status: 'QUEUED',
       title,
       content,
@@ -2687,7 +2700,8 @@ function createApp({
       ? content
       : `${alert.ruleLabel}：${alert.businessNo} ${overdueText}，平台已收到提醒。`;
     if (isMerchantOwner && merchant?.userId) {
-      sendScoreNotification(data, merchant.userId, 'SLA_WARNING', title, message, alert.updatedAt || alert.createdAt, 'SLA');
+      sendScoreNotification(data, merchant.userId, 'SLA_WARNING', title, message, alert.updatedAt || alert.createdAt, 'SLA',
+        alert.businessType === 'ORDER' ? { orderId: alert.businessId } : {});
       return;
     }
     if (alert.ownerRole === 'PLATFORM' && !merchant?.userId) {
@@ -4746,8 +4760,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         refreshScoresNow();
         refreshScoreSnapshotsNow();
         const data = store.read();
-            const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
-            if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
+        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        data.products
+          .filter((item) => item.merchantId === merchant.id)
+          .forEach((item) => evaluateLowStockAlert(data, item, new Date().toISOString()));
+        store.write(data);
         const products = data.products.filter((item) => item.merchantId === merchant.id);
         const stockThreshold = lowStockThreshold(data);
         const productSalesCounts = calculateProductSalesCounts(data);
@@ -7508,7 +7526,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           order.updatedAt = now;
           freezeOrderSettlements(data, order, now, `${record.typeLabel}：${reason}`);
           notifyOrderMerchant(data, order, 'AFTER_SALE', '收到新的售后申请', `订单 ${order.orderNo}：${record.typeLabel}，${reason}`);
-          sendOrderNotification(data, userId, 'AFTER_SALE', '售后已受理', `${order.orderNo}：已受理，预计 ${settings.afterSaleResponseHours} 小时内响应。`);
+          sendOrderNotification(data, userId, 'AFTER_SALE', '售后已受理', `${order.orderNo}：已受理，预计 ${settings.afterSaleResponseHours} 小时内响应。`,
+            new Date().toISOString(), { orderId: order.id });
           addAudit(data, '用户提交售后申请', order.orderNo);
           return record;
         });
