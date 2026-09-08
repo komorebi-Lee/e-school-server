@@ -260,6 +260,10 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 平台在「商家结算」页直接打款（`/api/admin/merchants/:id/settle`）也会补记一条 `initiatedBy: "PLATFORM"` 的已结算提现单，保证台账口径一致。
 - 订单进入售后或退款时，关联的待审核提现单会自动置为 `CANCELLED`，未受影响的金额退回 `PENDING_SETTLE`；商家与平台都会收到通知。
 
+### 用户端售后进度
+
+`GET /api/my/orders` 会在每笔电瓶车订单中返回 `afterSales`，字段包含售后类型、原因、图片、状态、响应时限、处理时限和商家处理结论，并额外提供 `afterSalesSummary.activeCount`。订单卡可直接展示售后进度和处理结果，避免用户只看到“售后中”却不知道发生了什么。
+
 ### 运营巡检与超时预警
 
 服务启动后会常驻一个巡检定时任务，把「谁该在什么时候处理完」变成可查、可提醒、可复盘的预警工单，不再依赖有人打开管理端才发现逾期。

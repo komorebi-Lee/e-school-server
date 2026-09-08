@@ -2002,6 +2002,68 @@ test('after-sale evidence and merchant resolution note are persisted', async () 
   assert.ok(notifications.body.data.some((item) => item.type === 'AFTER_SALE' && item.title === '售后处理完成' && item.content === '已上门检修并完成试车'));
 });
 
+test('after-sale progress is returned with order history', async () => {
+  const session = await loginWeChat('after_sale_progress_user');
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(order.response.status, 201);
+  const paid = await confirmPayment(order.body.paymentOrder.id, session.token);
+  assert.equal(paid.response.status, 200);
+
+  const before = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
+  const beforeOrder = before.body.data.ebikeOrders.find((item) => item.id === order.body.data.id);
+  assert.equal(beforeOrder.afterSales.length, 0);
+  assert.equal(before.body.data.afterSalesSummary.activeCount, 0);
+
+  const created = await api('/api/after-sales', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ orderId: order.body.data.id, type: 'REPAIR', reason: '刹车有异响需要检修' })
+  });
+  assert.equal(created.response.status, 201);
+
+  const active = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
+  const activeOrder = active.body.data.ebikeOrders.find((item) => item.id === order.body.data.id);
+  assert.equal(activeOrder.status, 'AFTER_SALE');
+  assert.equal(activeOrder.afterSales.length, 1);
+  assert.equal(activeOrder.afterSales[0].typeLabel, '维修');
+  assert.equal(activeOrder.afterSales[0].statusLabel, '待处理');
+  assert.equal(activeOrder.afterSales[0].responseDueAt, created.body.data.responseDueAt);
+  assert.equal(active.body.data.afterSalesSummary.activeCount, 1);
+
+  const reviewing = await api(`/api/merchant/after-sales/${created.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'REVIEWING' })
+  });
+  assert.equal(reviewing.response.status, 200);
+
+  const progressing = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
+  const progressingOrder = progressing.body.data.ebikeOrders.find((item) => item.id === order.body.data.id);
+  assert.equal(progressingOrder.afterSales[0].statusLabel, '处理中');
+
+  const closed = await api(`/api/merchant/after-sales/${created.body.data.id}/status`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ status: 'CLOSED', resolutionNote: '已调整刹车并完成试车' })
+  });
+  assert.equal(closed.response.status, 200);
+
+  const completed = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
+  const completedOrder = completed.body.data.ebikeOrders.find((item) => item.id === order.body.data.id);
+  assert.equal(completedOrder.status, 'COMPLETED');
+  assert.equal(completedOrder.afterSales[0].statusLabel, '已完成');
+  assert.equal(completedOrder.afterSales[0].resolutionNote, '已调整刹车并完成试车');
+  assert.equal(completed.body.data.afterSalesSummary.activeCount, 0);
+});
+
 test('external plate applications require paid service fee and support refunds', async () => {
   const session = await loginWeChat('external_plate_user');
   const created = await api('/api/plate-applications', {
