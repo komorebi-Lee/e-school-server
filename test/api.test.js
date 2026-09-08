@@ -885,6 +885,84 @@ test('merchant qualification upload validates image content and size', async () 
   assert.equal(invalidImage.response.status, 400);
 });
 
+test('rejected merchant can resubmit evidence for platform review', async () => {
+  const session = await loginWeChat('merchant_resubmit');
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(2048, 2)]);
+  const upload = await api('/api/uploads', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ dataBase64: png.toString('base64'), mimeType: 'image/png' })
+  });
+  assert.equal(upload.response.status, 201);
+
+  const applied = await api('/api/merchants', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      merchantType: 'INDIVIDUAL', name: '复审测试商铺', ownerName: '复审店主',
+      phone: '15527110010', licenseNo: '92420111MAKMT4534R', category: 'LIFE_SERVICE',
+      serviceArea: '狮山校区', description: '资质驳回后复审闭环测试',
+      licenseUrl: '/api/uploads/stale-license.jpg',
+      settlementAccountName: '复审店主', settlementBank: '校园演示银行', settlementAccount: '6222000000001010',
+      agreeAgreement: true, agreePrivacy: true
+    })
+  });
+  assert.equal(applied.response.status, 201);
+  const merchantId = applied.body.data.id;
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(adminLogin.response.status, 200);
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  const rejected = await api(`/api/admin/merchants/${merchantId}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'REJECTED', reviewNote: '营业执照图片不清晰，请补充新执照' })
+  });
+  assert.equal(rejected.response.status, 200);
+
+  const missingEvidence = await api(`/api/merchants/${merchantId}/resubmit`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ settlementAccountName: '复审店主' })
+  });
+  assert.equal(missingEvidence.response.status, 400);
+
+  const resubmitted = await api(`/api/merchants/${merchantId}/resubmit`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      licenseNo: '92420111MAKMT4534R',
+      licenseUrl: upload.body.data.url,
+      settlementAccountName: '复审店主',
+      settlementBank: '校园演示银行',
+      settlementAccount: '6222000000001010',
+      note: '已上传新营业执照'
+    })
+  });
+  assert.equal(resubmitted.response.status, 200);
+  assert.equal(resubmitted.body.data.status, 'REVIEWING');
+  assert.equal(resubmitted.body.data.licenseUrl, upload.body.data.url);
+  assert.equal(resubmitted.body.data.reviewNote, '商家已补充资质，等待平台复审');
+  assert.equal(resubmitted.body.data.timeline.at(-1).status, 'REVIEWING');
+  assert.ok(resubmitted.body.data.timeline.at(-1).note.includes('复审'));
+
+  const repeatedResubmit = await api(`/api/merchants/${merchantId}/resubmit`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ licenseNo: '92420111MAKMT4534R', licenseUrl: upload.body.data.url })
+  });
+  assert.equal(repeatedResubmit.response.status, 409);
+  assert.equal(repeatedResubmit.body.error.code, 'MERCHANT_NOT_REJECTED');
+
+  const approved = await api(`/api/admin/merchants/${merchantId}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'APPROVED', reviewNote: '新执照已复核' })
+  });
+  assert.equal(approved.response.status, 200);
+  const owned = await api('/api/merchants', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.equal(owned.response.status, 200);
+  assert.equal(owned.body.data[0].status, 'APPROVED');
+  assert.equal(owned.body.data[0].licenseUrl, upload.body.data.url);
+  assert.equal(owned.body.data[0].timeline.at(-1).status, 'APPROVED');
+});
+
 test('phone card service record can apply for broadband once', async () => {
   const session = await loginWeChat('linked_user');
   const created = await api('/api/phone-card-orders', {

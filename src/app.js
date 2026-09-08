@@ -3709,6 +3709,75 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
+      // 资质被驳回的商家必须能补充平台可核验的材料并进入复审，否则被驳回就变成死单。
+      const merchantResubmitMatch = pathname.match(/^\/api\/merchants\/([^/]+)\/resubmit$/);
+      if (request.method === 'POST' && merchantResubmitMatch) {
+        const identity = requireUser(request);
+        const body = await readJson(request);
+        const licenseNo = typeof body.licenseNo === 'string' && body.licenseNo.trim()
+          ? requireString(body.licenseNo, 'licenseNo', { maxLength: 30 })
+          : '';
+        if (licenseNo && !/^[0-9A-Z]{15,18}$/.test(licenseNo)) {
+          throw new ApiError(400, 'VALIDATION_ERROR', 'licenseNo 格式不正确');
+        }
+        const licenseUrl = typeof body.licenseUrl === 'string' && body.licenseUrl.trim()
+          ? requireString(body.licenseUrl, 'licenseUrl', { maxLength: 200 })
+          : '';
+        if (licenseUrl && !licenseUrl.startsWith('/api/uploads/')) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '资质图片必须来自平台上传目录');
+        }
+        const note = typeof body.note === 'string' ? body.note.trim().slice(0, 300) : '';
+        const merchant = store.update((data) => {
+          const item = (data.merchants || []).find((row) => row.id === merchantResubmitMatch[1] && row.userId === identity.userId);
+          if (!item) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          if (item.status !== 'REJECTED') {
+            throw new ApiError(409, 'MERCHANT_NOT_REJECTED', '仅被驳回的商家可以补充资料复审');
+          }
+          if (!licenseUrl) throw new ApiError(400, 'VALIDATION_ERROR', '请上传新的资质图片');
+          if (item.merchantType === 'INDIVIDUAL') {
+            const currentLicenseNo = licenseNo || item.licenseNo || '';
+            if (!/^[0-9A-Z]{15,18}$/.test(currentLicenseNo)) {
+              throw new ApiError(400, 'VALIDATION_ERROR', 'licenseNo 格式不正确');
+            }
+            item.licenseNo = currentLicenseNo;
+          } else if (licenseNo) {
+            item.licenseNo = licenseNo;
+          }
+          item.licenseUrl = licenseUrl;
+          for (const [field, key] of [
+            ['settlementAccountName', 'settlementAccountName'],
+            ['settlementBank', 'settlementBank'],
+            ['settlementAccount', 'settlementAccount']
+          ]) {
+            if (body[field] !== undefined) {
+              const value = requireString(body[field], field, { maxLength: 80 });
+              item[key] = field === 'settlementAccount' ? value.replace(/\s+/g, '') : value;
+            }
+          }
+          if (item.settlementAccount && !/^\d{9,32}$/.test(item.settlementAccount)) {
+            throw new ApiError(400, 'VALIDATION_ERROR', '收款账号格式不正确');
+          }
+          if (!item.settlementAccountName || !item.settlementBank || !item.settlementAccount) {
+            throw new ApiError(400, 'VALIDATION_ERROR', '收款账户资料不完整');
+          }
+          const now = new Date().toISOString();
+          item.status = 'REVIEWING';
+          item.reviewNote = '商家已补充资质，等待平台复审';
+          item.resubmitCount = Number(item.resubmitCount || 0) + 1;
+          item.resubmittedAt = now;
+          item.timeline = item.timeline || [];
+          item.timeline.push({
+            status: 'REVIEWING',
+            note: note ? `商家已补充资质并申请复审：${note}` : '商家已补充资质并申请复审',
+            createdAt: now
+          });
+          item.updatedAt = now;
+          addAudit(data, '商家补充资质申请复审', item.name);
+          return item;
+        });
+        return sendJson(response, 200, { data: merchantPublic(merchant), requestId });
+      }
+
       if (request.method === 'POST' && pathname === '/api/merchant/login') {
         const identity = requireUser(request);
         const body = await readJson(request);

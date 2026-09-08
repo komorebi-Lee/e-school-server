@@ -94,6 +94,8 @@ MYSQL_HOST、MYSQL_PORT、MYSQL_DATABASE、MYSQL_USERNAME、MYSQL_PASSWORD
 
 管理端还支持商品新增与编辑、业务筛选、详情侧栏、CSV 导出、操作日志和运营设置。运营设置会保存最近 50 条配置变更记录，包含操作者、字段前后值和配置快照；页面展示最近 10 条，JSON 与 MySQL 持久化均可用。演示账号与内存会话仅适用于本地验证；正式部署时必须替换为数据库用户、密码哈希、RBAC 权限和安全会话。
 
+资质被驳回的商家可调用 `POST /api/merchants/:id/resubmit` 补充平台上传的新资质图片、执照编号和收款账户，随后进入 `REVIEWING` 复审队列；平台再次通过审核后才会开通商家工作台。该流程避免“驳回后只能新建申请、历史驳回原因丢失”。
+
 ```powershell
 $env:PORT=3100
 $env:DB_FILE='C:\temp\campus-go-db.json'
