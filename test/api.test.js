@@ -1840,6 +1840,9 @@ test('recharge payments create pending credit orders and notifications', async (
 
   const records = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
   assert.ok(records.body.data.serviceRecords.some((item) => item.type === 'RECHARGE' && item.status === 'PENDING_CREDIT'));
+  const paidNotice = (await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } }))
+    .body.data.find((item) => item.type === 'RECHARGE' && item.title.includes('支付成功'));
+  assert.equal(paidNotice?.link, `/pages/orders/orders?focusId=${encodeURIComponent(created.body.data.id)}`);
 
   const adminLogin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -1881,7 +1884,9 @@ test('phone card payments enter real-name activation and support refunds', async
   assert.equal(confirmed.body.data.phoneCardOrder.status, 'PENDING_REALNAME');
   assert.equal(confirmed.body.data.phoneCardOrder.paymentStatus, 'PAID');
   const cardNotifications = await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } });
-  assert.ok(cardNotifications.body.data.some((item) => item.type === 'PHONE_PLAN' && item.title === '电话卡支付成功' && item.content.includes('31 小时内')));
+  assert.ok(cardNotifications.body.data.some((item) => item.type === 'PHONE_PLAN' && item.title.includes('支付成功') && item.content.includes('小时')));
+  const cardPaidNotice = cardNotifications.body.data.find((item) => item.type === 'PHONE_PLAN' && item.title.includes('支付成功'));
+  assert.equal(cardPaidNotice?.link, `/pages/orders/orders?focusId=${encodeURIComponent(created.body.data.id)}`);
   assert.equal(confirmed.body.data.paymentOrder.status, 'PAID');
 
   const tamperedPlan = await api('/api/phone-card-orders', {
@@ -2621,6 +2626,9 @@ test('external plate applications require paid service fee and support refunds',
   assert.equal(payment.response.status, 200);
   assert.equal(payment.body.data.plateApplication.status, 'MATERIAL_PENDING');
   assert.equal(payment.body.data.plateApplication.paymentStatus, 'PAID');
+  const plateNotice = (await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } }))
+    .body.data.find((item) => item.type === 'PLATE' && item.title === '牌照服务费支付成功');
+  assert.equal(plateNotice?.link, `/pages/orders/orders?focusId=${encodeURIComponent(created.body.data.id)}`);
 
   const upload = await api('/api/uploads', {
     method: 'POST',

@@ -40,7 +40,7 @@ function isTlsInterceptionError(error) {
   return tlsCodes.has(error.code) || /self-signed/i.test(error.message);
 }
 
-  function publicSettings(settings = {}) {
+function publicSettings(settings = {}) {
   return {
     brandName: settings.brandName || '狮山智生活',
     schoolName: settings.schoolName || '华中农业大学',
@@ -749,6 +749,17 @@ function publicStorefrontReviews(data, merchantId) {
   };
 }
 
+function userNotificationLink(notification) {
+  const metadata = notification?.metadata || {};
+  if (metadata.focusId) {
+    return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.focusId))}`;
+  }
+  if (metadata.productId) {
+    return `/pages/detail/detail?id=${encodeURIComponent(String(metadata.productId))}`;
+  }
+  return '';
+}
+
 function rechargePromoAvailability(promo, now = new Date().toISOString()) {
   const current = new Date(now).getTime();
   const startsAt = promo.startsAt ? new Date(promo.startsAt).getTime() : null;
@@ -1173,13 +1184,13 @@ function createApp({
           : '管理端退款';
       addAudit(data, refundAuditAction, paymentOrder.paymentNo);
       if (rechargeOrder) {
-        addNotification(data, paymentOrder.userId, 'RECHARGE', '话费权益已退款', `订单 ${paymentOrder.paymentNo} 已完成退款。`);
+        addNotification(data, paymentOrder.userId, 'RECHARGE', '话费权益已退款', `订单 ${paymentOrder.paymentNo} 已完成退款。`, { focusId: rechargeOrder.id });
       } else if (phoneCardOrder) {
-        addNotification(data, paymentOrder.userId, 'PHONE_PLAN', '电话卡订单已退款', `订单 ${paymentOrder.paymentNo} 已完成退款。`);
+        addNotification(data, paymentOrder.userId, 'PHONE_PLAN', '电话卡订单已退款', `订单 ${paymentOrder.paymentNo} 已完成退款。`, { focusId: phoneCardOrder.id });
       } else if (plateApplication) {
-        addNotification(data, paymentOrder.userId, 'PLATE', '牌照服务费已退款', `申请 ${paymentOrder.paymentNo} 已完成退款，如需重新办理可再次提交。`);
+        addNotification(data, paymentOrder.userId, 'PLATE', '牌照服务费已退款', `申请 ${paymentOrder.paymentNo} 已完成退款，如需重新办理可再次提交。`, { focusId: plateApplication.id });
       } else {
-        addNotification(data, paymentOrder.userId, 'ORDER', '订单已退款', `订单 ${paymentOrder.orderNo} 已完成退款。`);
+        addNotification(data, paymentOrder.userId, 'ORDER', '订单已退款', `订单 ${paymentOrder.orderNo} 已完成退款。`, { focusId: order?.id || paymentOrder.businessId });
       }
       return { order, rechargeOrder, phoneCardOrder, plateApplication, paymentOrder };
     });
@@ -1293,7 +1304,7 @@ function createApp({
           businessType: 'RECHARGE'
         }, now);
         addAudit(data, source === 'PROVIDER_CALLBACK' ? '话费权益支付回调成功' : '话费权益支付成功', rechargeOrder.id);
-        addNotification(data, paymentOrder.userId, 'RECHARGE', '话费权益支付成功', `充 ${Math.round(rechargeOrder.paidInCents / 100)} 送 ${Math.round((rechargeOrder.receiveInCents - rechargeOrder.paidInCents) / 100)} 已支付，等待运营确认到账。`);
+        addNotification(data, paymentOrder.userId, 'RECHARGE', '话费权益支付成功', `充 ${Math.round(rechargeOrder.paidInCents / 100)} 送 ${Math.round((rechargeOrder.receiveInCents - rechargeOrder.paidInCents) / 100)} 已支付，等待运营确认到账。`, { focusId: rechargeOrder.id });
         return { rechargeOrder, paymentOrder };
       }
 
@@ -1308,7 +1319,7 @@ function createApp({
           businessType: 'PHONE_PLAN'
         }, now);
         addAudit(data, source === 'PROVIDER_CALLBACK' ? '电话卡支付回调成功' : '电话卡支付成功', phoneCardOrder.id);
-        addNotification(data, paymentOrder.userId, 'PHONE_PLAN', '电话卡支付成功', `${phoneCardOrder.planName} 已支付，运营商将在 ${activationHours} 小时内联系实名激活。`);
+        addNotification(data, paymentOrder.userId, 'PHONE_PLAN', '电话卡支付成功', `${phoneCardOrder.planName} 已支付，运营商将在 ${activationHours} 小时内联系实名激活。`, { focusId: phoneCardOrder.id });
         return { phoneCardOrder, paymentOrder };
       }
 
@@ -1322,7 +1333,7 @@ function createApp({
           businessType: 'PLATE'
         }, now);
         addAudit(data, source === 'PROVIDER_CALLBACK' ? '自带车上牌服务费支付回调成功' : '自带车上牌服务费支付成功', plateApplication.id);
-        addNotification(data, paymentOrder.userId, 'PLATE', '牌照服务费支付成功', `${plateApplication.vehicleModel} 已支付服务费，请按提示补充车辆和身份材料。`);
+        addNotification(data, paymentOrder.userId, 'PLATE', '牌照服务费支付成功', `${plateApplication.vehicleModel} 已支付服务费，请按提示补充车辆和身份材料。`, { focusId: plateApplication.id });
         return { plateApplication, paymentOrder };
       }
 
@@ -1350,7 +1361,7 @@ function createApp({
         };
         (data.plateApplications = data.plateApplications || []).unshift(plateApplication);
         addAudit(data, source === 'PROVIDER_CALLBACK' ? '购车支付回调后自动创建免费牌照辅助' : '购车支付后自动创建免费牌照辅助', order.orderNo);
-        addNotification(data, paymentOrder.userId, 'PLATE', '免费牌照辅助已发起', '平台购车后可享受免费校园牌照辅助。');
+        addNotification(data, paymentOrder.userId, 'PLATE', '免费牌照辅助已发起', '平台购车后可享受免费校园牌照辅助。', { focusId: plateApplication.id });
       }
       order.collaboration ||= createCollaboration(order, order.items[0]?.merchantId || '');
       createSettlements(data, order, now);
@@ -1585,7 +1596,7 @@ function createApp({
   }
 
   function sendOrderNotification(data, userId, templateKey, title, content, now = new Date().toISOString(), metadata = null) {
-    const notification = addNotification(data, userId, templateKey === 'AFTER_SALE' ? 'AFTER_SALE' : 'ORDER', title, content);
+    const notification = addNotification(data, userId, templateKey === 'AFTER_SALE' ? 'AFTER_SALE' : 'ORDER', title, content, metadata);
     if (!notification) return null;
     if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
     data.subscribeMessages.unshift({
@@ -1645,7 +1656,8 @@ function createApp({
         'RESTOCK_NOTICE',
         '你登记的商品已到货',
         `「${product.name}」已补货上架${merchantName ? `，来自 ${merchantName}` : ''}，先到先得。`,
-        now
+        now,
+        { productId: product.id }
       );
       item.status = 'NOTIFIED';
       item.notifiedAt = now;
@@ -2176,7 +2188,7 @@ function createApp({
       }, now);
     }
     addAudit(data, '\u552e\u540e\u9000\u6b3e\u5b8c\u6210', order.orderNo);
-    addNotification(data, order.userId, 'ORDER', '\u8ba2\u5355\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${order.orderNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
+    addNotification(data, order.userId, 'ORDER', '\u8ba2\u5355\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${order.orderNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`, { focusId: order.id });
     return paymentOrder;
   }
 
@@ -2209,7 +2221,7 @@ function createApp({
         paymentOrder.updatedAt = now;
       }
       addAudit(data, '待支付订单超时自动关闭', order.orderNo);
-      addNotification(data, order.userId, 'ORDER', '订单已超时关闭', `订单 ${order.orderNo} 超过 ${timeoutMinutes} 分钟未支付，已自动关闭并释放库存。`);
+      addNotification(data, order.userId, 'ORDER', '订单已超时关闭', `订单 ${order.orderNo} 超过 ${timeoutMinutes} 分钟未支付，已自动关闭并释放库存。`, { focusId: order.id });
       expired.push(order.orderNo);
     }
 
@@ -4443,10 +4455,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               addAudit(data, role === 'USER' ? '用户申请平台协助服务单' : '平台介入服务单', item.id);
             } else if (role === 'PLATFORM' && action === 'RESOLVE') {
               item.collaboration.intervention = { status: 'RESOLVED', note, updatedAt: new Date().toISOString() };
-              sendOrderNotification(data, item.userId, 'ORDER_SERVICE', '平台已处理服务单', note);
+          sendOrderNotification(data, item.userId, 'ORDER_SERVICE', '平台已处理服务单', note, item.updatedAt, { focusId: item.id });
               addAudit(data, '平台处理服务单', item.id);
             } else if (role === 'PLATFORM') {
-              sendOrderNotification(data, item.userId, 'ORDER_SERVICE', '平台已回复服务单', note);
+          sendOrderNotification(data, item.userId, 'ORDER_SERVICE', '平台已回复服务单', note, item.updatedAt, { focusId: item.id });
               addAudit(data, '平台回复服务单', item.id);
             } else {
               addAudit(data, '用户提交服务单咨询', item.id);
@@ -4477,10 +4489,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (role === 'USER' && item.collaboration.merchantId) {
             notifyOrderMerchant(data, item, 'ORDER', `订单 ${item.orderNo} 有新用户留言`, note);
           } else if (role === 'MERCHANT' && item.userId) {
-            sendOrderNotification(data, item.userId, 'ORDER_SERVICE', `订单 ${item.orderNo} 有新商家留言`, note);
+          sendOrderNotification(data, item.userId, 'ORDER_SERVICE', `订单 ${item.orderNo} 有新商家留言`, note, item.updatedAt, { focusId: item.id });
           } else if (role === 'PLATFORM') {
             notifyOrderMerchant(data, item, 'ORDER', `平台已介入订单 ${item.orderNo}`, note);
-            sendOrderNotification(data, item.userId, 'ORDER_SERVICE', `平台已处理订单 ${item.orderNo}`, note);
+          sendOrderNotification(data, item.userId, 'ORDER_SERVICE', `平台已处理订单 ${item.orderNo}`, note, item.updatedAt, { focusId: item.id });
           }
           if (role === 'PLATFORM' && action === 'INTERVENE') item.collaboration.intervention = { status:'REQUESTED', note, updatedAt:new Date().toISOString() };
           if (role === 'PLATFORM' && action === 'RESOLVE') item.collaboration.intervention = { status:'RESOLVED', note, updatedAt:new Date().toISOString() };
@@ -5301,7 +5313,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           addAudit(data, '商家更新订单状态', item.orderNo);
           if (status === 'COMPLETED') {
             const released = activateOrderSettlements(data, item, item.updatedAt);
-            addNotification(data, item.userId, 'ORDER', '订单已完成', `订单 ${item.orderNo} 已通过交付码核验并完成。`);
+            addNotification(data, item.userId, 'ORDER', '订单已完成', `订单 ${item.orderNo} 已通过交付码核验并完成。`, { focusId: item.id });
             if (released.length) {
               const days = settlementPeriodDays(data);
               notifyMerchant(data, merchantSession.merchantId, 'SETTLEMENT', '分账已进入账期', `订单 ${item.orderNo} 交付核验通过，${days > 0 ? `${days} 天账期后可结算` : '可立即结算'}。`);
@@ -5338,9 +5350,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             unfreezeOrderSettlements(data, order, item.updatedAt);
             activateOrderSettlements(data, order, item.updatedAt);
             appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', `售后处理完成：${resolutionNote}`);
-            addNotification(data, order.userId, 'AFTER_SALE', '售后处理完成', resolutionNote);
+            addNotification(data, order.userId, 'AFTER_SALE', '售后处理完成', resolutionNote, { focusId: order.id });
           }
-          if (status === 'REVIEWING') addNotification(data, order.userId, 'AFTER_SALE', '售后正在处理', '商家已开始处理您的售后申请。');
+          if (status === 'REVIEWING') addNotification(data, order.userId, 'AFTER_SALE', '售后正在处理', '商家已开始处理您的售后申请。', { focusId: order.id });
           addAudit(data, '商家更新售后状态', item.id);
           return item;
         });
@@ -5742,13 +5754,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }, now);
           addAudit(data, '\u7ba1\u7406\u7aef\u9000\u6b3e', paymentOrder.paymentNo);
           if (rechargeOrder) {
-            addNotification(data, paymentOrder.userId, 'RECHARGE', '\u8bdd\u8d39\u6743\u76ca\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${paymentOrder.paymentNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
+            addNotification(data, paymentOrder.userId, 'RECHARGE', '\u8bdd\u8d39\u6743\u76ca\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${paymentOrder.paymentNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`, { focusId: rechargeOrder.id });
           } else if (phoneCardOrder) {
-            addNotification(data, paymentOrder.userId, 'PHONE_PLAN', '电话卡订单已退款', `\u8ba2\u5355 ${paymentOrder.paymentNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
+            addNotification(data, paymentOrder.userId, 'PHONE_PLAN', '电话卡订单已退款', `\u8ba2\u5355 ${paymentOrder.paymentNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`, { focusId: phoneCardOrder.id });
           } else if (plateApplication) {
-            addNotification(data, paymentOrder.userId, 'PLATE', '牌照服务费已退款', `申请 ${paymentOrder.paymentNo} 已完成退款，如需重新办理可再次提交。`);
+            addNotification(data, paymentOrder.userId, 'PLATE', '牌照服务费已退款', `申请 ${paymentOrder.paymentNo} 已完成退款，如需重新办理可再次提交。`, { focusId: plateApplication.id });
           } else {
-            addNotification(data, paymentOrder.userId, 'ORDER', '\u8ba2\u5355\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${paymentOrder.orderNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`);
+            addNotification(data, paymentOrder.userId, 'ORDER', '\u8ba2\u5355\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${paymentOrder.orderNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`, { focusId: order?.id || paymentOrder.businessId });
           }
           return { order, rechargeOrder, phoneCardOrder, plateApplication, paymentOrder };
         });
@@ -6051,7 +6063,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/my/notifications') {
         const { userId } = requireUser(request);
         const data = store.read();
-        const items = (data.notifications || []).filter((item) => item.userId === userId);
+        const items = (data.notifications || [])
+          .filter((item) => item.userId === userId)
+          .map((item) => ({ ...item, link: userNotificationLink(item) }));
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
@@ -6519,14 +6533,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             ? null
             : notificationTemplates[adminStatusMatch[1]]?.[status];
           if (adminStatusMatch[1] === 'after-sales' && status === 'CLOSED' && item.userId) {
-            sendOrderNotification(data, item.userId, 'AFTER_SALE', '售后处理完成', resolutionNote);
+            sendOrderNotification(data, item.userId, 'AFTER_SALE', '售后处理完成', resolutionNote, item.updatedAt, { focusId: item.orderId || item.id });
           }
           if (template && item.userId) {
             const detail = item.planName || item.vehicleModel || item.reason || item.orderNo || item.id;
             const message = adminStatusMatch[1] === 'after-sales' && status === 'SUBMITTED'
               ? `您的售后请求已受理，预计 ${publicSettings(data.adminSettings).afterSaleResponseHours} 小时内响应。`
               : template[2];
-            sendOrderNotification(data, item.userId, adminStatusMatch[1] === 'after-sales' ? 'AFTER_SALE' : 'ORDER_STATUS', template[1], `${detail}：${message}`);
+            sendOrderNotification(data, item.userId, adminStatusMatch[1] === 'after-sales' ? 'AFTER_SALE' : 'ORDER_STATUS', template[1], `${detail}：${message}`, item.updatedAt, { focusId: item.id });
           }
           return item;
         });
@@ -7385,7 +7399,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               rechargeOrder.paymentStatus = 'CANCELLED';
               rechargeOrder.updatedAt = now;
               addAudit(data, '\u8bdd\u8d39\u6743\u76ca\u5f85\u652f\u4ed8\u5df2\u53d6\u6d88', rechargeOrder.id);
-              addNotification(data, userId, 'RECHARGE', '\u8bdd\u8d39\u6743\u76ca\u5df2\u53d6\u6d88', '\u60a8\u7684\u5f85\u652f\u4ed8\u8bdd\u8d39\u6743\u76ca\u8ba2\u5355\u5df2\u53d6\u6d88\u3002');
+              addNotification(data, userId, 'RECHARGE', '\u8bdd\u8d39\u6743\u76ca\u5df2\u53d6\u6d88', '\u60a8\u7684\u5f85\u652f\u4ed8\u8bdd\u8d39\u6743\u76ca\u8ba2\u5355\u5df2\u53d6\u6d88\u3002', { focusId: rechargeOrder.id });
               return { rechargeOrder, paymentOrder };
             }
             if (phoneCardOrder) {
@@ -7393,7 +7407,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               phoneCardOrder.paymentStatus = 'CANCELLED';
               phoneCardOrder.updatedAt = now;
               addAudit(data, '电话卡待支付已取消', phoneCardOrder.id);
-            addNotification(data, userId, 'PHONE_PLAN', '电话卡订单已取消', '您的待支付电话卡订单已取消，如需办理可重新下单。');
+            addNotification(data, userId, 'PHONE_PLAN', '电话卡订单已取消', '您的待支付电话卡订单已取消，如需办理可重新下单。', { focusId: phoneCardOrder.id });
             return { phoneCardOrder, paymentOrder };
           }
           if (plateApplication) {
@@ -7401,7 +7415,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             plateApplication.paymentStatus = 'CANCELLED';
             plateApplication.updatedAt = now;
             addAudit(data, '自带车上牌待支付已取消', plateApplication.id);
-            addNotification(data, userId, 'PLATE', '牌照服务申请已取消', '您的待支付上牌辅助申请已取消，如需办理可重新提交。');
+            addNotification(data, userId, 'PLATE', '牌照服务申请已取消', '您的待支付上牌辅助申请已取消，如需办理可重新提交。', { focusId: plateApplication.id });
             return { plateApplication, paymentOrder };
           }
             order.status = 'CANCELLED';
@@ -7409,7 +7423,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             order.updatedAt = now;
             releaseOrderStock(data, order);
             addAudit(data, '\u7528\u6237\u53d6\u6d88\u5f85\u652f\u4ed8', order.orderNo);
-            addNotification(data, userId, 'ORDER', '\u8ba2\u5355\u5df2\u53d6\u6d88', `\u8ba2\u5355 ${order.orderNo} \u5df2\u53d6\u6d88\uff0c\u82e5\u9700\u8981\u53ef\u91cd\u65b0\u4e0b\u5355\u3002`);
+            addNotification(data, userId, 'ORDER', '\u8ba2\u5355\u5df2\u53d6\u6d88', `\u8ba2\u5355 ${order.orderNo} \u5df2\u53d6\u6d88\uff0c\u82e5\u9700\u8981\u53ef\u91cd\u65b0\u4e0b\u5355\u3002`, { focusId: order.id });
             return { order, paymentOrder };
           }
           throw new ApiError(403, 'FORBIDDEN', '\u4ec5\u7ba1\u7406\u7aef\u53ef\u9000\u6b3e');
@@ -7442,7 +7456,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               const nextSchedule = `${order.fulfillment.date || '尽快'} ${order.fulfillment.timeSlot || ''}`.trim();
               if (previousSchedule !== nextSchedule) {
                 appendCollaborationEvent(order, 'USER', 'RESCHEDULE', `用户已改约：${previousSchedule || '未安排'} → ${nextSchedule}`);
-                addNotification(data, userId, 'ORDER', '配送时间已更新', `订单 ${order.orderNo} 的新配送安排：${nextSchedule}。`);
+                addNotification(data, userId, 'ORDER', '配送时间已更新', `订单 ${order.orderNo} 的新配送安排：${nextSchedule}。`, { focusId: order.id });
               }
             } else if (body.fulfillment.type === 'DELIVERY') {
               throw new ApiError(400, 'VALIDATION_ERROR', '当前订单不支持切换为校内配送');
@@ -7475,7 +7489,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             paymentOrder.updatedAt = now;
           }
           addAudit(data, '\u7528\u6237\u53d6\u6d88\u8ba2\u5355', order.orderNo);
-          addNotification(data, userId, 'ORDER', '\u8ba2\u5355\u5df2\u53d6\u6d88', `\u8ba2\u5355 ${order.orderNo} \u5df2\u53d6\u6d88\u3002`);
+          addNotification(data, userId, 'ORDER', '\u8ba2\u5355\u5df2\u53d6\u6d88', `\u8ba2\u5355 ${order.orderNo} \u5df2\u53d6\u6d88\u3002`, { focusId: order.id });
           return order;
         });
         await processProviderCloseQueue();
@@ -7527,7 +7541,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           freezeOrderSettlements(data, order, now, `${record.typeLabel}：${reason}`);
           notifyOrderMerchant(data, order, 'AFTER_SALE', '收到新的售后申请', `订单 ${order.orderNo}：${record.typeLabel}，${reason}`);
           sendOrderNotification(data, userId, 'AFTER_SALE', '售后已受理', `${order.orderNo}：已受理，预计 ${settings.afterSaleResponseHours} 小时内响应。`,
-            new Date().toISOString(), { orderId: order.id });
+            new Date().toISOString(), { orderId: order.id, focusId: order.id });
           addAudit(data, '用户提交售后申请', order.orderNo);
           return record;
         });
