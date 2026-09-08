@@ -15,6 +15,8 @@ const money=c=>`¥${((c||0)/100).toLocaleString('zh-CN',{minimumFractionDigits:2
 function badgeClass(v){return/COMPLETED|ACTIVATED|CREDITED|APPROVED/.test(v)?'green':/PENDING|MATERIAL|SUBMITTED/.test(v)?'orange':/PAID|FULFILLING|REVIEWING/.test(v)?'blue':/CANCELLED|REJECTED/.test(v)?'red':''}
 function authHeaders(extra={}){return{...extra,authorization:`Bearer ${state.token}`}}
 async function api(url,opts={}){const response=await fetch(url,{...opts,headers:authHeaders(opts.headers||{})});if(response.status===401){logout();throw new Error('登录已失效')}const body=await response.json();if(!response.ok)throw new Error(body.error?.message||'操作失败');return body.data}
+async function selectImageFile(){return new Promise((resolve)=>{const input=document.createElement('input');input.type='file';input.accept='image/jpeg,image/png,image/webp';input.onchange=()=>{const file=input.files?.[0]||null;resolve(file)};document.body.appendChild(input);input.click();setTimeout(()=>resolve(input.files?.[0]||null),60000)})}
+async function uploadAdminReceipt(file){const buffer=await file.arrayBuffer();const bytes=new Uint8Array(buffer);let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);return api('/api/admin/uploads',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({dataBase64:btoa(binary),mimeType:file.type||'image/png'})})}
 async function login(username,password){const response=await fetch('/api/admin/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username,password})});const body=await response.json();if(!response.ok)throw new Error(body.error?.message||'登录失败');state.token=body.data.token;state.user=body.data.user;localStorage.setItem('shishan_admin_token',state.token);localStorage.setItem('shishan_admin_user',JSON.stringify(state.user));showApp();await load()}
 function logout(){localStorage.removeItem('shishan_admin_token');localStorage.removeItem('shishan_admin_user');state.token='';state.user=null;document.querySelector('#appShell').classList.add('hidden');document.querySelector('#loginPage').classList.remove('hidden')}
 function showApp(){renderAdminIdentity();document.querySelector('#loginPage').classList.add('hidden');document.querySelector('#appShell').classList.remove('hidden')}
@@ -598,7 +600,7 @@ function payoutsView() {
       <td><strong>${money(item.amountInCents)}</strong><small>${item.settlementCount || 0} 笔分账</small></td>
       <td>${esc(item.accountBank || '—')}<small>${esc(item.accountName || '')} ${esc(item.accountMasked || '')}</small></td>
       <td><span class="badge ${payoutBadge(item.status)}">${label(item.status)}</span><small>${esc(item.reviewNote || payoutStatusNotes[item.status] || '')}</small></td>
-      <td>${item.settlementReference ? esc(item.settlementReference) : '—'}<small>${item.reviewedAt ? fmtDate(item.reviewedAt) : ''}</small></td>
+      <td>${item.settlementReference ? esc(item.settlementReference) : '—'}${item.receiptUrl?`<small><a class="license-link" href="${esc(item.receiptUrl)}" target="_blank" rel="noopener">查看回单</a></small>`:''}<small>${item.reviewedAt ? fmtDate(item.reviewedAt) : ''}</small></td>
       <td><div class="row-actions">${actions}</div></td>
     </tr>`;
   });
@@ -616,12 +618,19 @@ bindView = function () {
     const reference = prompt(`确认已向以下账户完成打款：\n${account || '请人工核对收款信息'}\n金额 ${item ? money(item.amountInCents) : ''}\n\n填写打款凭证号`, '平台线下打款');
     if (reference === null) return;
     if (!reference.trim()) return showToast('请填写打款凭证');
+    const receiptFile = await selectImageFile('选择银行回单');
+    if (!receiptFile) return showToast('请上传银行回单');
+    try {
+      const receipt = await uploadAdminReceipt(receiptFile);
     await api(`/api/admin/payout-requests/${button.dataset.id}/review`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ decision: 'APPROVE', reference: reference.trim() })
+        body: JSON.stringify({ decision: 'APPROVE', reference: reference.trim(), receiptUrl: receipt.url })
     });
     showToast('提现已确认打款');
     await load();
+    } catch (error) {
+      showToast(error.message);
+    }
   }));
   document.querySelectorAll('.reject-payout').forEach((button) => button.addEventListener('click', async () => {
     const reviewNote = prompt('请填写驳回原因（会通知商家）', '收款账户信息需要核对');

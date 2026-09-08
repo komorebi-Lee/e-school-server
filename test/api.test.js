@@ -2280,12 +2280,71 @@ test('merchant payouts require a request that the platform reviews', async () =>
   });
   assert.equal(missingReference.response.status, 400);
 
+  const missingReceipt = await api(`/api/admin/payout-requests/${reopenedId}/review`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ decision: 'APPROVE', reference: 'TEST-PAYOUT-REVIEW' })
+  });
+  assert.equal(missingReceipt.response.status, 400);
+  assert.equal(missingReceipt.body.error.code, 'PAYOUT_RECEIPT_REQUIRED');
+
+  const receiptImageBase64 = Buffer.concat([
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAAC6MsUuAAAAFklEQVR42mNk+M9QDwADhgGAWjR9awAAAAD//2Nk+M9QDwADhgGAWjR9aw==', 'base64'),
+    Buffer.alloc(2048)
+  ]).toString('base64');
+
+  const upload = await api('/api/uploads', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ownerSession.token}` },
+    body: JSON.stringify({
+      dataBase64: receiptImageBase64,
+      mimeType: 'image/png'
+    })
+  });
+  assert.equal(upload.response.status, 201);
+
+  const financeLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(financeLogin.response.status, 200);
+  const financeHeaders = { 'content-type': 'application/json', authorization: `Bearer ${financeLogin.body.data.token}` };
+  const adminUpload = await api('/api/admin/uploads', {
+    method: 'POST', headers: financeHeaders,
+    body: JSON.stringify({
+      dataBase64: receiptImageBase64,
+      mimeType: 'image/png'
+    })
+  });
+  assert.equal(adminUpload.response.status, 201);
+  assert.match(adminUpload.body.data.url, /^\/api\/admin\/uploads\/[\w-]+\.png$/);
+
+  const invalidReceipt = await api(`/api/admin/payout-requests/${reopenedId}/review`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({
+      decision: 'APPROVE', reference: 'TEST-PAYOUT-REVIEW',
+      receiptUrl: upload.body.data.url
+    })
+  });
+  assert.equal(invalidReceipt.response.status, 400);
+  assert.equal(invalidReceipt.body.error.code, 'PAYOUT_RECEIPT_INVALID');
+
+  const missingFileReceipt = await api(`/api/admin/payout-requests/${reopenedId}/review`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({
+      decision: 'APPROVE', reference: 'TEST-PAYOUT-REVIEW',
+      receiptUrl: '/api/admin/uploads/not-exist.png'
+    })
+  });
+  assert.equal(missingFileReceipt.response.status, 400);
+  assert.equal(missingFileReceipt.body.error.code, 'PAYOUT_RECEIPT_INVALID');
+
   const approved = await api(`/api/admin/payout-requests/${reopenedId}/review`, {
-    method: 'POST', headers: adminHeaders, body: JSON.stringify({ decision: 'APPROVE', reference: 'TEST-PAYOUT-REVIEW' })
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ decision: 'APPROVE', reference: 'TEST-PAYOUT-REVIEW', receiptUrl: adminUpload.body.data.url })
   });
   assert.equal(approved.response.status, 200);
   assert.equal(approved.body.data.status, 'SETTLED');
   assert.equal(approved.body.data.paidAmountInCents, 78400);
+  assert.equal(approved.body.data.receiptUrl, adminUpload.body.data.url);
 
   const settledOverview = await api('/api/merchant/overview', { headers: merchantAuth });
   assert.equal(settledOverview.body.data.metrics.settlementMetrics.settledInCents, 78400);
@@ -2302,6 +2361,8 @@ test('merchant payouts require a request that the platform reviews', async () =>
   assert.ok(payoutEvent);
   assert.equal(payoutEvent.amountInCents, -78400);
   assert.equal(payoutEvent.merchantId, merchantId);
+  assert.equal(payoutEvent.settlementReference, 'TEST-PAYOUT-REVIEW');
+  assert.equal(payoutEvent.receiptUrl, adminUpload.body.data.url);
   assert.ok((adminOverview.body.data.payoutRequests || []).some((item) => item.id === reopenedId));
 
   const restored = await api('/api/admin/settings', {

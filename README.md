@@ -244,11 +244,12 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 {
   "decision": "APPROVE",
   "reference": "BANK-20260906-001",
+  "receiptUrl": "/api/admin/uploads/xxxxxxxx.png",
   "reviewNote": "已通过企业网银转账"
 }
 ```
 
-- `decision` 为 `APPROVE` 时必须提供 `reference`（打款凭证号），否则 400；通过后分账转 `SETTLED` 并写入一条 `PAYOUT` 财务流水。
+- `decision` 为 `APPROVE` 时必须提供 `reference`（打款凭证号）和 `receiptUrl`（银行回单图片）。回单必须通过 `POST /api/admin/uploads` 上传到平台托管目录，服务端会校验文件真实存在；通过后分账转 `SETTLED`，回单 URL 会写入提现单和 `PAYOUT` 财务流水。
 - `decision` 为 `REJECT` 时必须提供 `reviewNote`（驳回原因），否则 400；驳回后金额退回 `PENDING_SETTLE`，商家可修改信息后重新申请。
 - 已处理过的提现单再次审核返回 409 `PAYOUT_REQUEST_CLOSED`。
 - 起提门槛由管理端 `payoutMinimumInCents` 控制（0–1000000 分，默认 10000 分即 ¥100），管理端设置页以“元”为单位填写。
@@ -361,6 +362,6 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 库存已实现“预占 → 支付扣减 → 取消/超时释放 → 退款回补”闭环，但仍是单进程 JSON/MySQL 快照方案，高并发场景需要数据库行级锁或独立库存服务。
 - 待支付超时关单已并入常驻巡检；读接口仍保留惰性清扫作为兜底，多实例部署时需要分布式锁避免重复执行。
 - 分账账期到期已并入运营巡检；多实例部署时巡检仍是单进程 `setInterval`，需要分布式锁或选主避免重复执行。
-- 提现审核与打款仍是人工在管理端确认的模拟动作，未接入真实企业付款/企业转账接口，也没有银行回单附件上传与批量打款。
+- 提现审核与打款仍是人工在管理端确认的模拟动作，未接入真实企业付款/企业转账接口；但打款凭证号与银行回单已经强制留档，后续可在此基础上接入真实转账与批量打款。
 - 超时预警已接入站内通知、微信订阅消息和店铺服务分；短信或企业微信告警仍未接入。
 - 服务分低质扣分使用 30 天窗口，但仓库仅保留 `merchantScoreLogs` 与商品风控字段；多实例事务数据库下应迁移为独立风控事件表。

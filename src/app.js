@@ -724,6 +724,7 @@ function verifyPasswordHash(suppliedPassword, storedHash) {
 
 function adminPermissionForRequest(pathname) {
   if (pathname.startsWith('/api/admin/admins')) return 'ADMIN_MANAGE';
+  if (pathname.startsWith('/api/admin/uploads')) return 'FINANCE_MANAGE';
   if (/^\/api\/admin\/merchants\/[^/]+\/settle$/.test(pathname)) return 'FINANCE_MANAGE';
   if (pathname.startsWith('/api/admin/settings')
     || pathname.startsWith('/api/admin/subscribe-templates')) return 'CONFIG_MANAGE';
@@ -753,6 +754,7 @@ function adminPermissionForRequest(pathname) {
     || pathname.startsWith('/api/admin/operations-report')) return 'REPORT_VIEW';
   return 'ADMIN_MANAGE';
 }
+
 
 function publicAdminUser(user) {
   return {
@@ -1355,6 +1357,7 @@ function createApp({
       merchantId: meta.merchantId || '',
       merchantName: meta.merchantName || '',
       settlementReference: meta.settlementReference || '',
+      receiptUrl: meta.receiptUrl || '',
       businessType: meta.businessType || '',
       createdAt: now
     };
@@ -1696,7 +1699,8 @@ function createApp({
     payoutRequest.reviewedAt = now;
     payoutRequest.updatedAt = now;
     addFinanceEvent(data, 'PAYOUT', `PAYOUT_${payoutRequest.requestNo}`, -totalInCents, {
-      merchantId: payoutRequest.merchantId, merchantName: payoutRequest.merchantName, settlementReference: reference
+      merchantId: payoutRequest.merchantId, merchantName: payoutRequest.merchantName, settlementReference: reference,
+      receiptUrl: payoutRequest.receiptUrl
     }, now);
     addAudit(data, '平台确认提现打款', `${payoutRequest.merchantName} ${payoutRequest.requestNo}`);
     notifyMerchant(data, payoutRequest.merchantId, 'SETTLEMENT', '提现已打款', `提现单 ${payoutRequest.requestNo} 已打款 ¥${(totalInCents / 100).toFixed(2)}，凭证 ${reference}。`);
@@ -3155,6 +3159,42 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         fs.mkdirSync(uploadsDirectory, { recursive: true });
         fs.writeFileSync(path.join(uploadsDirectory, fileName), file);
         return sendJson(response, 201, { data: { url: `/api/uploads/${fileName}`, size: file.length }, requestId });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/admin/uploads') {
+        requireAdmin(request, 'FINANCE_MANAGE');
+        const body = await readJson(request);
+        const dataBase64 = requireString(body.dataBase64, 'dataBase64', { maxLength: 7000000 });
+        const mimeType = requireString(body.mimeType, 'mimeType', { maxLength: 50 });
+        if (!['image/jpeg', 'image/png', 'image/webp'].includes(mimeType)) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '仅支持 JPG、PNG 或 WebP 图片');
+        }
+        const file = Buffer.from(dataBase64, 'base64');
+        if (file.length < 1024 || file.length > 5 * 1024 * 1024) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '图片大小需在 1KB 到 5MB 之间');
+        }
+        const isJpeg = file[0] === 0xff && file[1] === 0xd8 && file[2] === 0xff;
+        const isPng = file[0] === 0x89 && file[1] === 0x50 && file[2] === 0x4e;
+        const isWebp = file.slice(0, 4).toString('ascii') === 'RIFF' && file.slice(8, 12).toString('ascii') === 'WEBP';
+        if (!isJpeg && !isPng && !isWebp) throw new ApiError(400, 'VALIDATION_ERROR', '图片内容格式不正确');
+        const extension = mimeType === 'image/png' ? '.png' : mimeType === 'image/webp' ? '.webp' : '.jpg';
+        const fileName = `${randomUUID()}${extension}`;
+        const receiptsDirectory = path.join(path.dirname(store.filePath), 'admin-receipts');
+        fs.mkdirSync(receiptsDirectory, { recursive: true });
+        fs.writeFileSync(path.join(receiptsDirectory, fileName), file);
+        return sendJson(response, 201, { data: { url: `/api/admin/uploads/${fileName}`, size: file.length }, requestId });
+      }
+
+      const adminUploadMatch = pathname.match(/^\/api\/admin\/uploads\/([^/]+)$/);
+      if (request.method === 'GET' && adminUploadMatch) {
+        const fileName = path.basename(adminUploadMatch[1]);
+        const filePath = path.join(path.dirname(store.filePath), 'admin-receipts', fileName);
+        if (!fs.existsSync(filePath)) throw new ApiError(404, 'UPLOAD_NOT_FOUND', 'Upload not found');
+        const extension = path.extname(filePath).toLowerCase();
+        const mimeType = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }[extension] || 'application/octet-stream';
+        response.writeHead(200, { 'content-type': mimeType, 'cache-control': 'private, max-age=3600' });
+        response.end(fs.readFileSync(filePath));
+        return;
       }
 
       const uploadMatch = pathname.match(/^\/api\/uploads\/([^/]+)$/);
@@ -4737,11 +4777,22 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!payoutRequest) throw new ApiError(404, 'PAYOUT_REQUEST_NOT_FOUND', '提现申请不存在');
           if (payoutRequest.status !== 'PENDING_REVIEW') throw new ApiError(409, 'PAYOUT_REQUEST_CLOSED', '该提现申请已处理');
           const now = new Date().toISOString();
+          let receiptUrl = '';
+          if (decision === 'APPROVE') {
+            receiptUrl = String(body.receiptUrl || '').trim();
+            if (!receiptUrl) throw new ApiError(400, 'PAYOUT_RECEIPT_REQUIRED', '确认打款前需上传银行回单');
+            if (receiptUrl.length > 200 || !receiptUrl.startsWith('/api/admin/uploads/')) {
+              throw new ApiError(400, 'PAYOUT_RECEIPT_INVALID', '打款回单必须来自平台上传目录');
+            }
+            const receiptPath = path.join(path.dirname(store.filePath), 'admin-receipts', path.basename(receiptUrl.replace('/api/admin/uploads/', '')));
+            if (!fs.existsSync(receiptPath)) throw new ApiError(400, 'PAYOUT_RECEIPT_INVALID', '打款回单文件不存在');
+          }
           if (decision === 'REJECT') {
             const restored = rejectPayoutRequest(data, payoutRequest, now, reviewNote);
             return { ...payoutRequest, restoredSettlementCount: restored };
           }
           payoutRequest.reviewNote = reviewNote;
+          payoutRequest.receiptUrl = receiptUrl;
           const paidInCents = approvePayoutRequest(data, payoutRequest, now, reference);
           return { ...payoutRequest, paidAmountInCents: paidInCents };
         });
