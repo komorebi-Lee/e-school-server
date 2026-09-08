@@ -1564,9 +1564,9 @@ function createApp({
     PENDING_VERIFY:'待核验', APPROVED:'可预约安装',
     MATERIAL_PENDING:'待补材料', REVIEWING:'审核中'
   };
-  function addAudit(data, action, target) {
+  function addAudit(data, action, target, operator = '运营管理员') {
     if (!Array.isArray(data.auditLogs)) data.auditLogs = [];
-    data.auditLogs.unshift({ id: `log_${randomUUID()}`, operator: '运营管理员', action, target, createdAt: new Date().toISOString() });
+    data.auditLogs.unshift({ id: `log_${randomUUID()}`, operator, action, target, createdAt: new Date().toISOString() });
     data.auditLogs = data.auditLogs.slice(0, 200);
   }
 
@@ -6424,13 +6424,26 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/admin/leads') return sendJson(response,200,{data:store.read().leads||[],requestId});
       const leadMatch = pathname.match(/^\/api\/admin\/leads\/([^/]+)$/);
       if (request.method === 'PATCH' && leadMatch) {
-        const body=await readJson(request);
-        if (body.status !== undefined && !allowedLeadStatuses.has(body.status)) throw new ApiError(400,'VALIDATION_ERROR','Unsupported lead status. Use SUBMITTED, FOLLOW_UP, COMPLETED or INVALID.');
-        const updated=store.update(data=>{const item=(data.leads||[]).find(x=>x.id===leadMatch[1]); if(!item) throw new ApiError(404,'LEAD_NOT_FOUND','Lead not found'); for(const k of ['status','assignee','interest','expectedTime','deliveryNeed','note']) if(body[k]!==undefined) item[k]=String(body[k]).slice(0,500); item.updatedAt=new Date().toISOString(); addAudit(data,'更新咨询线索',item.leadNo); return item;});
-        return sendJson(response,200,{data:updated,requestId});
+        const actor = requireAdmin(request, 'ORDER_MANAGE');
+        const body = await readJson(request);
+        if (body.status !== undefined && !allowedLeadStatuses.has(body.status)) {
+          throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported lead status. Use SUBMITTED, FOLLOW_UP, COMPLETED or INVALID.');
+        }
+        const updated = store.update((data) => {
+          const item = (data.leads || []).find((x) => x.id === leadMatch[1]);
+          if (!item) throw new ApiError(404, 'LEAD_NOT_FOUND', 'Lead not found');
+          for (const k of ['status','assignee','interest','expectedTime','deliveryNeed','note']) {
+            if (body[k] !== undefined) item[k] = String(body[k]).slice(0, 500);
+          }
+          item.updatedAt = new Date().toISOString();
+          addAudit(data, '更新咨询线索', item.leadNo, actor.displayName || actor.username);
+          return item;
+        });
+        return sendJson(response, 200, { data: updated, requestId });
       }
       const followMatch = pathname.match(/^\/api\/admin\/leads\/([^/]+)\/follow-ups$/);
       if (request.method === 'POST' && followMatch) {
+        const actor = requireAdmin(request, 'ORDER_MANAGE');
         const body = await readJson(request);
         if (body.status !== undefined && !allowedLeadStatuses.has(body.status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported lead status. Use SUBMITTED, FOLLOW_UP, COMPLETED or INVALID.');
         const now = new Date().toISOString();
@@ -6438,11 +6451,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const item = (data.leads || []).find((x) => x.id === followMatch[1]);
           if (!item) throw new ApiError(404, 'LEAD_NOT_FOUND', 'Lead not found');
           const text = requireString(body.content, 'content', { maxLength: 500 });
+          const operator = actor.displayName || actor.username;
+          if (!item.assignee) item.assignee = operator;
           item.followUps = item.followUps || [];
           item.followUps.unshift({
             id: `fu_${randomUUID()}`,
             content: text,
-            operator: body.operator || '运营管理员',
+            operator,
             createdAt: now
           });
           if (body.status !== undefined) item.status = body.status;
@@ -6458,7 +6473,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           } else {
             sendLeadFollowUpNotification(data, item.userId, 'LEAD', '咨询跟进更新', `${item.businessType}：${text}`, now);
           }
-          addAudit(data, '线索跟进', item.leadNo);
+          addAudit(data, '线索跟进', item.leadNo, operator);
           return item;
         });
         return sendJson(response, 200, { data: updated, requestId });

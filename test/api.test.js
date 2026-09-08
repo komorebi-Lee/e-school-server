@@ -156,6 +156,17 @@ test('lead follow-up result rejects unsupported status', async () => {
   });
   assert.equal(rejected.response.status, 400);
   assert.equal(rejected.body.error.code, 'VALIDATION_ERROR');
+  const withoutAuth = await api(`/api/admin/leads/${created.body.data.id}/follow-ups`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ content: '未登录尝试' })
+  });
+  assert.equal(withoutAuth.response.status, 401);
+  assert.equal(withoutAuth.body.error.code, 'ADMIN_UNAUTHORIZED');
+  assert.equal(followed.body.data.assignee, '运营管理员');
+  assert.equal(followed.body.data.followUps[0].operator, '运营管理员');
+  assert.ok(store.read().auditLogs.some((item) => item.action === '线索跟进'
+    && item.operator === '运营管理员'
+    && item.target === created.body.data.leadNo));
 });
 
 test('health and product list are available', async () => {
