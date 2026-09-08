@@ -3868,6 +3868,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           deliveryResponseHours: settings.deliveryResponseHours,
           soldCount: productSalesCount(data, product.id)
         });
+        storeProfile.merchantId = productMerchant?.id || '';
         return sendJson(response, 200, {
           data: {
             ...enrichedProduct,
@@ -4147,6 +4148,45 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
           .map(merchantPublic);
         return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
+      const merchantStorefrontMatch = pathname.match(/^\/api\/merchants\/([^/]+)\/storefront$/);
+      if (request.method === 'GET' && merchantStorefrontMatch) {
+        refreshScoresNow();
+        const data = store.read();
+        const merchant = (data.merchants || []).find((item) => (
+          item.id === merchantStorefrontMatch[1] && item.status === 'APPROVED'
+        ));
+        if (!merchant) throw new ApiError(404, 'STOREFRONT_NOT_FOUND', '店铺不存在或未通过平台核准');
+        const settings = publicSettings(data.adminSettings);
+        const salesCounts = calculateProductSalesCounts(data);
+        const now = new Date().toISOString();
+        const products = data.products
+          .filter((product) => product.active && product.merchantId === merchant.id)
+          .map((product) => withProductReviewSummary(
+            withMerchantName(product, data.merchants || []), data.productReviews || []
+          ))
+          .map((product) => withProductSale(withMerchantScore(
+            withAvailableStock(withProductSales(product, salesCounts)), data.merchants || []
+          ), now));
+        const rankedProducts = orderProductsByExposure(data, products);
+        return sendJson(response, 200, {
+          data: {
+            merchant: {
+              id: merchant.id,
+              name: merchant.name,
+              description: merchant.description || '专注狮山校区的校内商品与服务',
+              serviceArea: merchant.serviceArea || settings.campusName,
+              serviceScore: merchant.serviceScore || null,
+              createdAt: merchant.createdAt || ''
+            },
+            productCount: products.length,
+            totalSalesCount: products.reduce((sum, product) => sum + Number(product.salesCount || 0), 0),
+            deliveryResponseHours: settings.deliveryResponseHours,
+            products: rankedProducts
+          },
+          requestId
+        });
       }
 
       // 资质被驳回的商家必须能补充平台可核验的材料并进入复审，否则被驳回就变成死单。

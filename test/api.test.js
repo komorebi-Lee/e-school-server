@@ -4117,3 +4117,19 @@ test('restock alerts notify waiting users after merchant restocking', async () =
   });
   assert.equal(repeated.body.data.filter((item) => item.title === '你登记的商品已到货').length, noticeCount);
 });
+
+test('approved merchants expose a public storefront without private data', async () => {
+  const storefront = await api('/api/merchants/merchant_001/storefront');
+  assert.equal(storefront.response.status, 200);
+  assert.equal(storefront.body.data.merchant.id, 'merchant_001');
+  assert.equal(storefront.body.data.merchant.name, '狮山校园车行');
+  assert.equal(storefront.body.data.merchant.licenseNo, undefined);
+  assert.equal(storefront.body.data.merchant.phone, undefined);
+  assert.equal(storefront.body.data.merchant.settlementAccount, undefined);
+  assert.ok(storefront.body.data.merchant.serviceScore.score);
+  assert.ok(storefront.body.data.products.some((item) => item.id === 'prod_ebike_001'));
+  assert.ok(storefront.body.data.products.every((item) => item.active && item.availableStock !== undefined));
+
+  const hidden = await api('/api/merchants/merchant_002/storefront');
+  assert.equal(hidden.response.status, 404);
+});
