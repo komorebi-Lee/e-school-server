@@ -711,7 +711,7 @@ function patrolView() {
     return `<tr>
       <td><strong>${esc(alert.ruleLabel)}</strong><small>${esc(alert.businessNo)}</small></td>
       <td>${esc(alert.detail || '—')}</td>
-      <td>${esc(slaOwnerLabels[alert.ownerRole] || alert.ownerRole)}<small>${esc(alert.merchantName || '平台内部')}</small></td>
+      <td>${esc(slaOwnerLabels[alert.ownerRole] || alert.ownerRole)}<small>${esc(alert.ownerName || alert.acknowledgedBy || alert.merchantName || '平台内部')}</small></td>
       <td>${fmtDate(alert.dueAt)}<small>${slaCountdown(alert)}</small></td>
       <td><span class="badge ${slaLevelBadge(alert)}">${label(alert.status === 'RESOLVED' ? 'RESOLVED' : alert.level)}</span><small>${esc(alert.acknowledgeNote || alert.resolvedReason || label(alert.status))}</small></td>
       <td><div class="row-actions">${actions}${jump}</div></td>

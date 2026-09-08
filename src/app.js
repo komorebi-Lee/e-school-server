@@ -2432,6 +2432,8 @@ function createApp({
         ownerRole: 'PLATFORM',
         merchantId: '',
         merchantName: '',
+        ownerId: record.assigneeId || '',
+        ownerName: record.assignee || '',
         userId: record.userId || '',
         dueAt: addHours(record.updatedAt || record.createdAt, slaHours(data, 'phoneCardActivationHours', 24)),
         detail: `${record.planName || '校园电话卡'} · ${record.customerName || ''} ${record.phone || ''}`.trim()
@@ -2449,6 +2451,8 @@ function createApp({
         ownerRole: 'PLATFORM',
         merchantId: '',
         merchantName: '',
+        ownerId: record.assigneeId || '',
+        ownerName: record.assignee || '',
         userId: record.userId || '',
         dueAt: addHours(record.updatedAt || record.createdAt, slaHours(data, 'rechargeCreditHours', 12)),
         detail: `充 ${Math.round((record.paidInCents || 0) / 100)} 送 ${Math.round(((record.receiveInCents || 0) - (record.paidInCents || 0)) / 100)} · ${record.phone || ''}`
@@ -2466,6 +2470,8 @@ function createApp({
         ownerRole: 'PLATFORM',
         merchantId: '',
         merchantName: '',
+        ownerId: record.assigneeId || '',
+        ownerName: record.assignee || '',
         userId: record.userId || '',
         dueAt: addHours(record.updatedAt || record.createdAt, slaHours(data, 'broadbandVerifyHours', 48)),
         detail: `${record.ownerPhone || ''} + ${record.companionPhone || ''}`
@@ -2547,6 +2553,8 @@ function createApp({
         ownerRole: 'PLATFORM',
         merchantId: '',
         merchantName: '',
+        ownerId: record.assigneeId || '',
+        ownerName: record.assignee || '',
         userId: record.userId || '',
         dueAt: record.slaDueAt || addHours(record.createdAt, slaHours(data, 'leadResponseHours', 24)),
         detail: `${record.businessType || '咨询'} · ${record.name || ''} ${record.phone || ''}`.trim()
@@ -2671,6 +2679,8 @@ function createApp({
           detail: target.detail,
           merchantId: target.merchantId,
           merchantName: target.merchantName,
+          ownerId: target.ownerId || existing.ownerId || '',
+          ownerName: target.ownerName || existing.ownerName || '',
           updatedAt: now
         });
         if (wasLevel !== level) {
@@ -2694,6 +2704,8 @@ function createApp({
         ownerRole: target.ownerRole,
         merchantId: target.merchantId,
         merchantName: target.merchantName,
+        ownerId: target.ownerId || '',
+        ownerName: target.ownerName || '',
         userId: target.userId,
         detail: target.detail,
         dueAt: target.dueAt,
@@ -2763,7 +2775,9 @@ function createApp({
       return;
     }
     if (alert.ownerRole === 'PLATFORM' && !merchant?.userId) {
-      addNotification(data, 'PLATFORM', 'SLA', title, content);
+      const owner = (data.adminUsers || []).find((item) => item.id === alert.ownerId);
+      if (owner) addNotification(data, owner.id, 'SLA', title, content);
+      else addNotification(data, 'PLATFORM', 'SLA', title, content);
     }
   }
 
@@ -5667,6 +5681,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       const slaAckMatch = pathname.match(/^\/api\/admin\/sla-alerts\/([^/]+)\/acknowledge$/);
       if (request.method === 'POST' && slaAckMatch) {
+        const actor = requireAdmin(request, 'ORDER_MANAGE');
         const body = await readJson(request);
         const note = requireString(body.note, 'note', { maxLength: 200 });
         const alert = store.update((data) => {
@@ -5675,10 +5690,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (item.status === 'RESOLVED') throw new ApiError(409, 'SLA_ALERT_RESOLVED', '该预警已自动关闭，无需处理');
           const now = new Date().toISOString();
           item.status = 'ACKNOWLEDGED';
+          item.acknowledgedBy = actor.displayName || actor.username;
+          item.acknowledgedById = actor.id;
           item.acknowledgedAt = now;
           item.acknowledgeNote = note;
           item.updatedAt = now;
-          addAudit(data, '认领超时预警', `${item.ruleLabel} ${item.businessNo}`);
+          addAudit(data, '认领超时预警', `${item.ruleLabel} ${item.businessNo}`, actor.displayName || actor.username);
           if (item.ownerRole === 'MERCHANT' && item.merchantId) {
             notifyMerchant(data, item.merchantId, 'SLA', '平台已跟进超时事项', `${item.ruleLabel}：${item.businessNo} 平台处理意见：${note}`);
           }
@@ -6453,6 +6470,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const text = requireString(body.content, 'content', { maxLength: 500 });
           const operator = actor.displayName || actor.username;
           if (!item.assignee) item.assignee = operator;
+          if (!item.assigneeId) item.assigneeId = actor.id;
+          if (!item.assigneeRole) item.assigneeRole = actor.role;
           item.followUps = item.followUps || [];
           item.followUps.unshift({
             id: `fu_${randomUUID()}`,

@@ -167,6 +167,29 @@ test('lead follow-up result rejects unsupported status', async () => {
   assert.ok(store.read().auditLogs.some((item) => item.action === '线索跟进'
     && item.operator === '运营管理员'
     && item.target === created.body.data.leadNo));
+
+  const adminId = store.read().adminUsers.find((item) => item.username === process.env.ADMIN_USERNAME).id;
+  store.update((data) => {
+    const lead = data.leads.find((item) => item.id === created.body.data.id);
+    lead.slaDueAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  });
+  const patrol = await api('/api/admin/patrol/run', {
+    method: 'POST', headers: { authorization: `Bearer ${login.body.data.token}` }
+  });
+  assert.equal(patrol.response.status, 200);
+  const leadAlert = store.read().slaAlerts.find((item) => (
+    item.ruleKey === 'LEAD_FOLLOW_UP' && item.businessId === created.body.data.id
+  ));
+  assert.ok(leadAlert, 'overdue lead should generate an operations alert');
+  assert.equal(leadAlert.ownerId, adminId);
+  assert.equal(leadAlert.ownerName, '运营管理员');
+  assert.equal(leadAlert.level, 'OVERDUE');
+  const overdueNotices = await api('/api/admin/notifications', {
+    headers: { authorization: `Bearer ${login.body.data.token}` }
+  });
+  assert.ok(overdueNotices.body.data.some((item) => item.userId === adminId
+    && item.type === 'SLA'
+    && item.content.includes(created.body.data.leadNo)), 'the assigned operator should receive the overdue notice');
 });
 
 test('health and product list are available', async () => {
