@@ -698,7 +698,7 @@ function patrolView() {
     ${metric('待商家处理', summary.merchantOwnedCount || 0, '已同步站内通知给商家')}
     ${metric('待平台处理', summary.platformOwnedCount || 0, '需运营人工推进')}
   </div>
-  <div class="page-actions"><p>上次巡检 ${patrol.lastRunAt ? fmtDate(patrol.lastRunAt) : '尚未执行'} · 累计 ${patrol.runCount || 0} 次 · 本次新增 ${patrol.lastCreated || 0} / 关闭 ${patrol.lastResolved || 0}</p><div><button id="runPatrol" class="primary">立即巡检</button></div></div>`;
+  <div class="page-actions"><p>上次巡检 ${patrol.lastRunAt ? fmtDate(patrol.lastRunAt) : '尚未执行'} · 累计 ${patrol.runCount || 0} 次 · 本次新增 ${patrol.lastCreated || 0} / 关闭 ${patrol.lastResolved || 0} · 服务分变化 ${patrol.lastScoreChanges || 0}</p><div><button id="runPatrol" class="primary">立即巡检</button></div></div>`;
   const rows = alerts.map((alert) => {
     const actions = alert.status === 'OPEN'
       ? `<button class="text-button ack-alert" data-id="${esc(alert.id)}">认领处理</button>`
@@ -725,7 +725,7 @@ bindView = function () {
   baseBindPatrolView();
   document.querySelector('#runPatrol')?.addEventListener('click', async () => {
     const result = await api('/api/admin/patrol/run', { method: 'POST' });
-    showToast(`巡检完成：新增 ${result.data.created} · 关闭 ${result.data.resolved} · 待处理 ${result.data.open}`);
+    showToast(`巡检完成：新增 ${result.data.created} · 关闭 ${result.data.resolved} · 待处理 ${result.data.open} · 服务分变化 ${result.data.scoreChanges || 0}`);
     await load();
   });
   document.querySelectorAll('.ack-alert').forEach((button) => button.addEventListener('click', async () => {

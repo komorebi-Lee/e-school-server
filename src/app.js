@@ -2646,7 +2646,7 @@ function createApp({
     const scoreChanges = refreshMerchantScores(data, now);
     data.patrolState.lastScoreChanges = scoreChanges.length;
     if (created.length || resolved.length || escalated.length || expiredOrders.length || maturedSettlements.length) {
-      addAudit(data, '运营巡检执行', `新增 ${created.length} · 升级 ${escalated.length} · 关闭 ${resolved.length} · 超时关单 ${expiredOrders.length} · 分账到期 ${maturedSettlements.length}`);
+      addAudit(data, '运营巡检执行', `新增 ${created.length} · 升级 ${escalated.length} · 关闭 ${resolved.length} · 超时关单 ${expiredOrders.length} · 分账到期 ${maturedSettlements.length} · 服务分 ${scoreChanges.length}`);
     }
     return { created, escalated, resolved, open: stillOpen.length, scoreChanges, expiredOrders, maturedSettlements };
   }
@@ -2926,6 +2926,8 @@ function createApp({
             : '商品曝光与上新已恢复正常';
         notifyMerchantScore(data, merchant.id, toStage === 'NORMAL' ? 'SCORE_RECTIFY_RESULT' : 'SCORE_STAGE_WARNING',
           improved ? '服务分已恢复' : '服务分下降', `${note}。${consequence}。`, now);
+        addNotification(data, 'PLATFORM', 'SCORE', improved ? '服务分已恢复' : '服务分下降',
+          `${merchant.name}：${note}。${consequence}。`, now);
       }
       changes.push({ merchantId: merchant.id, fromStage, toStage, score: merchant.serviceScore.score });
     }

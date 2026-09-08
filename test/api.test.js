@@ -4378,3 +4378,87 @@ test('favorite users receive a conversion notice when a product goes on sale', a
     item.id === 'favorite_price_notice' && item.configuredId === 'wx_favorite_price_notice'
   )));
 });
+
+test('service score stage changes reach merchants, platform and patrol audit', async () => {
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ patrolIntervalMinutes: 1 })
+  });
+
+  store.update((data) => {
+    data.afterSales = (data.afterSales || []).map((item) => ({ ...item, status: 'CLOSED' }));
+    data.slaAlerts = (data.slaAlerts || []).map((item) => ({ ...item, status: 'RESOLVED' }));
+    const merchant = data.merchants.find((item) => item.id === 'merchant_001');
+    merchant.serviceScore = null;
+    data.serviceMessageSubscribers = [...new Set([...(data.serviceMessageSubscribers || []), merchant.userId])];
+    data.patrolState = { lastRunAt: '', runCount: 0, lastCreated: 0, lastResolved: 0, lastOpen: 0, lastScoreChanges: 0 };
+  });
+
+  const baseline = await api('/api/products?category=E_BIKE_NEW');
+  assert.equal(baseline.response.status, 200);
+  const merchant = store.read().merchants.find((item) => item.id === 'merchant_001');
+  const scoreBefore = merchant.serviceScore;
+  assert.equal(scoreBefore.stage, 'NORMAL');
+
+  const buyer = await loginWeChat('score_stage_buyer');
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(created.response.status, 201);
+  const paid = await confirmPayment(created.body.paymentOrder.id, buyer.token);
+  assert.equal(paid.response.status, 200);
+
+  store.update((data) => {
+    const order = data.orders.find((item) => item.id === created.body.data.id);
+    data.afterSales.unshift({
+      id: 'after_sale_stage_test', orderId: order.id, userId: buyer.userId,
+      type: 'REFUND', typeLabel: '退款/退货', reason: '服务分巡检测试', status: 'REVIEWING',
+      images: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      responseDueAt: new Date(Date.now() - 2 * 3600 * 1000).toISOString()
+    });
+    data.patrolState = { ...data.patrolState, lastRunAt: '' };
+  });
+
+  const afterAlert = await api('/api/products?category=E_BIKE_NEW');
+  assert.equal(afterAlert.response.status, 200);
+  const state = store.read();
+  const merchantAfter = state.merchants.find((item) => item.id === 'merchant_001').serviceScore;
+  assert.equal(merchantAfter.stage, 'LIMITED');
+  assert.ok(merchantAfter.score < scoreBefore.score);
+  const stageLog = (state.merchantScoreLogs || []).find((log) => log.merchantId === 'merchant_001' && log.type === 'STAGE_CHANGE');
+  assert.equal(stageLog.fromStage, 'NORMAL');
+  assert.equal(stageLog.toStage, 'LIMITED');
+  const platformNotice = (state.notifications || []).find((item) => item.userId === 'PLATFORM'
+    && item.title === '服务分下降' && item.content.includes(merchant.name));
+  assert.ok(platformNotice);
+  assert.ok((state.subscribeMessages || []).some((item) => (
+    item.templateId === 'score_stage_warning' && item.status === 'QUEUED' && item.userId === merchant.userId
+  )));
+  assert.ok(state.patrolState.lastScoreChanges >= 1);
+  const audit = (state.auditLogs || []).find((item) => item.action === '运营巡检执行');
+  assert.equal(audit.action, '运营巡检执行');
+  assert.ok(audit.target.includes('服务分'));
+
+  store.update((data) => {
+    data.afterSales = data.afterSales.filter((item) => item.id !== 'after_sale_stage_test');
+    data.patrolState = { ...data.patrolState, lastRunAt: '' };
+  });
+  const recovery = await api('/api/products?category=E_BIKE_NEW');
+  assert.equal(recovery.response.status, 200);
+  const stateAfter = store.read();
+  assert.equal(stateAfter.merchants.find((item) => item.id === 'merchant_001').serviceScore.stage, 'NORMAL');
+  assert.ok((stateAfter.notifications || []).some((item) => (
+    item.userId === 'PLATFORM' && item.title === '服务分已恢复' && item.content.includes(merchant.name)
+  )));
+
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ patrolIntervalMinutes: 10 })
+  });
+});
