@@ -72,7 +72,7 @@ POST /api/admin/finance-tasks/:id/resolve
 http://localhost:3000/admin
 ```
 
-管理端支持经营概览、商品库存、电瓶车订单、电话卡订单、话费权益、双人宽带资格、校园牌照辅助和售后处理。当前均使用本地模拟数据。
+管理端支持经营概览、商品库存、库存流水、电瓶车订单、电话卡订单、话费权益、双人宽带资格、校园牌照辅助和售后处理。当前均使用本地模拟数据。
 
 管理端账号密码来自环境变量，不再写入前端页面或代码。复制 `.env.example` 为 `.env` 后配置 `ADMIN_USERNAME`；生产环境推荐先运行 `npm run hash-admin-password`，输入密码并回车，把输出的 `scrypt$salt$hash` 配置为 `ADMIN_PASSWORD_HASH`。配置哈希后登录会使用时间安全比较，并忽略 `ADMIN_PASSWORD`；明文 `ADMIN_PASSWORD` 仅保留为本地演示兼容。微信云托管请在服务“环境变量”中配置同名变量，不要把真实密码或哈希提交到 Git。
 
@@ -185,6 +185,19 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 创建后的订单状态是 `PENDING_PAYMENT`，同时生成支付单并按 `paymentTimeoutMinutes`（管理端可配，默认 30 分钟）写入 `paymentExpiresAt`。库存在这一刻只做预占（`reservedStock`），支付成功才真正扣减 `stock`；用户取消或超时未付会自动释放预占并把订单置为 `CANCELLED` + `paymentStatus=EXPIRED`。微信模式会返回 JSAPI 支付参数，支付结果以服务端查询或验签回调为准。
 
 商品接口会额外返回 `reservedStock` 和 `availableStock`，下单校验、低库存指标和前端“可售/售罄”文案都以 `availableStock` 为准。
+
+### 库存流水台账
+
+所有影响商品库存的动作都会写入 `stockMovements`，用于回答“这批库存何时减少、因为哪笔订单减少、由谁补回”的问题。当前覆盖：
+
+- `INITIAL`：商家或管理员创建商品时的初始入库
+- `ADJUST_IN` / `ADJUST_OUT`：商家调整商品总库存
+- `RESERVE`：下单后预占，`stock` 不变，`reservedStock` 增加
+- `CONSUME`：支付确认后扣减，`stock` 和 `reservedStock` 同步变化
+- `RELEASE`：订单取消或支付超时后释放预占
+- `RESTORE`：退款或退货后回补库存
+
+每条流水包含商品、商家、变更类型、数量、变更前后 `stock` / `reservedStock`、关联订单或商品单号、操作来源和时间。最新 500 条会随 `GET /api/admin/overview` 的 `stockMovements` 返回；管理端“商品交易 → 库存流水”提供倒序展示和检索。
 
 - `GET /api/orders?userId=user_demo`
 - `GET /api/orders/:id?userId=user_demo`

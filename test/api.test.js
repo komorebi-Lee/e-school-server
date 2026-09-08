@@ -119,6 +119,96 @@ test('product list supports commerce sorting and sales metrics', async () => {
   assert.equal(invalid.body.error.code, 'VALIDATION_ERROR');
 });
 
+test('stock movements record inventory truth across lifecycle', async () => {
+  const session = await loginWeChat('stock_ledger_user');
+  const admin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(admin.response.status, 200);
+  const adminAuth = { 'content-type': 'application/json', authorization: `Bearer ${admin.body.data.token}` };
+
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const created = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({
+      name: '台账测试车', category: 'E_BIKE_NEW', description: '库存流水验证',
+      priceInCents: 199900, stock: 5, active: true
+    })
+  });
+  assert.equal(created.response.status, 201);
+  const productId = created.body.data.id;
+
+  const initialOverview = await api('/api/admin/overview', { headers: adminAuth });
+  assert.equal(initialOverview.response.status, 200);
+  assert.ok(Array.isArray(initialOverview.body.data.stockMovements));
+  const initial = initialOverview.body.data.stockMovements[0];
+  assert.equal(initial.productId, productId);
+  assert.equal(initial.movementType, 'INITIAL');
+  assert.equal(initial.stockBefore, 0);
+  assert.equal(initial.stockAfter, 5);
+
+  const restocked = await api(`/api/merchant/products/${productId}`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ stock: 8 })
+  });
+  assert.equal(restocked.response.status, 200);
+  const restockOverview = await api('/api/admin/overview', { headers: adminAuth });
+  const restock = restockOverview.body.data.stockMovements[0];
+  assert.equal(restock.movementType, 'ADJUST_IN');
+  assert.equal(restock.quantity, 3);
+  assert.equal(restock.stockBefore, 5);
+  assert.equal(restock.stockAfter, 8);
+
+  const productBefore = await api(`/api/products/${productId}`);
+  const stockBefore = productBefore.body.data.stock;
+  const reservedBefore = productBefore.body.data.reservedStock;
+
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId, quantity: 2 }] })
+  });
+  assert.equal(order.response.status, 201);
+  const reserveOverview = await api('/api/admin/overview', { headers: adminAuth });
+  const reserve = reserveOverview.body.data.stockMovements[0];
+  assert.equal(reserve.movementType, 'RESERVE');
+  assert.equal(reserve.quantity, 2);
+  assert.equal(reserve.stockBefore, stockBefore);
+  assert.equal(reserve.stockAfter, stockBefore);
+  assert.equal(reserve.reservedBefore, reservedBefore);
+  assert.equal(reserve.reservedAfter, reservedBefore + 2);
+  assert.equal(reserve.referenceNo, order.body.data.orderNo);
+
+  const paid = await confirmPayment(order.body.paymentOrder.id, session.token);
+  assert.equal(paid.response.status, 200);
+  const consumeOverview = await api('/api/admin/overview', { headers: adminAuth });
+  const consume = consumeOverview.body.data.stockMovements[0];
+  assert.equal(consume.movementType, 'CONSUME');
+  assert.equal(consume.quantity, 2);
+  assert.equal(consume.stockBefore, stockBefore);
+  assert.equal(consume.stockAfter, stockBefore - 2);
+  assert.equal(consume.reservedAfter, reservedBefore);
+
+  const refund = await api(`/api/admin/payment-orders/${order.body.paymentOrder.id}/refund`, {
+    method: 'POST', headers: adminAuth,
+    body: JSON.stringify({ note: '库存流水退款验证' })
+  });
+  assert.equal(refund.response.status, 200);
+  const restoreOverview = await api('/api/admin/overview', { headers: adminAuth });
+  const restore = restoreOverview.body.data.stockMovements[0];
+  assert.equal(restore.movementType, 'RESTORE');
+  assert.equal(restore.quantity, 2);
+  assert.equal(restore.stockBefore, stockBefore - 2);
+  assert.equal(restore.stockAfter, stockBefore);
+});
+
 test('active product detail exposes merchant and stock', async () => {
   const result = await api('/api/products/prod_ebike_001');
   assert.equal(result.response.status, 200);

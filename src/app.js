@@ -303,12 +303,49 @@ function evaluateLowStockAlert(data, product, now = new Date().toISOString()) {
   return true;
 }
 
+function recordStockMovement(data, product, payload) {
+  if (!product) return;
+  if (!Array.isArray(data.stockMovements)) data.stockMovements = [];
+  data.stockMovements.unshift({
+    id: `mov_${randomUUID()}`,
+    productId: product.id,
+    productName: product.name,
+    merchantId: product.merchantId || '',
+    movementType: payload.movementType,
+    quantity: Number(payload.quantity || 0),
+    stockBefore: Number(payload.stockBefore || 0),
+    stockAfter: Number(payload.stockAfter || 0),
+    reservedBefore: Number(payload.reservedBefore || 0),
+    reservedAfter: Number(payload.reservedAfter || 0),
+    referenceId: payload.referenceId || '',
+    referenceNo: payload.referenceNo || '',
+    operator: payload.operator || 'SYSTEM',
+    note: payload.note || '',
+    createdAt: new Date().toISOString()
+  });
+  data.stockMovements = data.stockMovements.slice(0, 500);
+}
+
 function reserveOrderStock(data, order) {
   const affectedProducts = [];
   for (const orderItem of order.items || []) {
     const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
     if (product) {
+      const stockBefore = Number(product.stock || 0);
+      const reservedBefore = Number(product.reservedStock || 0);
       product.reservedStock = Number(product.reservedStock || 0) + Number(orderItem.quantity || 0);
+      recordStockMovement(data, product, {
+        movementType: 'RESERVE',
+        quantity: orderItem.quantity,
+        stockBefore,
+        stockAfter: stockBefore,
+        reservedBefore,
+        reservedAfter: Number(product.reservedStock || 0),
+        referenceId: order.id,
+        referenceNo: order.orderNo,
+        operator: 'ORDER_FLOW',
+        note: '订单创建后预占库存'
+      });
       affectedProducts.push(product);
     }
   }
@@ -322,7 +359,20 @@ function releaseOrderStock(data, order) {
   for (const orderItem of order.items || []) {
     const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
     if (product) {
+      const reservedBefore = Number(product.reservedStock || 0);
       product.reservedStock = Math.max(0, Number(product.reservedStock || 0) - Number(orderItem.quantity || 0));
+      recordStockMovement(data, product, {
+        movementType: 'RELEASE',
+        quantity: orderItem.quantity,
+        stockBefore: Number(product.stock || 0),
+        stockAfter: Number(product.stock || 0),
+        reservedBefore,
+        reservedAfter: Number(product.reservedStock || 0),
+        referenceId: order.id,
+        referenceNo: order.orderNo,
+        operator: 'ORDER_FLOW',
+        note: '订单取消释放预占库存'
+      });
       affectedProducts.push(product);
     }
   }
@@ -338,8 +388,22 @@ function consumeOrderStock(data, order) {
   for (const orderItem of order.items || []) {
     const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
     if (!product) continue;
+    const stockBefore = Number(product.stock || 0);
+    const reservedBefore = Number(product.reservedStock || 0);
     if (held) product.reservedStock = Math.max(0, Number(product.reservedStock || 0) - Number(orderItem.quantity || 0));
     product.stock = Math.max(0, Number(product.stock || 0) - Number(orderItem.quantity || 0));
+    recordStockMovement(data, product, {
+      movementType: 'CONSUME',
+      quantity: orderItem.quantity,
+      stockBefore,
+      stockAfter: Number(product.stock || 0),
+      reservedBefore,
+      reservedAfter: Number(product.reservedStock || 0),
+      referenceId: order.id,
+      referenceNo: order.orderNo,
+      operator: 'ORDER_FLOW',
+      note: '支付确认后扣减库存'
+    });
     affectedProducts.push(product);
   }
   order.stockReservation = 'CONSUMED';
@@ -355,7 +419,20 @@ function restoreOrderStock(data, order) {
   for (const orderItem of order.items || []) {
     const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
     if (product) {
+      const stockBefore = Number(product.stock || 0);
       product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
+      recordStockMovement(data, product, {
+        movementType: 'RESTORE',
+        quantity: orderItem.quantity,
+        stockBefore,
+        stockAfter: Number(product.stock || 0),
+        reservedBefore: Number(product.reservedStock || 0),
+        reservedAfter: Number(product.reservedStock || 0),
+        referenceId: order.id,
+        referenceNo: order.orderNo,
+        operator: 'ORDER_FLOW',
+        note: '退款/退货回补库存'
+      });
       affectedProducts.push(product);
     }
   }
@@ -4224,6 +4301,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             publishReviewNote: autoPublish ? '' : '商家服务分处于限流整改，商品需平台复核后上架'
           };
           data.products.unshift(item);
+          recordStockMovement(data, item, {
+            movementType: 'INITIAL',
+            quantity: item.stock,
+            stockBefore: 0,
+            stockAfter: item.stock,
+            reservedBefore: 0,
+            reservedAfter: 0,
+            referenceId: item.id,
+            operator: merchantSession.merchantId,
+            note: '商家创建商品'
+          });
           evaluateLowStockAlert(data, item, item.createdAt);
           addAudit(data, autoPublish ? '商家新增商品' : '商家新增商品待复核', item.name);
           return item;
@@ -4251,7 +4339,23 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             item.imageUrl = imageUrl;
           }
           if (body.priceInCents !== undefined) item.priceInCents = requirePositiveInteger(body.priceInCents, 'priceInCents');
-          if (body.stock !== undefined) item.stock = requirePositiveInteger(body.stock, 'stock', { max: 999999 });
+          if (body.stock !== undefined) {
+            const stockBefore = Number(item.stock || 0);
+            item.stock = requirePositiveInteger(body.stock, 'stock', { max: 999999 });
+            if (item.stock !== stockBefore) {
+              recordStockMovement(data, item, {
+                movementType: item.stock > stockBefore ? 'ADJUST_IN' : 'ADJUST_OUT',
+                quantity: Math.abs(item.stock - stockBefore),
+                stockBefore,
+                stockAfter: item.stock,
+                reservedBefore: Number(item.reservedStock || 0),
+                reservedAfter: Number(item.reservedStock || 0),
+                referenceId: item.id,
+                operator: merchantSession.merchantId,
+                note: '商家调整可用库存'
+              });
+            }
+          }
           if (body.active !== undefined) item.active = Boolean(body.active);
           item.updatedAt = new Date().toISOString();
           evaluateLowStockAlert(data, item, item.updatedAt);
@@ -4790,6 +4894,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 status: item.lowStockAlertStatus || ''
               })),
             products: data.products.map(withAvailableStock),
+            stockMovements: data.stockMovements || [],
             adminUsers: (data.adminUsers || []).map(publicAdminUser),
             rechargePromos: data.rechargePromos || [],
             merchants: data.merchants,
@@ -5885,7 +5990,19 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : '';
           if (imageUrl && !imageUrl.startsWith('/api/uploads/')) throw new ApiError(400, 'VALIDATION_ERROR', '商品图片必须来自平台上传目录');
           const item = { id: `prod_${randomUUID()}`, name: requireString(body.name, 'name', { maxLength: 80 }), category: requireString(body.category, 'category', { maxLength: 50 }), description: requireString(body.description, 'description', { maxLength: 300 }), priceInCents, stock, campusIds: ['campus_hzau'], imageUrl, active: body.active !== false };
-          data.products.unshift(item); addAudit(data, '新增商品', item.name); return item;
+          data.products.unshift(item);
+          recordStockMovement(data, item, {
+            movementType: 'INITIAL',
+            quantity: item.stock,
+            stockBefore: 0,
+            stockAfter: item.stock,
+            reservedBefore: 0,
+            reservedAfter: 0,
+            referenceId: item.id,
+            operator: 'ADMIN',
+            note: '管理员创建商品'
+          });
+          addAudit(data, '新增商品', item.name); return item;
         });
         return sendJson(response, 201, { data: product, requestId });
       }
