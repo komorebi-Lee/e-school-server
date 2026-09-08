@@ -720,6 +720,49 @@ function publicRechargePromo(promo, data, now) {
   };
 }
 
+function normalizeProductSaleCampaign(input = {}, currentProduct = null) {
+  if (input.salePriceInCents === undefined && input.saleStartsAt === undefined && input.saleEndsAt === undefined) return null;
+  const salePriceInCents = Number(input.salePriceInCents ?? currentProduct?.salePriceInCents);
+  const startsAt = input.saleStartsAt ?? currentProduct?.saleStartsAt ?? '';
+  const endsAt = input.saleEndsAt ?? currentProduct?.saleEndsAt ?? '';
+  if (!Number.isInteger(salePriceInCents) || salePriceInCents <= 0) {
+    throw new ApiError(400, 'VALIDATION_ERROR', '促销价必须是大于 0 的整数分');
+  }
+  const startDate = startsAt ? new Date(startsAt) : null;
+  const endDate = endsAt ? new Date(endsAt) : null;
+  if (!startDate || Number.isNaN(startDate.getTime()) || !endDate || Number.isNaN(endDate.getTime())
+    || startDate.getTime() >= endDate.getTime()) {
+    throw new ApiError(400, 'VALIDATION_ERROR', '促销开始时间必须早于结束时间');
+  }
+  return {
+    salePriceInCents,
+    saleStartsAt: startDate.toISOString(),
+    saleEndsAt: endDate.toISOString()
+  };
+}
+
+function withProductSale(product, now = new Date().toISOString()) {
+  const originalPriceInCents = Number(product.priceInCents) || 0;
+  const salePriceInCents = Number(product.salePriceInCents) || 0;
+  const availability = rechargePromoAvailability({
+    startsAt: product.saleStartsAt,
+    endsAt: product.saleEndsAt
+  }, now);
+  const active = salePriceInCents > 0
+    && salePriceInCents < originalPriceInCents
+    && availability.status === 'ACTIVE';
+  return {
+    ...product,
+    effectivePriceInCents: active ? salePriceInCents : originalPriceInCents,
+    promotion: active ? {
+      originalPriceInCents,
+      salePriceInCents,
+      status: availability.status,
+      statusText: '限时直降'
+    } : null
+  };
+}
+
 function createCollaboration(order, merchantId) {
   return {
     merchantId,
@@ -3498,10 +3541,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           ? orderProductsByExposure(data, summarized)
           : orderProductsForList(data, summarized, sort);
         const salesCounts = calculateProductSalesCounts(data);
+        const now = new Date().toISOString();
         return sendJson(response, 200, {
-          data: ranked.map((product) => withMerchantScore(
+          data: ranked.map((product) => withProductSale(withMerchantScore(
             withAvailableStock(withProductSales(product, salesCounts)), data.merchants || []
-          )),
+          ), now)),
           total: ranked.length,
           requestId
         });
@@ -3562,19 +3606,20 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const data = store.read();
         const product = data.products.find((item) => item.id === productMatch[1] && item.active);
         if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+        const now = new Date().toISOString();
         const settings = publicSettings(data.adminSettings);
         const relatedProducts = orderProductsByExposure(data, data.products
           .filter((item) => item.active && item.id !== product.id && item.category === product.category)
         )
-          .slice(0, 3)
-          .map((item) => withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || [])), data.merchants || []));
+        .slice(0, 3)
+          .map((item) => withProductSale(withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || [])), data.merchants || []), now));
         const productMerchant = (data.merchants || []).find((item) => item.id === product.merchantId);
-        const enrichedProduct = withMerchantScore(
+        const enrichedProduct = withProductSale(withMerchantScore(
           withAvailableStock(
             withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])
           ),
           data.merchants || []
-        );
+        ), now);
         enrichedProduct.serviceArea = productMerchant?.serviceArea || '华中农业大学狮山校区';
         const storeProfile = productStoreProfile(enrichedProduct, {
           deliveryResponseHours: settings.deliveryResponseHours,
@@ -5995,6 +6040,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (body.description !== undefined) product.description = requireString(body.description, 'description', { maxLength: 300 });
           if (body.priceInCents !== undefined) { const price = Number(body.priceInCents); if (!Number.isInteger(price) || price < 0) throw new ApiError(400, 'VALIDATION_ERROR', 'priceInCents must be non-negative'); product.priceInCents = price; }
           if (body.category !== undefined) product.category = requireString(body.category, 'category', { maxLength: 50 });
+          const sale = normalizeProductSaleCampaign(body, product);
+          if (sale) {
+            if (sale.salePriceInCents >= product.priceInCents) throw new ApiError(400, 'VALIDATION_ERROR', '促销价必须低于商品原价');
+            product.salePriceInCents = sale.salePriceInCents;
+            product.saleStartsAt = sale.saleStartsAt;
+            product.saleEndsAt = sale.saleEndsAt;
+          }
           if (body.active !== undefined) product.active = Boolean(body.active);
           addAudit(data, '更新商品', product.name);
           return product;
@@ -6066,9 +6118,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const product = store.update((data) => {
           const priceInCents = Number(body.priceInCents); const stock = Number(body.stock);
           if (!Number.isInteger(priceInCents) || priceInCents < 0 || !Number.isInteger(stock) || stock < 0) throw new ApiError(400, 'VALIDATION_ERROR', '价格和库存格式不正确');
+          const sale = normalizeProductSaleCampaign(body);
+          if (sale && sale.salePriceInCents >= priceInCents) throw new ApiError(400, 'VALIDATION_ERROR', '促销价必须低于商品原价');
           const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : '';
           if (imageUrl && !imageUrl.startsWith('/api/uploads/')) throw new ApiError(400, 'VALIDATION_ERROR', '商品图片必须来自平台上传目录');
-          const item = { id: `prod_${randomUUID()}`, name: requireString(body.name, 'name', { maxLength: 80 }), category: requireString(body.category, 'category', { maxLength: 50 }), description: requireString(body.description, 'description', { maxLength: 300 }), priceInCents, stock, campusIds: ['campus_hzau'], imageUrl, active: body.active !== false };
+          const item = { id: `prod_${randomUUID()}`, name: requireString(body.name, 'name', { maxLength: 80 }), category: requireString(body.category, 'category', { maxLength: 50 }), description: requireString(body.description, 'description', { maxLength: 300 }), priceInCents, stock, campusIds: ['campus_hzau'], imageUrl, active: body.active !== false, ...(sale || {}) };
           data.products.unshift(item);
           recordStockMovement(data, item, {
             movementType: 'INITIAL',
@@ -6279,9 +6333,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (availableStock(product) < quantity) {
               throw new ApiError(409, 'INSUFFICIENT_STOCK', `${product.name} 可售库存不足，当前仅剩 ${availableStock(product)} 件`);
             }
-            const subtotalInCents = product.priceInCents * quantity;
+            const { effectivePriceInCents } = withProductSale(product);
+            const subtotalInCents = effectivePriceInCents * quantity;
             totalInCents += subtotalInCents;
-            orderItems.push({ productId, merchantId: product.merchantId || '', name: product.name, priceInCents: product.priceInCents, quantity, subtotalInCents });
+            orderItems.push({ productId, merchantId: product.merchantId || '', name: product.name, priceInCents: effectivePriceInCents, originalPriceInCents: product.priceInCents, quantity, subtotalInCents });
           }
           const isDelivery = body.fulfillment?.type === 'DELIVERY';
           if (isDelivery) validateDeliverySchedule(body.fulfillment, settings);

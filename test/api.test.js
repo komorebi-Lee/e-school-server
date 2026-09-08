@@ -1990,6 +1990,93 @@ test('limited recharge promos enforce availability windows and expose linked ord
   assert.equal(new Date(adminUpdated.body.data.endsAt).getTime(), now + 96 * 3600 * 1000);
 });
 
+test('product sale campaigns use server-calculated promotion prices', async () => {
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+  const product = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ name: '开学季特价车', category: 'E_BIKE_NEW', description: '校园限时直降', priceInCents: 239900, stock: 2 })
+  });
+  assert.equal(product.response.status, 201);
+  const productId = product.body.data.id;
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(adminLogin.response.status, 200);
+  const adminAuth = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  const now = Date.now();
+  const updated = await api(`/api/admin/products/${productId}`, {
+    method: 'POST', headers: adminAuth,
+    body: JSON.stringify({
+      salePriceInCents: 189900,
+      saleStartsAt: new Date(now - 3600 * 1000).toISOString(),
+      saleEndsAt: new Date(now + 24 * 3600 * 1000).toISOString()
+    })
+  });
+  assert.equal(updated.response.status, 200);
+
+  const [list, detail] = await Promise.all([
+    api('/api/products?campusId=campus_demo'),
+    api(`/api/products/${productId}`)
+  ]);
+  const listedProduct = list.body.data.find((item) => item.id === productId);
+  assert.equal(listedProduct.effectivePriceInCents, 189900);
+  assert.equal(listedProduct.promotion.originalPriceInCents, 239900);
+  assert.equal(listedProduct.promotion.statusText, '限时直降');
+  assert.equal(detail.body.data.effectivePriceInCents, 189900);
+  assert.equal(detail.body.data.promotion.originalPriceInCents, 239900);
+
+  const session = await loginWeChat('sale_campaign_buyer');
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId, quantity: 1 }] })
+  });
+  assert.equal(order.response.status, 201);
+  assert.equal(order.body.data.totalInCents, 189900);
+  const payment = await confirmPayment(order.body.paymentOrder.id, session.token);
+  assert.equal(payment.response.status, 200);
+
+  const orderDetail = await api(`/api/orders/${order.body.data.id}`, { headers: { authorization: `Bearer ${session.token}` } });
+  assert.equal(orderDetail.body.data.totalInCents, 189900);
+  assert.equal(orderDetail.body.data.items[0].priceInCents, 189900);
+  assert.equal(orderDetail.body.data.items[0].originalPriceInCents, 239900);
+
+  const merchantOverview = await api('/api/merchant/overview', { headers: merchantAuth });
+  const settlement = merchantOverview.body.data.settlements.find((item) => item.orderId === order.body.data.id);
+  assert.equal(settlement.amountInCents, 189900);
+
+  await api(`/api/admin/products/${productId}`, {
+    method: 'POST', headers: adminAuth,
+    body: JSON.stringify({
+      salePriceInCents: 189900,
+      saleStartsAt: new Date(now + 24 * 3600 * 1000).toISOString(),
+      saleEndsAt: new Date(now + 48 * 3600 * 1000).toISOString()
+    })
+  });
+  const scheduled = await api(`/api/products/${productId}`);
+  assert.equal(scheduled.body.data.effectivePriceInCents, 239900);
+  assert.equal(scheduled.body.data.promotion, null);
+
+  await api(`/api/admin/products/${productId}`, {
+    method: 'POST', headers: adminAuth,
+    body: JSON.stringify({
+      salePriceInCents: 189900,
+      saleStartsAt: new Date(now - 48 * 3600 * 1000).toISOString(),
+      saleEndsAt: new Date(now - 24 * 3600 * 1000).toISOString()
+    })
+  });
+  const ended = await api(`/api/products/${productId}`);
+  assert.equal(ended.body.data.effectivePriceInCents, 239900);
+  assert.equal(ended.body.data.promotion, null);
+});
+
 test('admin after-sale closure refunds paid orders and notifies users', async () => {
   const session = await loginWeChat('refund_after_sale');
   const created = await api('/api/orders', {

@@ -396,3 +396,11 @@ GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 - 提现审核与打款仍是人工在管理端确认的模拟动作，未接入真实企业付款/企业转账接口；但打款凭证号与银行回单已经强制留档，后续可在此基础上接入真实转账与批量打款。
 - 超时预警已接入站内通知、微信订阅消息和店铺服务分；短信或企业微信告警仍未接入。
 - 服务分低质扣分使用 30 天窗口，但仓库仅保留 `merchantScoreLogs` 与商品风控字段；多实例事务数据库下应迁移为独立风控事件表。
+
+### Product Sale Campaigns
+
+Product APIs return server-computed effectivePriceInCents. During the configured window, responses include the original price, sale price, and a limited-time discount label. After the window ends, pricing falls back to the normal price.
+
+Orders persist the charged unit price and crossed-out original price. Merchant settlements use the charged amount, so clients cannot inject promotional pricing or keep a sale price after expiry.
+
+The admin product form configures salePriceInCents, saleStartsAt, and saleEndsAt. The sale price must be lower than the normal price, and start time must be earlier than end time.
