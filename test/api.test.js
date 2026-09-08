@@ -4178,3 +4178,44 @@ test('users can favorite products and revisit them from profile', async () => {
   const removedList = await api('/api/my/favorites', { headers: auth });
   assert.equal(removedList.body.data.length, 0);
 });
+
+test('merchant and admin surfaces turn favorites into demand signals', async () => {
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const shoppers = [];
+  for (let index = 0; index < 2; index += 1) {
+    const session = await loginWeChat(`demand_user_${index}`);
+    shoppers.push(session.token);
+  }
+  for (const token of shoppers) {
+    const add = await api('/api/products/prod_ebike_001/favorite', {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ favorited: true })
+    });
+    assert.equal(add.response.status, 200);
+  }
+
+  const merchantOverview = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(merchantOverview.response.status, 200);
+  const merchantProduct = merchantOverview.body.data.products.find((item) => item.id === 'prod_ebike_001');
+  assert.ok(merchantProduct.favoriteCount >= 2);
+  assert.ok(merchantProduct.favoriteDemandText.includes('2 人收藏'));
+
+  const admin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminOverview = await api('/api/admin/overview', {
+    headers: { authorization: `Bearer ${admin.body.data.token}` }
+  });
+  const adminProduct = adminOverview.body.data.products.find((item) => item.id === 'prod_ebike_001');
+  assert.ok(adminProduct.favoriteCount >= 2);
+  assert.ok(adminOverview.body.data.favoriteDemandProducts.some((item) => (
+    item.id === 'prod_ebike_001' && item.favoriteCount >= 2
+  )));
+});

@@ -3104,8 +3104,22 @@ function createApp({
     return salesCounts;
   }
 
-  function productRestockHint(product, salesCount, threshold) {
+  function calculateProductFavoriteCounts(data) {
+    const favoriteCounts = new Map();
+    for (const favorite of data.productFavorites || []) {
+      favoriteCounts.set(favorite.productId, (favoriteCounts.get(favorite.productId) || 0) + 1);
+    }
+    return favoriteCounts;
+  }
+
+  function favoriteDemandText(count) {
+    if (!count) return '暂无收藏需求';
+    return `${count} 人收藏`;
+  }
+
+  function productRestockHint(product, salesCount, threshold, favoriteCount = 0) {
     if (availableStock(product) > threshold) return '';
+    if (favoriteCount > 0) return `热销·需补货 · ${favoriteDemandText(favoriteCount)}`;
     return salesCount > 0 ? '热销·需补货' : '可售偏低';
   }
 
@@ -4438,6 +4452,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const products = data.products.filter((item) => item.merchantId === merchant.id);
         const stockThreshold = lowStockThreshold(data);
         const productSalesCounts = calculateProductSalesCounts(data);
+        const productFavoriteCounts = calculateProductFavoriteCounts(data);
+        const merchantFavoriteCount = products.reduce((sum, product) => (
+          sum + (productFavoriteCounts.get(product.id) || 0)
+        ), 0);
         const complianceCases = (data.serviceScoreCases || [])
           .filter((item) => item.merchantId === merchant.id && item.productId);
         const merchantProductIds = new Set(products.map((product) => product.id));
@@ -4508,12 +4526,15 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               pendingReplyCount: reviews.filter((review) => !review.reply).length,
               slaOpenCount: slaAlerts.length,
               slaOverdueCount: slaAlerts.filter((alert) => alert.level === 'OVERDUE').length,
+              favoriteCount: merchantFavoriteCount,
+              favoriteDemandText: favoriteDemandText(merchantFavoriteCount),
               settlementMetrics
             },
             products: products.map((product) => {
             const complianceCase = complianceCases.find((item) => item.productId === product.id
                 && item.id === product.autoDelistCaseId);
             const salesCount = productSalesCounts.get(product.id) || 0;
+            const favoriteCount = productFavoriteCounts.get(product.id) || 0;
             const campaign = withProductSale(product);
             const campaignMetrics = productPromotionOrderMetrics(product, data, new Date().toISOString());
             return withAvailableStock({
@@ -4522,7 +4543,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               promotion: campaign.promotion,
               ...campaignMetrics,
               salesCount,
-                restockHint: productRestockHint(product, salesCount, stockThreshold),
+                favoriteCount,
+                favoriteDemandText: favoriteDemandText(favoriteCount),
+                restockHint: productRestockHint(product, salesCount, stockThreshold, favoriteCount),
                 complianceCase: product.autoDelistRule === 'LOW_QUALITY' && complianceCase ? {
                   id: complianceCase.id,
                   caseNo: complianceCase.caseNo,
@@ -4562,6 +4585,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 threshold: stockThreshold,
                 alertedAt: product.lowStockAlertedAt || '',
                 status: product.lowStockAlertStatus || ''
+              }))
+              .map((product) => ({
+                ...product,
+                favoriteCount: productFavoriteCounts.get(product.id) || 0,
+                favoriteDemandText: favoriteDemandText(productFavoriteCounts.get(product.id) || 0)
               })),
             orders: enrichedOrders,
             afterSales,
@@ -5417,9 +5445,23 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           payoutOutCents: financeEvents.filter((event) => event.eventType === 'PAYOUT').reduce((sum, event) => sum + event.amountInCents, 0),
           netInCents: financeEvents.reduce((sum, event) => sum + event.amountInCents, 0)
         };
+        const productFavoriteCounts = calculateProductFavoriteCounts(data);
+        const favoriteDemandProducts = data.products
+          .map((product) => ({
+            id: product.id,
+            name: product.name,
+            merchantId: product.merchantId || '',
+            merchantName: (data.merchants || []).find((merchant) => merchant.id === product.merchantId)?.name || '平台自营',
+            favoriteCount: productFavoriteCounts.get(product.id) || 0,
+            favoriteDemandText: favoriteDemandText(productFavoriteCounts.get(product.id) || 0),
+            availableStock: availableStock(product)
+          }))
+          .filter((item) => item.favoriteCount > 0)
+          .sort((a, b) => b.favoriteCount - a.favoriteCount)
+          .slice(0, 10);
         return sendJson(response, 200, {
           data: {
-            metrics: { revenueInCents, paidOrders, pending, lowStock: data.products.filter((item) => item.active !== false && availableStock(item) <= lowStockThreshold(data)).length, paymentTimeouts, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length, afterSaleOverdue: (data.afterSales || []).filter((item) => item.status !== 'CLOSED' && item.responseDueAt && item.responseDueAt < new Date().toISOString()).length },
+            metrics: { revenueInCents, paidOrders, pending, lowStock: data.products.filter((item) => item.active !== false && availableStock(item) <= lowStockThreshold(data)).length, paymentTimeouts, leadsToday: leads.filter(x => x.createdAt.slice(0,10) === new Date().toISOString().slice(0,10)).length, leadsPending: leads.filter(x => openLeadStatuses.has(x.status)).length, leadsOverdue: leads.filter(x => x.slaDueAt < new Date().toISOString() && openLeadStatuses.has(x.status)).length, afterSaleOverdue: (data.afterSales || []).filter((item) => item.status !== 'CLOSED' && item.responseDueAt && item.responseDueAt < new Date().toISOString()).length, favoriteCount: favoriteDemandProducts.reduce((sum, item) => sum + item.favoriteCount, 0), favoriteDemandText: favoriteDemandText(favoriteDemandProducts.reduce((sum, item) => sum + item.favoriteCount, 0)) },
             lowStockProducts: data.products
               .filter((item) => item.active !== false && availableStock(item) <= lowStockThreshold(data))
               .sort((a, b) => availableStock(a) - availableStock(b))
@@ -5434,10 +5476,16 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 alertedAt: item.lowStockAlertedAt || '',
                 status: item.lowStockAlertStatus || ''
               })),
-            products: data.products.map((product) => ({
-              ...withAvailableStock(product),
-              ...productPromotionOrderMetrics(product, data, new Date().toISOString())
-            })),
+            products: data.products.map((product) => {
+              const favoriteCount = productFavoriteCounts.get(product.id) || 0;
+              return {
+                ...withAvailableStock(product),
+                ...productPromotionOrderMetrics(product, data, new Date().toISOString()),
+                favoriteCount,
+                favoriteDemandText: favoriteDemandText(favoriteCount)
+              };
+            }),
+            favoriteDemandProducts,
             promotionSummary: (data.products || [])
               .filter((product) => Number(product.salePriceInCents || 0) > 0)
               .map((product) => ({
