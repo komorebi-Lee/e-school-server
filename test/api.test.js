@@ -4129,6 +4129,17 @@ test('approved merchants expose a public storefront without private data', async
   assert.ok(storefront.body.data.merchant.serviceScore.score);
   assert.ok(storefront.body.data.products.some((item) => item.id === 'prod_ebike_001'));
   assert.ok(storefront.body.data.products.every((item) => item.active && item.availableStock !== undefined));
+  assert.ok(storefront.body.data.reviewSummary.count >= 1);
+  assert.ok(storefront.body.data.reviewSummary.averageRating > 0);
+  assert.ok(Array.isArray(storefront.body.data.reviews));
+  assert.ok(storefront.body.data.reviews.length >= 1);
+  const storefrontReview = storefront.body.data.reviews[0];
+  assert.equal('ownerName' in storefrontReview, false);
+  assert.equal('phone' in storefrontReview, false);
+  assert.equal('settlementAccount' in storefrontReview, false);
+  assert.ok(storefrontReview.productName);
+  assert.ok(storefrontReview.rating);
+  assert.ok(storefrontReview.content);
 
   const hidden = await api('/api/merchants/merchant_002/storefront');
   assert.equal(hidden.response.status, 404);

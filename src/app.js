@@ -703,6 +703,43 @@ function productStoreProfile(product, { deliveryResponseHours = 24, soldCount = 
   };
 }
 
+function publicStorefrontReviews(data, merchantId) {
+  const productNames = new Map((data.products || []).map((product) => [product.id, product.name]));
+  const matched = (data.productReviews || []).filter((review) => {
+    const product = (data.products || []).find((item) => item.id === review.productId);
+    return product?.merchantId === merchantId
+      && review.purchaseVerified
+      && review.visibility !== 'HIDDEN';
+  }).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+
+  const average = matched.length
+    ? matched.reduce((sum, review) => sum + (Number(review.rating) || 0), 0) / matched.length
+    : 0;
+  const positiveCount = matched.filter((review) => Number(review.rating) >= 4).length;
+  return {
+    summary: {
+      count: matched.length,
+      averageRating: Math.round(average * 10) / 10,
+      positiveRate: matched.length ? Math.round((positiveCount / matched.length) * 100) / 100 : 0
+    },
+    items: matched.slice(0, 8).map((review) => ({
+      id: review.id,
+      rating: Number(review.rating) || 0,
+      content: review.content || '',
+      images: Array.isArray(review.images) ? review.images.slice(0, 3) : [],
+      customerName: review.customerName || '匿名同学',
+      college: review.college || '',
+      createdAt: review.createdAt || '',
+      productName: productNames.get(review.productId) || '平台商品',
+      reply: review.reply?.content ? {
+        merchantName: review.reply.merchantName || '商家回复',
+        content: review.reply.content,
+        repliedAt: review.reply.repliedAt || ''
+      } : null
+    }))
+  };
+}
+
 function rechargePromoAvailability(promo, now = new Date().toISOString()) {
   const current = new Date(now).getTime();
   const startsAt = promo.startsAt ? new Date(promo.startsAt).getTime() : null;
@@ -4169,9 +4206,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .map((product) => withProductSale(withMerchantScore(
             withAvailableStock(withProductSales(product, salesCounts)), data.merchants || []
           ), now));
-        const rankedProducts = orderProductsByExposure(data, products);
-        return sendJson(response, 200, {
-          data: {
+      const rankedProducts = orderProductsByExposure(data, products);
+      const storefrontReviews = publicStorefrontReviews(data, merchant.id);
+      return sendJson(response, 200, {
+        data: {
             merchant: {
               id: merchant.id,
               name: merchant.name,
@@ -4183,7 +4221,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             productCount: products.length,
             totalSalesCount: products.reduce((sum, product) => sum + Number(product.salesCount || 0), 0),
             deliveryResponseHours: settings.deliveryResponseHours,
-            products: rankedProducts
+            products: rankedProducts,
+            reviewSummary: storefrontReviews.summary,
+            reviews: storefrontReviews.items
           },
           requestId
         });
