@@ -100,6 +100,30 @@ test('lead follow-up result rejects unsupported status', async () => {
   });
   assert.equal(login.response.status, 200);
 
+  const followed = await api(`/api/admin/leads/${created.body.data.id}/follow-ups`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${login.body.data.token}` },
+    body: JSON.stringify({ content: '客服已确认充值将在24小时内到账。', status: 'FOLLOW_UP' })
+  });
+  assert.equal(followed.response.status, 200);
+  assert.equal(followed.body.data.status, 'FOLLOW_UP');
+
+  const notifications = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${session.token}` }
+  });
+  const notice = notifications.body.data.find((item) => item.metadata?.focusId === recharge.body.data.id);
+  assert.ok(notice, 'lead follow-up should create a user notification');
+  assert.equal(notice.type, 'RECHARGE');
+  assert.equal(notice.title, '咨询跟进更新');
+  assert.ok(notice.content.includes('客服已确认充值将在24小时内到账。'));
+
+  const orders = await api('/api/my/orders', {
+    headers: { authorization: `Bearer ${session.token}` }
+  });
+  const rechargeRecord = orders.body.data.serviceRecords.find((item) => item.id === recharge.body.data.id);
+  assert.ok(rechargeRecord, 'linked recharge record should stay in user orders');
+  assert.equal(rechargeRecord.collaboration.handoffs[0].action, 'LEAD_FOLLOW_UP');
+  assert.equal(rechargeRecord.collaboration.handoffs[0].note, '客服已确认充值将在24小时内到账。');
+
   const rejected = await api(`/api/admin/leads/${created.body.data.id}/follow-ups`, {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${login.body.data.token}` },
     body: JSON.stringify({ content: '错误的旧状态', status: 'MATERIAL_PENDING' })

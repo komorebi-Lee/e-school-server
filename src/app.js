@@ -6400,7 +6400,39 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response,200,{data:updated,requestId});
       }
       const followMatch = pathname.match(/^\/api\/admin\/leads\/([^/]+)\/follow-ups$/);
-      if (request.method === 'POST' && followMatch) { const body=await readJson(request); if (body.status !== undefined && !allowedLeadStatuses.has(body.status)) throw new ApiError(400,'VALIDATION_ERROR','Unsupported lead status. Use SUBMITTED, FOLLOW_UP, COMPLETED or INVALID.'); const updated=store.update(data=>{const item=(data.leads||[]).find(x=>x.id===followMatch[1]); if(!item) throw new ApiError(404,'LEAD_NOT_FOUND','Lead not found'); const text=requireString(body.content,'content',{maxLength:500}); item.followUps=item.followUps||[]; item.followUps.unshift({id:`fu_${randomUUID()}`,content:text,operator:body.operator||'运营管理员',createdAt:new Date().toISOString()}); if (body.status !== undefined) item.status=body.status; item.updatedAt=new Date().toISOString(); return item;}); return sendJson(response,200,{data:updated,requestId}); }
+      if (request.method === 'POST' && followMatch) {
+        const body = await readJson(request);
+        if (body.status !== undefined && !allowedLeadStatuses.has(body.status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported lead status. Use SUBMITTED, FOLLOW_UP, COMPLETED or INVALID.');
+        const now = new Date().toISOString();
+        const updated = store.update((data) => {
+          const item = (data.leads || []).find((x) => x.id === followMatch[1]);
+          if (!item) throw new ApiError(404, 'LEAD_NOT_FOUND', 'Lead not found');
+          const text = requireString(body.content, 'content', { maxLength: 500 });
+          item.followUps = item.followUps || [];
+          item.followUps.unshift({
+            id: `fu_${randomUUID()}`,
+            content: text,
+            operator: body.operator || '运营管理员',
+            createdAt: now
+          });
+          if (body.status !== undefined) item.status = body.status;
+          item.updatedAt = now;
+
+          const source = item.sourceType && item.sourceId
+            ? leadSourceRecord(data, item.userId, item.sourceType, item.sourceId)
+            : null;
+          if (source) {
+            if (item.sourceType === 'ORDER') appendCollaborationEvent(source, 'PLATFORM', 'LEAD_FOLLOW_UP', text);
+            else appendServiceRecordEvent(source, 'PLATFORM', 'LEAD_FOLLOW_UP', text);
+            addNotification(data, item.userId, item.sourceType, '咨询跟进更新', `${item.businessType}：${text}`, { focusId: source.id });
+          } else {
+            addNotification(data, item.userId, 'LEAD', '咨询跟进更新', `${item.businessType}：${text}`);
+          }
+          addAudit(data, '线索跟进', item.leadNo);
+          return item;
+        });
+        return sendJson(response, 200, { data: updated, requestId });
+      }
       if (request.method === 'GET' && pathname === '/api/admin/leads/export') { const leads=store.read().leads||[]; return sendJson(response,200,{data:leads,requestId}); }
 
       const adminReviewVisibilityMatch = pathname.match(/^\/api\/admin\/product-reviews\/([^/]+)\/visibility$/);
