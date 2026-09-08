@@ -67,14 +67,32 @@ function makeImage(mimeType = 'image/png') {
 
 test('lead follow-up result rejects unsupported status', async () => {
   const session = await loginWeChat('lead_user');
+  const recharge = await api('/api/recharge-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ phone: '15527111396', promoId: 'promo_recharge_100' })
+  });
+  assert.equal(recharge.response.status, 201);
+  const missingSource = await api('/api/leads', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      name: '测试同学', phone: '15527111396',
+      businessType: 'RECHARGE', interest: '到账进度',
+      sourceType: 'RECHARGE', sourceId: 'not-exists'
+    })
+  });
+  assert.equal(missingSource.response.status, 404);
+  assert.equal(missingSource.body.error.code, 'LEAD_SOURCE_NOT_FOUND');
   const created = await api('/api/leads', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
       name: '测试同学', phone: '15527111396',
-      businessType: 'E_BIKE', interest: '轻风通勤版'
+      businessType: 'E_BIKE', interest: '轻风通勤版',
+      sourceType: 'RECHARGE', sourceId: recharge.body.data.id
     })
   });
   assert.equal(created.response.status, 201);
+  assert.equal(created.body.data.sourceType, 'RECHARGE');
+  assert.equal(created.body.data.sourceId, recharge.body.data.id);
 
   const login = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },

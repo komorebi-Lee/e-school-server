@@ -386,9 +386,9 @@ function leads(){
   const rows = items.map(x => {
     const status = normalizeLeadStatus(x.status);
     const overdue = x.slaDueAt < new Date().toISOString();
-    return `<tr><td><strong>${esc(x.leadNo)}</strong><small>${fmtDate(x.createdAt)}</small></td><td><strong>${esc(x.name)}</strong><small>${esc(x.phone)}</small></td><td>${esc(x.businessType)}</td><td>${esc(x.interest)}</td><td><span class="badge ${overdue ? 'red' : 'orange'}">${overdue ? '已超时' : '24小时内'}</span></td><td><span class="badge ${leadStatusClass(status)}">${leadStatusLabels[status]}</span></td><td><div class="row-actions"><button class="text-button lead-open" data-id="${x.id}">跟进</button></div></td></tr>`;
+    return `<tr><td><strong>${esc(x.leadNo)}</strong><small>${fmtDate(x.createdAt)}</small></td><td><strong>${esc(x.name)}</strong><small>${esc(x.phone)}</small></td><td>${esc(x.businessType)}</td><td>${esc(x.interest)}</td><td>${x.sourceNo ? `${esc(x.sourceNo)}<small>${esc(x.sourceType || '')}</small>` : '<span class="muted-empty">自然咨询</span>'}</td><td><span class="badge ${overdue ? 'red' : 'orange'}">${overdue ? '已超时' : '24小时内'}</span></td><td><span class="badge ${leadStatusClass(status)}">${leadStatusLabels[status]}</span></td><td><div class="row-actions"><button class="text-button lead-open" data-id="${x.id}">跟进</button></div></td></tr>`;
   });
-  return toolbar(items.length, { statusesList: leadStatuses }) + table(['编号','客户','业务','意向','时效','状态','操作'], rows, items.length);
+  return toolbar(items.length, { statusesList: leadStatuses }) + table(['编号','客户','业务','意向','关联记录','时效','状态','操作'], rows, items.length);
 }
 
 function openLeadPanel(id){
@@ -403,6 +403,7 @@ function openLeadPanel(id){
       <div class="detail-item"><small>电话</small><strong>${esc(lead.phone)}</strong></div>
       <div class="detail-item"><small>业务</small><strong>${esc(lead.businessType)}</strong></div>
       <div class="detail-item"><small>意向</small><strong>${esc(lead.interest)}</strong></div>
+      <div class="detail-item"><small>关联记录</small><strong>${lead.sourceNo ? `${esc(lead.sourceNo)}${lead.sourceType ? `（${esc(lead.sourceType)}）` : ''}` : '自然咨询'}</strong></div>
     </div></div>
     <div class="detail-section"><h3>当前状态</h3>
       <div class="lead-status-line"><span class="badge ${leadStatusClass(status)}">${leadStatusLabels[status]}</span><small>更新于 ${fmtDate(lead.updatedAt || lead.createdAt)}</small></div>
@@ -421,7 +422,7 @@ function openLeadPanel(id){
   document.querySelectorAll('.lead-action[data-status]').forEach(btn => btn.addEventListener('click', () => updateLeadStatus(btn.dataset.id, btn.dataset.status)));
   document.querySelector('#saveContacted')?.addEventListener('click', () => saveLeadFollow(lead.id));
   document.querySelector('#copyLeadInfo')?.addEventListener('click', async () => {
-    const text = `${lead.name} ${lead.phone}\n${lead.businessType}：${lead.interest || ''}`;
+    const text = `${lead.name} ${lead.phone}\n${lead.businessType}：${lead.interest || ''}${lead.sourceNo ? `\n关联记录：${lead.sourceNo}${lead.sourceType ? `（${lead.sourceType}）` : ''}` : ''}`;
     await navigator.clipboard.writeText(text); showToast('客户信息已复制');
   });
   toggleDrawer(true);

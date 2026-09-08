@@ -760,6 +760,23 @@ function userNotificationLink(notification) {
   return '';
 }
 
+function leadSourceRecord(data, userId, sourceType, sourceId) {
+  if (!sourceType && !sourceId) return null;
+  const collections = {
+    ORDER: 'orders',
+    PHONE_PLAN: 'phoneCardOrders',
+    RECHARGE: 'rechargeOrders',
+    BROADBAND: 'broadbandApplications',
+    PLATE: 'plateApplications'
+  };
+  if (!collections[sourceType] || !sourceId) {
+    throw new ApiError(400, 'VALIDATION_ERROR', '来源业务或来源单号不完整');
+  }
+  const source = (data[collections[sourceType]] || []).find((item) => item.id === sourceId && item.userId === userId);
+  if (!source) throw new ApiError(404, 'LEAD_SOURCE_NOT_FOUND', '来源订单不存在或不属于当前用户');
+  return source;
+}
+
 function rechargePromoAvailability(promo, now = new Date().toISOString()) {
   const current = new Date(now).getTime();
   const startsAt = promo.startsAt ? new Date(promo.startsAt).getTime() : null;
@@ -6021,7 +6038,31 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const now = new Date();
         const leadResponseHours = slaHours(store.read(), 'leadResponseHours', 24);
-        const lead = { id:`lead_${randomUUID()}`, leadNo:`LS${Date.now().toString().slice(-8)}`, userId, name:requireString(body.name,'name',{maxLength:50}), phone:requireString(body.phone,'phone',{maxLength:30}), businessType:requireString(body.businessType,'businessType',{maxLength:40}), interest:requireString(body.interest || '未指定','interest',{maxLength:120}), expectedTime:(body.expectedTime||'尽快').toString().slice(0,40), deliveryNeed:(body.deliveryNeed||'无').toString().slice(0,120), note:(body.note||'').toString().slice(0,500), status:'SUBMITTED', assignee:'', followUps:[], createdAt:now.toISOString(), updatedAt:now.toISOString(), slaDueAt:new Date(now.getTime()+leadResponseHours*3600*1000).toISOString() };
+        const sourceType = typeof body.sourceType === 'string' ? body.sourceType.trim().slice(0, 30) : '';
+        const sourceId = typeof body.sourceId === 'string' ? body.sourceId.trim().slice(0, 100) : '';
+        const sourceRecord = leadSourceRecord(store.read(), userId, sourceType, sourceId);
+        const sourceNo = sourceRecord?.orderNo || sourceRecord?.paymentNo || sourceRecord?.id || '';
+        const lead = {
+          id: `lead_${randomUUID()}`,
+          leadNo: `LS${Date.now().toString().slice(-8)}`,
+          userId,
+          name: requireString(body.name, 'name', { maxLength: 50 }),
+          phone: requireString(body.phone, 'phone', { maxLength: 30 }),
+          businessType: requireString(body.businessType, 'businessType', { maxLength: 40 }),
+          interest: requireString(body.interest || '未指定', 'interest', { maxLength: 120 }),
+          expectedTime: (body.expectedTime || '尽快').toString().slice(0, 40),
+          deliveryNeed: (body.deliveryNeed || '无').toString().slice(0, 120),
+          note: (body.note || '').toString().slice(0, 500),
+          sourceType,
+          sourceId,
+          sourceNo: String(sourceNo).slice(0, 100),
+          status: 'SUBMITTED',
+          assignee: '',
+          followUps: [],
+          createdAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+          slaDueAt: new Date(now.getTime() + leadResponseHours * 3600 * 1000).toISOString()
+        };
         store.update(data => { if (!Array.isArray(data.leads)) data.leads=[]; data.leads.unshift(lead); addAudit(data,'新增咨询线索',lead.leadNo); });
         return sendJson(response,201,{data:lead,requestId});
       }
