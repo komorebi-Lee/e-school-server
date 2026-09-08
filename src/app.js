@@ -2995,6 +2995,67 @@ function createApp({
     };
   }
 
+  function merchantRiskTasks(afterSales = [], slaAlerts = [], reviews = [], products = [], stockThreshold = 10) {
+    const now = new Date().toISOString();
+    const priorityOrder = { URGENT: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+    const tasks = [];
+    for (const record of afterSales) {
+      if (record.status === 'CLOSED') continue;
+      const overdue = Boolean(record.responseDueAt && record.responseDueAt < now);
+      tasks.push({
+        id: record.id,
+        type: 'AFTER_SALE',
+        priority: overdue ? 'URGENT' : 'HIGH',
+        title: `售后工单 · ${record.typeLabel || '售后处理'}`,
+        detail: record.reason || record.orderId || '',
+        reference: record.orderId,
+        dueAt: record.responseDueAt || '',
+        action: '去处理售后'
+      });
+    }
+    for (const alert of slaAlerts) {
+      tasks.push({
+        id: alert.id,
+        type: 'SLA',
+        priority: alert.level === 'OVERDUE' ? 'URGENT' : 'HIGH',
+        title: `履约预警 · ${alert.ruleLabel || '超时预警'}`,
+        detail: `${alert.businessNo || ''}${alert.detail ? `：${alert.detail}` : ''}`,
+        reference: alert.businessId || alert.id,
+        dueAt: alert.dueAt || '',
+        action: '去处理履约'
+      });
+    }
+    for (const review of reviews) {
+      if (Number(review.rating) > 2 || review.reply) continue;
+      tasks.push({
+        id: review.id,
+        type: 'NEGATIVE_REVIEW',
+        priority: 'MEDIUM',
+        title: `差评待回复 · ${review.rating} 分`,
+        detail: review.content || '',
+        reference: review.id,
+        dueAt: '',
+        action: '去回复差评'
+      });
+    }
+    for (const product of products) {
+      if (product.active === false || availableStock(product) > stockThreshold) continue;
+      tasks.push({
+        id: product.id,
+        type: 'LOW_STOCK',
+        priority: 'LOW',
+        title: `库存偏低 · ${product.name || '商品'}`,
+        detail: `当前可用 ${availableStock(product)} 件，阈值 ${stockThreshold} 件`,
+        reference: product.id,
+        dueAt: '',
+        action: '去补充库存'
+      });
+    }
+    return tasks
+      .sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority])
+      .slice(0, 20);
+  }
+
   function merchantScoreTrend(data, merchantId, days = 14) {
     const count = Number.isInteger(days) && days >= 2 && days <= 90 ? days : 14;
     const today = new Date().toISOString().slice(0, 10);
@@ -4737,6 +4798,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             merchant: merchantPublic(merchant),
             serviceScore: merchant.serviceScore || null,
             scoreTrend: merchantScoreTrend(data, merchant.id),
+            riskTasks: merchantRiskTasks(afterSales, slaAlerts, reviews, products, stockThreshold),
             lowStockThreshold: stockThreshold,
             scoreCases: (data.serviceScoreCases || []).filter((item) => item.merchantId === merchant.id),
             qualificationRenewals,
