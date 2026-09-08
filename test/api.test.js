@@ -1907,6 +1907,89 @@ test('admin metrics exclude unpaid and refunded service records', async () => {
   assert.equal(after.body.data.metrics.pending, before.body.data.metrics.pending);
 });
 
+test('limited recharge promos enforce availability windows and expose linked orders', async () => {
+  const now = Date.now();
+  store.update((data) => {
+    data.rechargePromos ||= [];
+    data.rechargePromos.unshift({
+      id: 'promo_recharge_windowed',
+      pay: 100,
+      receive: 150,
+      badge: '开学期限定',
+      active: true,
+      startsAt: new Date(now - 24 * 3600 * 1000).toISOString(),
+      endsAt: new Date(now + 24 * 3600 * 1000).toISOString()
+    });
+  });
+
+  const activeList = await api('/api/recharge-promos');
+  const activePromo = activeList.body.data.find((item) => item.id === 'promo_recharge_windowed');
+  assert.equal(activePromo.status, 'ACTIVE');
+  assert.equal(activePromo.statusLabel, '进行中');
+  assert.equal(activePromo.linkedOrderCount, 0);
+
+  const session = await loginWeChat('promo_window_buyer');
+  const created = await api('/api/recharge-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ phone: '15527111444', promoId: 'promo_recharge_windowed' })
+  });
+  assert.equal(created.response.status, 201);
+  const confirmed = await confirmPayment(created.body.paymentOrder.id, session.token);
+  assert.equal(confirmed.response.status, 200);
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const overview = await api('/api/admin/overview', { headers: { authorization: `Bearer ${adminLogin.body.data.token}` } });
+  const promo = overview.body.data.rechargePromos.find((item) => item.id === 'promo_recharge_windowed');
+  assert.equal(promo.status, 'ACTIVE');
+  assert.equal(promo.linkedOrderCount, 1);
+  assert.ok(promo.linkedPaidOrderCount >= 1);
+
+  store.update((data) => {
+    const item = data.rechargePromos.find((entry) => entry.id === 'promo_recharge_windowed');
+    item.startsAt = new Date(now + 2 * 24 * 3600 * 1000).toISOString();
+    item.endsAt = new Date(now + 3 * 24 * 3600 * 1000).toISOString();
+  });
+  const scheduledList = await api('/api/recharge-promos');
+  assert.equal(scheduledList.body.data.some((item) => item.id === 'promo_recharge_windowed'), false);
+
+  const scheduledOrder = await api('/api/recharge-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ phone: '15527111444', promoId: 'promo_recharge_windowed' })
+  });
+  assert.equal(scheduledOrder.response.status, 404);
+
+  store.update((data) => {
+    const item = data.rechargePromos.find((entry) => entry.id === 'promo_recharge_windowed');
+    item.startsAt = new Date(now - 72 * 3600 * 1000).toISOString();
+    item.endsAt = new Date(now - 48 * 3600 * 1000).toISOString();
+  });
+  const endedOrder = await api('/api/recharge-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ phone: '15527111444', promoId: 'promo_recharge_windowed' })
+  });
+  assert.equal(endedOrder.response.status, 404);
+
+  const adminUpdated = await api('/api/admin/recharge-promos', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
+    body: JSON.stringify({
+      id: 'promo_recharge_windowed',
+      payInCents: 10000,
+      receiveInCents: 15000,
+      badge: '开学期限定',
+      active: true,
+      startsAt: new Date(now + 72 * 3600 * 1000).toISOString(),
+      endsAt: new Date(now + 96 * 3600 * 1000).toISOString()
+    })
+  });
+  assert.equal(adminUpdated.response.status, 201);
+  assert.equal(new Date(adminUpdated.body.data.startsAt).getTime(), now + 72 * 3600 * 1000);
+  assert.equal(new Date(adminUpdated.body.data.endsAt).getTime(), now + 96 * 3600 * 1000);
+});
+
 test('admin after-sale closure refunds paid orders and notifies users', async () => {
   const session = await loginWeChat('refund_after_sale');
   const created = await api('/api/orders', {

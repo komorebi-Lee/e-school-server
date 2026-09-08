@@ -698,6 +698,28 @@ function productStoreProfile(product, { deliveryResponseHours = 24, soldCount = 
   };
 }
 
+function rechargePromoAvailability(promo, now = new Date().toISOString()) {
+  const current = new Date(now).getTime();
+  const startsAt = promo.startsAt ? new Date(promo.startsAt).getTime() : null;
+  const endsAt = promo.endsAt ? new Date(promo.endsAt).getTime() : null;
+  if (startsAt && current < startsAt) return { status: 'SCHEDULED', statusLabel: '未开始' };
+  if (endsAt && current >= endsAt) return { status: 'ENDED', statusLabel: '已结束' };
+  return { status: 'ACTIVE', statusLabel: '进行中' };
+}
+
+function publicRechargePromo(promo, data, now) {
+  const linkedOrders = (data.rechargeOrders || []).filter((order) => order.promoId === promo.id);
+  const linkedPaidOrderCount = linkedOrders.filter((order) => order.paymentStatus === 'PAID'
+    && ['PENDING_CREDIT', 'CREDITED'].includes(order.status)).length;
+  return {
+    ...promo,
+    ...rechargePromoAvailability(promo, now),
+    linkedOrderCount: linkedOrders.length,
+    linkedPaidOrderCount,
+    linkedAmountInCents: linkedPaidOrderCount * Math.round(Number(promo.pay || 0) * 100)
+  };
+}
+
 function createCollaboration(order, merchantId) {
   return {
     merchantId,
@@ -3486,7 +3508,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/recharge-promos') {
-        const items = (store.read().rechargePromos || []).filter((item) => item.active !== false);
+        const now = new Date().toISOString();
+        const items = (store.read().rechargePromos || [])
+          .filter((item) => item.active !== false && rechargePromoAvailability(item, now).status === 'ACTIVE')
+          .map((item) => publicRechargePromo(item, store.read(), now));
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
@@ -4937,7 +4962,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             products: data.products.map(withAvailableStock),
             stockMovements: data.stockMovements || [],
             adminUsers: (data.adminUsers || []).map(publicAdminUser),
-            rechargePromos: data.rechargePromos || [],
+            rechargePromos: (data.rechargePromos || [])
+              .map((item) => publicRechargePromo(item, data, new Date().toISOString())),
             merchants: data.merchants,
             qualificationRenewals: data.qualificationRenewals || [],
             orders: data.orders,
@@ -5212,8 +5238,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const body = await readJson(request);
         const promoId = requireString(body.promoId, 'promoId', { maxLength: 100 });
-        const promo = store.read().rechargePromos?.find((item) => item.id === promoId && item.active !== false);
-        if (!promo) throw new ApiError(404, 'RECHARGE_PROMO_NOT_FOUND', '话费活动不存在或已下架');
+        const promoRead = store.read().rechargePromos?.find((item) => item.id === promoId && item.active !== false);
+        if (!promoRead || rechargePromoAvailability(promoRead).status !== 'ACTIVE') {
+          throw new ApiError(404, 'RECHARGE_PROMO_NOT_FOUND', '话费活动不存在、未开始或已结束');
+        }
+        const promo = promoRead;
         const paidInCents = Math.round(Number(promo.pay) * 100);
         const receiveInCents = Math.round(Number(promo.receive) * 100);
         const idempotencyKey = String(request.headers['idempotency-key'] || '');
@@ -6000,6 +6029,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         if (!Number.isInteger(payInCents) || payInCents < 1000 || payInCents > 10000000 || !Number.isInteger(receiveInCents) || receiveInCents <= payInCents || receiveInCents > 10000000) {
           throw new ApiError(400, 'VALIDATION_ERROR', '充值金额和到账金额格式不正确');
         }
+        const startsAt = body.startsAt ? new Date(body.startsAt) : null;
+        const endsAt = body.endsAt ? new Date(body.endsAt) : null;
+        if ((body.startsAt && Number.isNaN(startsAt.getTime()))
+          || (body.endsAt && Number.isNaN(endsAt.getTime()))
+          || (startsAt && endsAt && startsAt.getTime() >= endsAt.getTime())) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '活动开始时间必须早于结束时间');
+        }
         const promo = store.update((data) => {
           const records = data.rechargePromos = data.rechargePromos || [];
           const badge = typeof body.badge === 'string' && body.badge.trim() ? body.badge.trim().slice(0, 30) : '限时优惠';
@@ -6011,11 +6047,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             item.receive = Math.round(receiveInCents / 100);
             item.badge = badge;
             item.active = active;
+            item.startsAt = startsAt ? startsAt.toISOString() : '';
+            item.endsAt = endsAt ? endsAt.toISOString() : '';
             item.updatedAt = new Date().toISOString();
             addAudit(data, '更新话费活动', item.id);
             return item;
           }
-          const item = { id: `promo_${randomUUID()}`, pay: Math.round(payInCents / 100), receive: Math.round(receiveInCents / 100), badge, active, createdAt: new Date().toISOString() };
+          const item = { id: `promo_${randomUUID()}`, pay: Math.round(payInCents / 100), receive: Math.round(receiveInCents / 100), badge, active, startsAt: startsAt ? startsAt.toISOString() : '', endsAt: endsAt ? endsAt.toISOString() : '', createdAt: new Date().toISOString() };
           records.unshift(item);
           addAudit(data, '新增话费活动', item.id);
           return item;

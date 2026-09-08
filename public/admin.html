@@ -1,39 +1,205 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>狮山智生活 · 运营管理中心</title><link rel="stylesheet" href="/admin/admin.css"></head>
-<body>
-  <section id="loginPage" class="login-page">
-    <div class="login-brand"><span>狮</span><strong>狮山智生活</strong><small>华中农业大学校园服务运营平台</small></div>
-    <form id="loginForm" class="login-card">
-      <div class="login-eyebrow">OPERATIONS CENTER</div><h1>登录运营管理中心</h1><p>统一处理商品、订单、实名、宽带和牌照业务。</p>
-      <label>账号<input id="username" autocomplete="username" placeholder="请输入运营账号"></label>
-      <label>密码<input id="password" type="password" autocomplete="current-password" placeholder="请输入运营密码"></label>
-      <button class="primary large" type="submit">登录管理端</button>
-    </form>
-  </section>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>狮山智生活 · 运营管理中心</title>
+    <link rel="stylesheet" href="/admin/admin.css" />
+  </head>
+  <body>
+    <section id="loginPage" class="login-page">
+      <div class="login-brand">
+        <span>狮</span><strong>狮山智生活</strong><small>华中农业大学校园服务运营平台</small>
+      </div>
+      <form id="loginForm" class="login-card">
+        <div class="login-eyebrow">OPERATIONS CENTER</div>
+        <h1>登录运营管理中心</h1>
+        <p>统一处理商品、订单、实名、宽带和牌照业务。</p>
+        <label>账号<input id="username" autocomplete="username" placeholder="请输入运营账号" /></label>
+        <label
+          >密码<input id="password" type="password" autocomplete="current-password" placeholder="请输入运营密码"
+        /></label>
+        <button class="primary large" type="submit">登录管理端</button>
+      </form>
+    </section>
 
-  <div id="appShell" class="app-shell hidden">
-    <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">狮</span><div><strong>狮山智生活</strong><small>运营管理中心</small></div></div>
-      <div class="campus-switch"><small>当前运营校区</small><strong id="sidebarSchool">华中农业大学</strong><span id="sidebarCampus">狮山校区</span></div>
-      <nav id="nav">
-<div class="nav-group">工作台</div><button class="nav-item active" data-view="dashboard"><span>总</span>经营概览</button><button class="nav-item" data-view="merchants"><span>商</span>商家入驻</button><button class="nav-item" data-view="qualification"><span>证</span>资质复审</button><button class="nav-item" data-view="leads"><span>线</span>咨询线索</button>
-        <div class="nav-group">商品交易</div><button class="nav-item" data-view="products"><span>商</span>商品中心</button><button class="nav-item" data-view="stock"><span>流</span>库存流水</button><button class="nav-item" data-view="promos"><span>惠</span>话费活动</button><button class="nav-item" data-view="reviews"><span>评</span>商品评价</button><button class="nav-item" data-view="orders"><span>车</span>电瓶车订单</button><button class="nav-item" data-view="payments"><span>支</span>支付单</button><button class="nav-item" data-view="phones"><span>号</span>电话卡订单</button><button class="nav-item" data-view="recharges"><span>充</span>话费权益</button><button class="nav-item" data-view="finance"><span>财</span>财务流水</button><button class="nav-item" data-view="settlements"><span>结</span>商家结算</button><button class="nav-item" data-view="payouts"><span>提</span>商家提现</button>
-        <div class="nav-group">履约服务</div><button class="nav-item" data-view="patrol"><span>警</span>超时预警</button><button class="nav-item" data-view="scores"><span>分</span>商家服务分</button><button class="nav-item" data-view="serviceCollabs"><span>协</span>服务单协同</button><button class="nav-item" data-view="broadband"><span>网</span>宽带资格</button><button class="nav-item" data-view="plates"><span>牌</span>牌照辅助</button><button class="nav-item" data-view="afterSales"><span>售</span>售后工单</button><button class="nav-item" data-view="notifications"><span>通</span>站内通知</button>
-        <div class="nav-group">系统</div><button class="nav-item" data-view="logs"><span>记</span>操作日志</button><button class="nav-item" data-view="admins"><span>员</span>管理员管理</button><button class="nav-item" data-view="settings"><span>设</span>运营设置</button>
-      </nav>
-      <div class="sidebar-user"><div class="avatar">运</div><div><strong>运营管理员</strong><small>超级管理员</small></div><button id="logoutButton" title="退出登录">退出</button></div>
+    <div id="appShell" class="app-shell hidden">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">狮</span>
+          <div><strong>狮山智生活</strong><small>运营管理中心</small></div>
+        </div>
+        <div class="campus-switch">
+          <small>当前运营校区</small><strong id="sidebarSchool">华中农业大学</strong
+          ><span id="sidebarCampus">狮山校区</span>
+        </div>
+        <nav id="nav">
+          <div class="nav-group">工作台</div>
+          <button class="nav-item active" data-view="dashboard"><span>总</span>经营概览</button
+          ><button class="nav-item" data-view="merchants"><span>商</span>商家入驻</button
+          ><button class="nav-item" data-view="qualification"><span>证</span>资质复审</button
+          ><button class="nav-item" data-view="leads"><span>线</span>咨询线索</button>
+          <div class="nav-group">商品交易</div>
+          <button class="nav-item" data-view="products"><span>商</span>商品中心</button
+          ><button class="nav-item" data-view="stock"><span>流</span>库存流水</button
+          ><button class="nav-item" data-view="promos"><span>惠</span>话费活动</button
+          ><button class="nav-item" data-view="reviews"><span>评</span>商品评价</button
+          ><button class="nav-item" data-view="orders"><span>车</span>电瓶车订单</button
+          ><button class="nav-item" data-view="payments"><span>支</span>支付单</button
+          ><button class="nav-item" data-view="phones"><span>号</span>电话卡订单</button
+          ><button class="nav-item" data-view="recharges"><span>充</span>话费权益</button
+          ><button class="nav-item" data-view="finance"><span>财</span>财务流水</button
+          ><button class="nav-item" data-view="settlements"><span>结</span>商家结算</button
+          ><button class="nav-item" data-view="payouts"><span>提</span>商家提现</button>
+          <div class="nav-group">履约服务</div>
+          <button class="nav-item" data-view="patrol"><span>警</span>超时预警</button
+          ><button class="nav-item" data-view="scores"><span>分</span>商家服务分</button
+          ><button class="nav-item" data-view="serviceCollabs"><span>协</span>服务单协同</button
+          ><button class="nav-item" data-view="broadband"><span>网</span>宽带资格</button
+          ><button class="nav-item" data-view="plates"><span>牌</span>牌照辅助</button
+          ><button class="nav-item" data-view="afterSales"><span>售</span>售后工单</button
+          ><button class="nav-item" data-view="notifications"><span>通</span>站内通知</button>
+          <div class="nav-group">系统</div>
+          <button class="nav-item" data-view="logs"><span>记</span>操作日志</button
+          ><button class="nav-item" data-view="admins"><span>员</span>管理员管理</button
+          ><button class="nav-item" data-view="settings"><span>设</span>运营设置</button>
+        </nav>
+        <div class="sidebar-user">
+          <div class="avatar">运</div>
+          <div><strong>运营管理员</strong><small>超级管理员</small></div>
+          <button id="logoutButton" title="退出登录">退出</button>
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <div class="breadcrumb">狮山智生活 / <span id="breadcrumb">工作台</span></div>
+            <h1 id="pageTitle">经营概览</h1>
+          </div>
+          <div class="top-actions">
+            <div class="global-search">
+              <span>⌕</span><input id="globalSearch" placeholder="搜索订单、号码、商品" />
+            </div>
+            <span id="syncState" class="sync">数据已同步</span
+            ><button id="refreshButton" class="icon-button" title="刷新">↻</button>
+          </div>
+        </header>
+        <section id="content" class="content"><div class="loading">正在读取运营数据…</div></section>
+      </main>
+    </div>
+
+    <div id="drawerBackdrop" class="backdrop hidden"></div>
+    <aside id="drawer" class="drawer hidden">
+      <div class="drawer-head">
+        <div>
+          <small>业务详情</small>
+          <h2 id="drawerTitle">详情</h2>
+        </div>
+        <button id="closeDrawer">×</button>
+      </div>
+      <div id="drawerBody" class="drawer-body"></div>
     </aside>
-
-    <main>
-      <header class="topbar"><div><div class="breadcrumb">狮山智生活 / <span id="breadcrumb">工作台</span></div><h1 id="pageTitle">经营概览</h1></div><div class="top-actions"><div class="global-search"><span>⌕</span><input id="globalSearch" placeholder="搜索订单、号码、商品"></div><span id="syncState" class="sync">数据已同步</span><button id="refreshButton" class="icon-button" title="刷新">↻</button></div></header>
-      <section id="content" class="content"><div class="loading">正在读取运营数据…</div></section>
-    </main>
-  </div>
-
-  <div id="drawerBackdrop" class="backdrop hidden"></div><aside id="drawer" class="drawer hidden"><div class="drawer-head"><div><small>业务详情</small><h2 id="drawerTitle">详情</h2></div><button id="closeDrawer">×</button></div><div id="drawerBody" class="drawer-body"></div></aside>
-  <div id="modalBackdrop" class="backdrop hidden"></div><section id="productModal" class="modal hidden"><div class="modal-head"><div><small>商品中心</small><h2 id="modalTitle">新增商品</h2></div><button id="closeModal">×</button></div><form id="productForm" class="modal-body"><input id="productId" type="hidden"><div class="form-grid"><label>商品名称<input id="productName" required></label><label>商品分类<select id="productCategory"><option value="E_BIKE_NEW">电瓶车</option><option value="PHONE_PLAN">电话套餐</option><option value="RECHARGE_PROMO">话费权益</option></select></label><label>售价（元）<input id="productPrice" type="number" min="0" step="0.01" required></label><label>库存<input id="productStock" type="number" min="0" required></label></div><label>商品说明<textarea id="productDescription" rows="4" required></textarea></label><label>商品图片 URL<input id="productImageUrl" placeholder="/api/uploads/xxx.jpg"></label><label class="switch-line"><input id="productActive" type="checkbox" checked>立即上架</label><div class="modal-actions"><button type="button" id="cancelModal" class="secondary">取消</button><button type="submit" class="primary">保存商品</button></div></form></section>
-  <section id="promoModal" class="modal hidden"><div class="modal-head"><div><small>话费活动</small><h2 id="promoModalTitle">新增活动</h2></div><button id="closePromoModal">×</button></div><form id="promoForm" class="modal-body"><input id="promoId" type="hidden"><div class="form-grid"><label>充值金额（元）<input id="promoPay" type="number" min="1" step="1" required></label><label>到账金额（元）<input id="promoReceive" type="number" min="1" step="1" required></label><label>活动角标<input id="promoBadge" value="限时优惠" maxlength="30"></label><label class="switch-line"><input id="promoActive" type="checkbox" checked>立即上架</label></div><div class="modal-actions"><button type="button" id="cancelPromoModal" class="secondary">取消</button><button type="submit" class="primary">保存活动</button></div></form></section>
-  <section id="adminModal" class="modal hidden"><div class="modal-head"><div><small>管理员管理</small><h2 id="adminModalTitle">新增管理员</h2></div><button id="closeAdminModal" type="button">×</button></div><form id="adminForm" class="modal-body"><input id="adminId" type="hidden"><div class="form-grid"><label>登录账号<input id="adminUsername" required maxlength="32" pattern="[a-zA-Z0-9_-]{3,32}" autocomplete="off"></label><label>姓名<input id="adminDisplayName" required maxlength="30"></label><label>角色<select id="adminRole"><option value="OPERATOR">运营管理员</option><option value="FINANCE">财务管理员</option><option value="SUPPORT">客服管理员</option><option value="SUPER_ADMIN">超级管理员</option></select></label><label>密码<input id="adminPassword" type="password" minlength="12" maxlength="128" required autocomplete="new-password" placeholder="至少 12 位"></label></div><div class="modal-actions"><button type="button" id="cancelAdminModal" class="secondary">取消</button><button type="submit" class="primary">保存管理员</button></div></form></section>
-  <div id="toast" class="toast"></div><link rel="stylesheet" href="/admin/admin-lead.css"><script src="/admin/admin.js"></script>
-</body></html>
+    <div id="modalBackdrop" class="backdrop hidden"></div>
+    <section id="productModal" class="modal hidden">
+      <div class="modal-head">
+        <div>
+          <small>商品中心</small>
+          <h2 id="modalTitle">新增商品</h2>
+        </div>
+        <button id="closeModal">×</button>
+      </div>
+      <form id="productForm" class="modal-body">
+        <input id="productId" type="hidden" />
+        <div class="form-grid">
+          <label>商品名称<input id="productName" required /></label
+          ><label
+            >商品分类<select id="productCategory">
+              <option value="E_BIKE_NEW">电瓶车</option>
+              <option value="PHONE_PLAN">电话套餐</option>
+              <option value="RECHARGE_PROMO">话费权益</option>
+            </select></label
+          ><label>售价（元）<input id="productPrice" type="number" min="0" step="0.01" required /></label
+          ><label>库存<input id="productStock" type="number" min="0" required /></label>
+        </div>
+        <label>商品说明<textarea id="productDescription" rows="4" required></textarea></label
+        ><label>商品图片 URL<input id="productImageUrl" placeholder="/api/uploads/xxx.jpg" /></label
+        ><label class="switch-line"><input id="productActive" type="checkbox" checked />立即上架</label>
+        <div class="modal-actions">
+          <button type="button" id="cancelModal" class="secondary">取消</button
+          ><button type="submit" class="primary">保存商品</button>
+        </div>
+      </form>
+    </section>
+    <section id="promoModal" class="modal hidden">
+      <div class="modal-head">
+        <div>
+          <small>话费活动</small>
+          <h2 id="promoModalTitle">新增活动</h2>
+        </div>
+        <button id="closePromoModal">×</button>
+      </div>
+      <form id="promoForm" class="modal-body">
+        <input id="promoId" type="hidden" />
+        <div class="form-grid">
+          <label>充值金额（元）<input id="promoPay" type="number" min="1" step="1" required /></label
+          ><label>到账金额（元）<input id="promoReceive" type="number" min="1" step="1" required /></label
+          ><label>开始时间<input id="promoStartsAt" type="datetime-local" /></label
+          ><label>结束时间<input id="promoEndsAt" type="datetime-local" /></label
+          ><label>活动角标<input id="promoBadge" value="限时优惠" maxlength="30" /></label
+          ><label class="switch-line"><input id="promoActive" type="checkbox" checked />立即上架</label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="cancelPromoModal" class="secondary">取消</button
+          ><button type="submit" class="primary">保存活动</button>
+        </div>
+      </form>
+    </section>
+    <section id="adminModal" class="modal hidden">
+      <div class="modal-head">
+        <div>
+          <small>管理员管理</small>
+          <h2 id="adminModalTitle">新增管理员</h2>
+        </div>
+        <button id="closeAdminModal" type="button">×</button>
+      </div>
+      <form id="adminForm" class="modal-body">
+        <input id="adminId" type="hidden" />
+        <div class="form-grid">
+          <label
+            >登录账号<input
+              id="adminUsername"
+              required
+              maxlength="32"
+              pattern="[a-zA-Z0-9_-]{3,32}"
+              autocomplete="off" /></label
+          ><label>姓名<input id="adminDisplayName" required maxlength="30" /></label
+          ><label
+            >角色<select id="adminRole">
+              <option value="OPERATOR">运营管理员</option>
+              <option value="FINANCE">财务管理员</option>
+              <option value="SUPPORT">客服管理员</option>
+              <option value="SUPER_ADMIN">超级管理员</option>
+            </select></label
+          ><label
+            >密码<input
+              id="adminPassword"
+              type="password"
+              minlength="12"
+              maxlength="128"
+              required
+              autocomplete="new-password"
+              placeholder="至少 12 位"
+          /></label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="cancelAdminModal" class="secondary">取消</button
+          ><button type="submit" class="primary">保存管理员</button>
+        </div>
+      </form>
+    </section>
+    <div id="toast" class="toast"></div>
+    <link rel="stylesheet" href="/admin/admin-lead.css" />
+    <script src="/admin/admin.js"></script>
+  </body>
+</html>

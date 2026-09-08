@@ -144,6 +144,12 @@ npm test
 GET /api/products?campusId=campus_demo&category=E_BIKE_RENTAL
 ```
 
+### 限时话费活动
+
+`GET /api/recharge-promos` 只返回上架且处于投放期内的活动，并附带 `status`、`statusLabel`、`linkedOrderCount`、`linkedPaidOrderCount` 和 `linkedAmountInCents`。未开始、已结束或已下架的活动不会进入学生端，下单接口会统一返回 404 `RECHARGE_PROMO_NOT_FOUND`。
+
+管理端“话费活动”可配置 `startsAt` / `endsAt` 投放期，并查看活动关联订单数、有效支付单数和已支付金额。投放期采用服务端时间判断，学生端不能通过提交金额或状态字段绕过活动窗口。
+
 ### 校园卡申请
 
 `POST /api/campus-card-applications`
