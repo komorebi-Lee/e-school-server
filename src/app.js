@@ -3070,12 +3070,12 @@ function createApp({
     const paymentChange = change(current.paymentInCents, previous.paymentInCents);
     if (previous.paymentInCents > 0 && paymentChange <= -30) {
       alerts.push({ level: 'MEDIUM', message: `支付收入环比下降 ${Math.abs(paymentChange)}%，建议排查流量、库存和转化。` });
+    }
     if (current.autoDelists >= 3 && current.complianceRestores < current.autoDelists) {
       alerts.push({ level: 'HIGH', message: `近 7 天自动下架 ${current.autoDelists} 次，仅恢复 ${current.complianceRestores} 次，商品供给质量需要专项跟进。` });
     }
     if (current.rectifyCasesCreated > 0 && current.rectifyCasesApproved === 0) {
       alerts.push({ level: 'MEDIUM', message: `近 7 天有 ${current.rectifyCasesCreated} 个整改工单尚未验收通过，请检查商家整改进度。` });
-    }
     }
     return {
       reports,

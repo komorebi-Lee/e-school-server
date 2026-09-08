@@ -2279,12 +2279,41 @@ test('operations report provides trends and csv export', async () => {
   assert.ok(insights.comparisons.some((item) => item.key === 'paymentInCents'));
   assert.ok(insights.comparisons.some((item) => item.key === 'autoDelists'));
   assert.ok(insights.comparisons.some((item) => item.key === 'rectifyCasesCreated'));
+  const autoDelistComparison = insights.comparisons.find((item) => item.key === 'autoDelists');
+  const rectifyComparison = insights.comparisons.find((item) => item.key === 'rectifyCasesCreated');
+  assert.equal(autoDelistComparison.current, insights.current.totals.autoDelists);
+  assert.equal(rectifyComparison.current, insights.current.totals.rectifyCasesCreated);
   const totalOrdersComparison = insights.comparisons.find((item) => item.key === 'totalOrders');
   assert.equal(totalOrdersComparison.current, insights.current.totals.ebikeOrders
     + insights.current.totals.phoneCardOrders
     + insights.current.totals.rechargeOrders
     + insights.current.totals.plateApplications);
   assert.ok(Array.isArray(insights.alerts));
+
+  const riskLogIds = [];
+  const riskCaseIds = [];
+  store.update((data) => {
+    data.merchantScoreLogs = data.merchantScoreLogs || [];
+    data.serviceScoreCases = data.serviceScoreCases || [];
+    for (let index = 0; index < 3; index += 1) {
+      const id = `log_operations_alert_${index}`;
+      riskLogIds.push(id);
+      data.merchantScoreLogs.unshift({ id, type: 'AUTO_DELIST', createdAt: new Date().toISOString() });
+    }
+    const caseId = 'case_operations_alert_open';
+    riskCaseIds.push(caseId);
+    data.serviceScoreCases.unshift({ id: caseId, type: 'RECTIFY', status: 'OPEN', createdAt: new Date().toISOString() });
+  });
+  const riskOverview = await api('/api/admin/overview', {
+    headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
+  });
+  const riskAlerts = riskOverview.body.data.operationsInsights.alerts || [];
+  assert.ok(riskAlerts.some((item) => item.level === 'HIGH' && item.message.includes('自动下架')));
+  assert.ok(riskAlerts.some((item) => item.message.includes('整改工单')));
+  store.update((data) => {
+    data.merchantScoreLogs = (data.merchantScoreLogs || []).filter((item) => !riskLogIds.includes(item.id));
+    data.serviceScoreCases = (data.serviceScoreCases || []).filter((item) => !riskCaseIds.includes(item.id));
+  });
 
   const exportResponse = await fetch(`${baseUrl}/api/admin/operations-report/export`, {
     headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
