@@ -3623,6 +3623,10 @@ test('service score cases support appeal review, rectification and subscription 
   assert.equal(productAfterReview.autoDelistRestoredCaseId, rectify.body.data.id);
   assert.ok(productAfterReview.autoDelistReviewNote.includes(rectify.body.data.caseNo));
 
+  const overviewAfterReview = await api('/api/merchant/overview', { headers: merchantHeaders });
+  const complianceCase = overviewAfterReview.body.data.products.find((item) => item.id === 'prod_ebike_001').complianceCase;
+  assert.equal(complianceCase.dueAt, rectify.body.data.dueAt);
+
   const saveTemplate = await api('/api/admin/settings', {
     method: 'POST', headers: adminHeaders,
     body: JSON.stringify({ scoreAppealResultTemplateId: 'wx_test_appeal_template' })

@@ -4652,6 +4652,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                     : complianceCase.status === 'COMPLETED' ? '整改验收通过'
                     : complianceCase.status === 'REJECTED' ? '整改未通过' : '处理中',
                   adminNote: complianceCase.adminNote || '',
+                  dueAt: complianceCase.dueAt || '',
                   updatedAt: complianceCase.updatedAt
                 } : null
               });
