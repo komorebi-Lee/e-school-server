@@ -780,6 +780,7 @@ function scoresView() {
     <label>履约超时提醒模板 ID<input id="slaWarningTemplate" value="${esc(state.data.settings?.slaWarningTemplateId || '')}"></label>
     <label>订单状态模板 ID<input id="orderStatusTemplate" value="${esc(state.data.settings?.orderStatusTemplateId || '')}"></label>
     <label>订单客服模板 ID<input id="orderServiceTemplate" value="${esc(state.data.settings?.orderServiceTemplateId || '')}"></label>
+    <label>到货提醒模板 ID<input id="restockNoticeTemplate" value="${esc(state.data.settings?.restockNoticeTemplateId || '')}"></label>
     <label>售后进度模板 ID<input id="afterSaleTemplate" value="${esc(state.data.settings?.afterSaleTemplateId || '')}"></label>
   </div><button class="primary" style="margin-top:12px" id="saveScoreTemplates">保存模板配置</button></section>`;
   const pendingPanel = pending.length
@@ -911,6 +912,7 @@ bindView = function () {
         slaWarningTemplateId: document.querySelector('#slaWarningTemplate').value.trim(),
         orderStatusTemplateId: document.querySelector('#orderStatusTemplate').value.trim(),
         orderServiceTemplateId: document.querySelector('#orderServiceTemplate').value.trim(),
+        restockNoticeTemplateId: document.querySelector('#restockNoticeTemplate').value.trim(),
         afterSaleTemplateId: document.querySelector('#afterSaleTemplate').value.trim()
       })
     });

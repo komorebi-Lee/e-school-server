@@ -4064,3 +4064,56 @@ test('saved delivery addresses are scoped to the logged-in user', async () => {
   const missing = await api('/api/my/addresses', { headers: { authorization: `Bearer ${userSession.token}` } });
   assert.equal(missing.body.data.length, 1);
 });
+
+test('restock alerts notify waiting users after merchant restocking', async () => {
+  const userSession = await loginWeChat('restock_user');
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_001');
+    product.stock = 0;
+    product.reservedStock = 0;
+    data.productRestockAlerts = [];
+  });
+
+  const subscribed = await api('/api/products/prod_ebike_001/restock-alert', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ subscribed: true })
+  });
+  assert.equal(subscribed.response.status, 201);
+  assert.equal(subscribed.body.data.subscribed, true);
+
+  const state = await api('/api/products/prod_ebike_001/restock-alert', {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  assert.equal(state.body.data.subscribed, true);
+
+  const restock = await api('/api/merchant/products/prod_ebike_001', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ stock: 2 })
+  });
+  assert.equal(restock.response.status, 200);
+
+  const notifications = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  const notice = notifications.body.data.find((item) => item.title === '你登记的商品已到货');
+  assert.ok(notice);
+  assert.ok(notice.content.includes('轻风 通勤版'));
+  assert.equal((store.read().productRestockAlerts || []).find((item) => item.userId === 'wx_restock_user').status, 'NOTIFIED');
+
+  const noticeCount = notifications.body.data.filter((item) => item.title === '你登记的商品已到货').length;
+  await api('/api/merchant/products/prod_ebike_001', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ stock: 3 })
+  });
+  const repeated = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  assert.equal(repeated.body.data.filter((item) => item.title === '你登记的商品已到货').length, noticeCount);
+});

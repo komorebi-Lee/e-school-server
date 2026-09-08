@@ -107,6 +107,11 @@ const scoreNotificationTemplates = {
 };
 
 const orderNotificationTemplates = {
+  RESTOCK_NOTICE: {
+    id: 'restock_notice',
+    keywords: ['商品', '补货', '到货'],
+    description: '用户登记的缺货商品重新可购时提醒用户'
+  },
   ORDER_STATUS: {
     id: 'order_status',
     keywords: ['订单', '状态', '履约'],
@@ -1544,6 +1549,27 @@ function createApp({
   function notifyMerchant(data, merchantId, type, title, content) {
     const merchant = (data.merchants || []).find((item) => item.id === merchantId);
     return addNotification(data, merchant?.userId, type, title, content);
+  }
+
+  function notifyRestockSubscribers(data, product, merchantName = '', now = new Date().toISOString()) {
+    if (!product || Number(product.stock || 0) <= 0 || product.active === false) return [];
+    const waiting = (data.productRestockAlerts || []).filter((item) => (
+      item.productId === product.id && item.status === 'WAITING'
+    ));
+    for (const item of waiting) {
+      sendOrderNotification(
+        data,
+        item.userId,
+        'RESTOCK_NOTICE',
+        '你登记的商品已到货',
+        `「${product.name}」已补货上架${merchantName ? `，来自 ${merchantName}` : ''}，先到先得。`,
+        now
+      );
+      item.status = 'NOTIFIED';
+      item.notifiedAt = now;
+      item.updatedAt = now;
+    }
+    return waiting;
   }
 
 
@@ -3505,6 +3531,61 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 201, { data: { url: `/api/uploads/${fileName}`, size: file.length }, requestId });
       }
 
+      const restockAlertMatch = pathname.match(/^\/api\/products\/([^/]+)\/restock-alert$/);
+      if (request.method === 'GET' && restockAlertMatch) {
+        const { userId } = requireUser(request);
+        const data = store.read();
+        const product = data.products.find((item) => item.id === restockAlertMatch[1] && item.active);
+        if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+        const item = (data.productRestockAlerts || []).find((row) => (
+          row.productId === product.id && row.userId === userId && row.status === 'WAITING'
+        ));
+        return sendJson(response, 200, { data: { subscribed: Boolean(item) }, requestId });
+      }
+
+      if (request.method === 'POST' && restockAlertMatch) {
+        const { userId } = requireUser(request);
+        const body = await readJson(request);
+        if (body.subscribed === false) {
+          const removed = store.update((data) => {
+            data.productRestockAlerts ||= [];
+            const before = data.productRestockAlerts.length;
+            data.productRestockAlerts = data.productRestockAlerts.filter((item) => !(
+              item.productId === restockAlertMatch[1] && item.userId === userId
+            ));
+            return { subscribed: data.productRestockAlerts.length < before ? false : Boolean(data.productRestockAlerts.some((item) => item.productId === restockAlertMatch[1] && item.userId === userId)) };
+          });
+          return sendJson(response, 200, { data: removed, requestId });
+        }
+        const result = store.update((data) => {
+          const product = (data.products || []).find((item) => item.id === restockAlertMatch[1] && item.active);
+          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          if (availableStock(product) > 0) throw new ApiError(409, 'PRODUCT_IN_STOCK', '商品当前可购，无需登记到货提醒');
+          data.productRestockAlerts ||= [];
+          const existing = data.productRestockAlerts.find((item) => (
+            item.productId === product.id && item.userId === userId
+          ));
+          if (existing) {
+            existing.status = 'WAITING';
+            existing.notifiedAt = '';
+            existing.updatedAt = new Date().toISOString();
+            return existing;
+          }
+          const item = {
+            id: `restock_${randomUUID()}`,
+            productId: product.id,
+            userId,
+            status: 'WAITING',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            notifiedAt: ''
+          };
+          data.productRestockAlerts.push(item);
+          return item;
+        });
+        return sendJson(response, 201, { data: { subscribed: true, id: result.id }, requestId });
+      }
+
       if (request.method === 'POST' && pathname === '/api/admin/uploads') {
         requireAdmin(request, 'FINANCE_MANAGE');
         const body = await readJson(request);
@@ -3739,6 +3820,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const configuredUserIds = {
           order_status: settings.orderStatusTemplateId || '',
           order_service: settings.orderServiceTemplateId || '',
+          restock_notice: settings.restockNoticeTemplateId || '',
           after_sale: settings.afterSaleTemplateId || ''
         };
         const data = [
@@ -4662,6 +4744,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           item.updatedAt = new Date().toISOString();
           evaluateLowStockAlert(data, item, item.updatedAt);
           addAudit(data, '商家更新商品', item.name);
+          notifyRestockSubscribers(
+            data,
+            item,
+            data.merchants.find((merchant) => merchant.id === merchantSession.merchantId)?.name || '',
+            item.updatedAt
+          );
           return item;
         });
         return sendJson(response, 200, { data: product, requestId });
@@ -6141,6 +6229,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               configuredId: ({
                 order_status: data.adminSettings?.orderStatusTemplateId || '',
                 order_service: data.adminSettings?.orderServiceTemplateId || '',
+                restock_notice: data.adminSettings?.restockNoticeTemplateId || '',
                 after_sale: data.adminSettings?.afterSaleTemplateId || ''
               })[item.id] || ''
             }))
@@ -6175,6 +6264,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           ,sla_warning: settings.slaWarningTemplateId || ''
           ,order_status: settings.orderStatusTemplateId || '',
           order_service: settings.orderServiceTemplateId || '',
+          restock_notice: settings.restockNoticeTemplateId || '',
           after_sale: settings.afterSaleTemplateId || ''
         };
         let sent = 0;
@@ -6265,6 +6355,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           if (body.active !== undefined) product.active = Boolean(body.active);
           addAudit(data, '更新商品', product.name);
+          notifyRestockSubscribers(data, product, '', new Date().toISOString());
           return product;
         });
         return sendJson(response, 200, { data: updated, requestId });
@@ -6411,7 +6502,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isFinite(value) || value < 1 || value > 4.5) throw new ApiError(400, 'VALIDATION_ERROR', '均分下架阈值需为 1-4.5 分');
             current.productComplianceAverageRatingThreshold = Math.round(value * 10) / 10;
           }
-          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'slaWarningTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'afterSaleTemplateId']) {
+          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'slaWarningTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'restockNoticeTemplateId', 'afterSaleTemplateId']) {
             if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);
           }
           if (body.paymentTimeoutMinutes !== undefined) {
