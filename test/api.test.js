@@ -1625,6 +1625,15 @@ test('completed order owner can submit one verified product review', async () =>
   assert.equal(merchantReply.body.data.reply.merchantName, '评价测试车行');
   assert.equal(merchantReply.body.data.reply.content, '感谢反馈，我们会持续检查车辆与配送服务。');
 
+  const userNotifications = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  assert.equal(userNotifications.response.status, 200);
+  const replyNotice = userNotifications.body.data.find((item) => item.title === '你的评价收到了商家回复');
+  assert.ok(replyNotice, '商家回复后应通知评价作者');
+  assert.ok(replyNotice.content.includes('评价测试车'));
+  assert.ok(replyNotice.content.includes('感谢反馈，我们会持续检查车辆与配送服务。'));
+
   const repliedOverview = await api('/api/merchant/overview', { headers: { authorization: `Bearer ${merchantLogin.body.data.token}` } });
   assert.equal(repliedOverview.body.data.metrics.pendingReplyCount, 0);
   const repliedDetail = await api(`/api/products/${product.body.data.id}`);

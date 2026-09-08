@@ -5614,12 +5614,20 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!item) throw new ApiError(404, 'REVIEW_NOT_FOUND', 'Review not found');
           const ownsProduct = data.products.some((product) => product.id === item.productId && product.merchantId === merchantSession.merchantId);
           if (!ownsProduct) throw new ApiError(403, 'REVIEW_FORBIDDEN', '只能回复自己店铺的商品评价');
+          const repliedProduct = data.products.find((product) => product.id === item.productId);
           item.reply = {
             merchantName: data.merchants.find((merchant) => merchant.id === merchantSession.merchantId)?.name || '商家回复',
             content,
             repliedAt: new Date().toISOString()
           };
           item.updatedAt = item.reply.repliedAt;
+          sendOrderNotification(
+            data,
+            item.userId,
+            'ORDER',
+            '你的评价收到了商家回复',
+            `${repliedProduct?.name || '商品'}：${content}`
+          );
           addAudit(data, '商家回复商品评价', item.productId);
           // 差评处理率是服务分的计算维度，回复完成后立即落盘，避免后台与用户端看到旧分数。
           refreshMerchantScores(data, item.reply.repliedAt);
