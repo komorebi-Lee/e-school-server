@@ -2392,6 +2392,11 @@ test('merchant workspace receives operational notifications and metrics', async 
   assert.ok(notifications.body.data.some((item) => item.title === '新订单已支付'));
   assert.ok(notifications.body.data.some((item) => item.title === '收到新的售后申请'));
   assert.ok(notifications.body.data.some((item) => item.content === '请尽量晚上七点后配送'));
+  const paidNotice = notifications.body.data.find((item) => item.title === '新订单已支付');
+  const afterSaleNotice = notifications.body.data.find((item) => item.title === '收到新的售后申请');
+  assert.equal(paidNotice.link.startsWith('/pages/merchant/orders?focusId='), true);
+  assert.equal(afterSaleNotice.link.startsWith('/pages/merchant/orders?focusId='), true);
+  assert.ok(afterSaleNotice.link.includes('filter=AFTER_SALE'));
   assert.ok(notifications.body.unreadCount > before.body.unreadCount);
 
   const overview = await api('/api/merchant/overview', { headers: merchantHeaders });

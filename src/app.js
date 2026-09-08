@@ -280,6 +280,7 @@ function evaluateLowStockAlert(data, product, now = new Date().toISOString()) {
       type: 'STOCK',
       title,
       content,
+      metadata: { productId: product.id },
       read: false,
       createdAt: now
     });
@@ -1614,9 +1615,9 @@ function createApp({
     return { notification, subscribeMessage: data.subscribeMessages[0] };
   }
 
-  function notifyMerchant(data, merchantId, type, title, content) {
+  function notifyMerchant(data, merchantId, type, title, content, metadata = null) {
     const merchant = (data.merchants || []).find((item) => item.id === merchantId);
-    return addNotification(data, merchant?.userId, type, title, content);
+    return addNotification(data, merchant?.userId, type, title, content, metadata);
   }
 
   function notifyRestockSubscribers(data, product, merchantName = '', now = new Date().toISOString()) {
@@ -1683,7 +1684,7 @@ function createApp({
 
   function notifyOrderMerchant(data, order, type, title, content) {
     const product = (data.products || []).find((item) => item.id === order.items?.[0]?.productId);
-    return notifyMerchant(data, order.collaboration?.merchantId || order.items?.[0]?.merchantId || product?.merchantId || '', type, title, content);
+    return notifyMerchant(data, order.collaboration?.merchantId || order.items?.[0]?.merchantId || product?.merchantId || '', type, title, content, { orderId: order.id });
   }
 
   function addFinanceEvent(data, eventType, referenceId, amountInCents, meta = {}, now = new Date().toISOString()) {
@@ -3105,6 +3106,18 @@ function createApp({
       risk: merchantScoreRisk(data, (data.merchants || []).find((item) => item.id === merchantId)),
       points: rows
     };
+  }
+
+  function merchantNotificationLink(notification) {
+    const metadata = notification?.metadata || {};
+    if ((notification.type === 'ORDER' || notification.type === 'AFTER_SALE') && metadata.orderId) {
+      const focusId = encodeURIComponent(String(metadata.orderId));
+      return `/pages/merchant/orders?focusId=${focusId}${notification.type === 'AFTER_SALE' ? '&filter=AFTER_SALE' : ''}`;
+    }
+    if (notification.type === 'STOCK' && metadata.productId) {
+      return `/pages/merchant/products?focusId=${encodeURIComponent(String(metadata.productId))}&filter=LOW`;
+    }
+    return '';
   }
 
   // 分档变化才通知和留痕，避免每轮巡检都刷一遍相同结论。
@@ -4970,7 +4983,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const items = (data.notifications || [])
           .filter((item) => item.userId === merchant.userId)
           .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
-        return sendJson(response, 200, { data: items, total: items.length, unreadCount: items.filter((item) => !item.read).length, requestId });
+        const linkedItems = items.map((item) => ({ ...item, link: merchantNotificationLink(item) }));
+        return sendJson(response, 200, { data: linkedItems, total: linkedItems.length, unreadCount: linkedItems.filter((item) => !item.read).length, requestId });
       }
 
       if (request.method === 'POST' && pathname === '/api/merchant/notifications/read') {
