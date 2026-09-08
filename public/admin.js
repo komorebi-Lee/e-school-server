@@ -38,12 +38,12 @@ function operationsReportPanel(){
     <td><strong>${esc(String(item.date).slice(5))}</strong></td>
     <td>${item.ebikeOrders + item.phoneCardOrders + item.rechargeOrders + item.plateApplications}<small>电瓶车 ${item.ebikeOrders} · 电话卡 ${item.phoneCardOrders} · 话费 ${item.rechargeOrders} · 牌照 ${item.plateApplications}</small></td>
     <td>${item.completedEbikeOrders}<small>售后完成 ${item.afterSalesClosed}</small></td>
-    <td>${item.autoDelists}<small>恢复 ${item.complianceRestores} · 整改 ${item.rectifyCasesCreated}</small></td>
+    <td>${item.autoDelists}<small>恢复 ${item.complianceRestores} · 整改 ${item.rectifyCasesCreated} · 分档变化 ${item.scoreStageChanges || 0}</small></td>
     <td>${item.paymentTimeouts}</td>
     <td>${money(item.paymentInCents)}<small>净额 ${money(item.netInCents)}</small></td>
   </tr>`).join('');
   return `<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>经营日报</h2><span>业务量 · 环比 · 风险</span><button id="exportOperations" class="table-button">导出 14 天 CSV</button></div>
-    <div class="metric-grid">${metric('7天支付收入',money(t.paymentInCents||0),'微信支付确认入账')}${metric('7天新增业务',(t.ebikeOrders||0)+(t.phoneCardOrders||0)+(t.rechargeOrders||0)+(t.plateApplications||0),'电瓶车/电话卡/话费/牌照')}${metric('7天完成电瓶车订单',t.completedEbikeOrders||0,'交付码核验完成')}${metric('7天售后完成',t.afterSalesClosed||0,`新增售后 ${t.afterSalesCreated||0} 笔`)}${metric('7天自动下架',t.autoDelists||0,`恢复 ${t.complianceRestores||0} · 整改 ${t.rectifyCasesCreated||0}`)}${metric('7天支付超时',t.paymentTimeouts||0,'下单后未支付自动关闭')}</div>
+    <div class="metric-grid">${metric('7天支付收入',money(t.paymentInCents||0),'微信支付确认入账')}${metric('7天新增业务',(t.ebikeOrders||0)+(t.phoneCardOrders||0)+(t.rechargeOrders||0)+(t.plateApplications||0),'电瓶车/电话卡/话费/牌照')}${metric('7天完成电瓶车订单',t.completedEbikeOrders||0,'交付码核验完成')}${metric('7天售后完成',t.afterSalesClosed||0,`新增售后 ${t.afterSalesCreated||0} 笔`)}${metric('7天自动下架',t.autoDelists||0,`恢复 ${t.complianceRestores||0} · 整改 ${t.rectifyCasesCreated||0}`)}${metric('7天分档变化',t.scoreStageChanges||0,'服务分处置生效次数')}${metric('7天支付超时',t.paymentTimeouts||0,'下单后未支付自动关闭')}</div>
     <div class="dashboard-grid" style="margin-top:16px"><section class="panel"><div class="panel-head"><h3>环比变化</h3><span>本周对比上周</span></div>${comparisonHtml}</section><section class="panel"><div class="panel-head"><h3>经营预警</h3><span>按优先级处理</span></div>${alertHtml}</section></div>
     <div class="table-wrap"><table><thead><tr><th>日期</th><th>新增业务</th><th>完成</th><th>风控</th><th>超时</th><th>资金</th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="empty">暂无日报数据</td></tr>'}</tbody></table></div>
   </section>`;

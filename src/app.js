@@ -2498,6 +2498,26 @@ function createApp({
       });
     }
 
+    // 整改是商家自己的业务动作，平台复核前要让商家先知道自己临期了，
+    // 否则商家可能等平台提醒，平台又在等商家提交，最后两边都错过时限。
+    for (const record of data.serviceScoreCases || []) {
+      if (record.type !== 'RECTIFY' || !['SUBMITTED', 'REVIEWING'].includes(record.status)) continue;
+      const dueAt = record.dueAt || addHours(record.createdAt, 48);
+      targets.push({
+        ruleKey: 'SCORE_RECTIFY_MERCHANT',
+        ruleLabel: '商家整改临期',
+        businessType: 'SCORE_CASE',
+        businessId: record.id,
+        businessNo: record.caseNo || record.id,
+        ownerRole: 'MERCHANT',
+        merchantId: record.merchantId || '',
+        merchantName: record.merchantName || '',
+        userId: record.userId || '',
+        dueAt,
+        detail: `${record.productName || record.reason || ''}`.slice(0, 120)
+      });
+    }
+
     for (const record of data.financeTasks || []) {
       if (record.type !== 'PAYMENT_RECONCILIATION' || record.status === 'RESOLVED') continue;
       targets.push({
@@ -2631,6 +2651,9 @@ function createApp({
       resolved.push(alert);
     }
 
+    // 预警变化会直接影响服务分，所以巡检末尾统一重算一次分档。
+    const scoreChanges = refreshMerchantScores(data, now);
+
     data.slaAlerts = data.slaAlerts.slice(0, 1000);
     const stillOpen = data.slaAlerts.filter((alert) => alert.status !== 'RESOLVED');
     data.patrolState = {
@@ -2640,11 +2663,9 @@ function createApp({
       lastResolved: resolved.length,
       lastOpen: stillOpen.length,
       lastExpiredOrders: expiredOrders.length,
-      lastMaturedSettlements: maturedSettlements.length
+      lastMaturedSettlements: maturedSettlements.length,
+      lastScoreChanges: scoreChanges.length
     };
-    // 预警变化会直接影响服务分，所以巡检末尾统一重算一次分档。
-    const scoreChanges = refreshMerchantScores(data, now);
-    data.patrolState.lastScoreChanges = scoreChanges.length;
     if (created.length || resolved.length || escalated.length || expiredOrders.length || maturedSettlements.length) {
       addAudit(data, '运营巡检执行', `新增 ${created.length} · 升级 ${escalated.length} · 关闭 ${resolved.length} · 超时关单 ${expiredOrders.length} · 分账到期 ${maturedSettlements.length} · 服务分 ${scoreChanges.length}`);
     }
@@ -2969,6 +2990,7 @@ function createApp({
         reviewsCreated: 0,
         autoDelists: 0,
         complianceRestores: 0,
+        scoreStageChanges: 0,
         rectifyCasesCreated: 0,
         rectifyCasesApproved: 0,
         paymentTimeouts: 0,
@@ -3003,6 +3025,7 @@ function createApp({
     for (const item of data.productReviews || []) add(item.createdAt, 'reviewsCreated');
     for (const item of data.merchantScoreLogs || []) {
       if (item.type === 'AUTO_DELIST') add(item.createdAt, 'autoDelists');
+      if (item.type === 'STAGE_CHANGE') add(item.createdAt, 'scoreStageChanges');
       if (['COMPLIANCE_RESTORED', 'SCORE_CASE_COMPLIANCE_RESTORED', 'MANUAL_COMPLIANCE_RESTORED'].includes(item.type)) {
         add(item.createdAt, 'complianceRestores');
       }
@@ -3030,6 +3053,7 @@ function createApp({
       reviewsCreated: sum.reviewsCreated + item.reviewsCreated,
       autoDelists: sum.autoDelists + item.autoDelists,
       complianceRestores: sum.complianceRestores + item.complianceRestores,
+      scoreStageChanges: sum.scoreStageChanges + item.scoreStageChanges,
       rectifyCasesCreated: sum.rectifyCasesCreated + item.rectifyCasesCreated,
       rectifyCasesApproved: sum.rectifyCasesApproved + item.rectifyCasesApproved,
       paymentTimeouts: sum.paymentTimeouts + item.paymentTimeouts,
@@ -3040,7 +3064,7 @@ function createApp({
     }), {
       ebikeOrders: 0, phoneCardOrders: 0, rechargeOrders: 0, plateApplications: 0,
       completedEbikeOrders: 0, afterSalesCreated: 0, afterSalesClosed: 0, reviewsCreated: 0,
-      autoDelists: 0, complianceRestores: 0, rectifyCasesCreated: 0, rectifyCasesApproved: 0, paymentTimeouts: 0,
+      autoDelists: 0, complianceRestores: 0, scoreStageChanges: 0, rectifyCasesCreated: 0, rectifyCasesApproved: 0, paymentTimeouts: 0,
       paymentInCents: 0, refundOutCents: 0, payoutOutCents: 0, netInCents: 0
     });
     return {
@@ -3063,6 +3087,7 @@ function createApp({
       afterSalesClosed: result.afterSalesClosed + item.afterSalesClosed,
       autoDelists: result.autoDelists + item.autoDelists,
       complianceRestores: result.complianceRestores + item.complianceRestores,
+      scoreStageChanges: result.scoreStageChanges + item.scoreStageChanges,
       rectifyCasesCreated: result.rectifyCasesCreated + item.rectifyCasesCreated,
       rectifyCasesApproved: result.rectifyCasesApproved + item.rectifyCasesApproved,
       paymentTimeouts: result.paymentTimeouts + item.paymentTimeouts,
@@ -3071,7 +3096,7 @@ function createApp({
     }), {
       ebikeOrders: 0, phoneCardOrders: 0, rechargeOrders: 0, plateApplications: 0,
       completedEbikeOrders: 0, afterSalesCreated: 0, afterSalesClosed: 0,
-      autoDelists: 0, complianceRestores: 0, rectifyCasesCreated: 0, rectifyCasesApproved: 0, paymentTimeouts: 0,
+      autoDelists: 0, complianceRestores: 0, scoreStageChanges: 0, rectifyCasesCreated: 0, rectifyCasesApproved: 0, paymentTimeouts: 0,
       paymentInCents: 0, netInCents: 0
     });
     const current = sum(currentReports);
@@ -3111,6 +3136,9 @@ function createApp({
     if (current.autoDelists >= 3 && current.complianceRestores < current.autoDelists) {
       alerts.push({ level: 'HIGH', message: `近 7 天自动下架 ${current.autoDelists} 次，仅恢复 ${current.complianceRestores} 次，商品供给质量需要专项跟进。` });
     }
+    if (current.scoreStageChanges > 0) {
+      alerts.push({ level: 'MEDIUM', message: `近 7 天有 ${current.scoreStageChanges} 次商家服务分分档变化，请确认处置与整改结果。` });
+    }
     if (current.rectifyCasesCreated > 0 && current.rectifyCasesApproved === 0) {
       alerts.push({ level: 'MEDIUM', message: `近 7 天有 ${current.rectifyCasesCreated} 个整改工单尚未验收通过，请检查商家整改进度。` });
     }
@@ -3123,6 +3151,7 @@ function createApp({
       { label: '电话卡订单', key: 'phoneCardOrders', current: current.phoneCardOrders, previous: previous.phoneCardOrders, changePercent: change(current.phoneCardOrders, previous.phoneCardOrders) },
       { label: '话费权益', key: 'rechargeOrders', current: current.rechargeOrders, previous: previous.rechargeOrders, changePercent: change(current.rechargeOrders, previous.rechargeOrders) },
       { label: '自动下架', key: 'autoDelists', current: current.autoDelists, previous: previous.autoDelists, changePercent: change(current.autoDelists, previous.autoDelists) },
+      { label: '服务分分档变化', key: 'scoreStageChanges', current: current.scoreStageChanges, previous: previous.scoreStageChanges, changePercent: change(current.scoreStageChanges, previous.scoreStageChanges) },
       { label: '整改工单', key: 'rectifyCasesCreated', current: current.rectifyCasesCreated, previous: previous.rectifyCasesCreated, changePercent: change(current.rectifyCasesCreated, previous.rectifyCasesCreated) },
       { label: '支付超时', key: 'paymentTimeouts', current: current.paymentTimeouts, previous: previous.paymentTimeouts, changePercent: change(current.paymentTimeouts, previous.paymentTimeouts) },
       { label: '支付收入', key: 'paymentInCents', current: current.paymentInCents, previous: previous.paymentInCents, changePercent: change(current.paymentInCents, previous.paymentInCents) }
@@ -5667,17 +5696,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/admin/operations-report/export') {
         const data = store.read();
         const { reports, totals } = dailyOperationsReports(data, 14);
-        const headers = ['日期', '电瓶车订单', '电话卡订单', '话费权益', '牌照申请', '完成电瓶车订单', '新增售后', '完成售后', '新增评价', '自动下架', '恢复上架', '整改工单', '整改通过', '支付超时', '支付收入(元)', '退款支出(元)', '商家打款(元)', '净额(元)'];
+        const headers = ['日期', '电瓶车订单', '电话卡订单', '话费权益', '牌照申请', '完成电瓶车订单', '新增售后', '完成售后', '新增评价', '自动下架', '恢复上架', '服务分分档变化', '整改工单', '整改通过', '支付超时', '支付收入(元)', '退款支出(元)', '商家打款(元)', '净额(元)'];
         const money = (value) => ((Number(value) || 0) / 100).toFixed(2);
         const rows = reports.map((item) => [
           item.date, item.ebikeOrders, item.phoneCardOrders, item.rechargeOrders, item.plateApplications,
           item.completedEbikeOrders, item.afterSalesCreated, item.afterSalesClosed, item.reviewsCreated,
-          item.autoDelists, item.complianceRestores, item.rectifyCasesCreated, item.rectifyCasesApproved, item.paymentTimeouts,
+          item.autoDelists, item.complianceRestores, item.scoreStageChanges, item.rectifyCasesCreated, item.rectifyCasesApproved, item.paymentTimeouts,
           money(item.paymentInCents), money(item.refundOutCents), money(item.payoutOutCents), money(item.netInCents)
         ]);
         rows.push(['近14天合计', totals.ebikeOrders, totals.phoneCardOrders, totals.rechargeOrders, totals.plateApplications,
           totals.completedEbikeOrders, totals.afterSalesCreated, totals.afterSalesClosed, totals.reviewsCreated,
-          totals.autoDelists, totals.complianceRestores, totals.rectifyCasesCreated, totals.rectifyCasesApproved, totals.paymentTimeouts,
+          totals.autoDelists, totals.complianceRestores, totals.scoreStageChanges, totals.rectifyCasesCreated, totals.rectifyCasesApproved, totals.paymentTimeouts,
           money(totals.paymentInCents), money(totals.refundOutCents), money(totals.payoutOutCents), money(totals.netInCents)]);
         const csv = [headers, ...rows].map((row) => row.map((value) => {
           const text = String(value ?? '');

@@ -2278,10 +2278,13 @@ test('operations report provides trends and csv export', async () => {
   assert.equal(insights.previous.reports.length, 7);
   assert.ok(insights.comparisons.some((item) => item.key === 'paymentInCents'));
   assert.ok(insights.comparisons.some((item) => item.key === 'autoDelists'));
+  assert.ok(insights.comparisons.some((item) => item.key === 'scoreStageChanges'));
   assert.ok(insights.comparisons.some((item) => item.key === 'rectifyCasesCreated'));
   const autoDelistComparison = insights.comparisons.find((item) => item.key === 'autoDelists');
+  const stageComparison = insights.comparisons.find((item) => item.key === 'scoreStageChanges');
   const rectifyComparison = insights.comparisons.find((item) => item.key === 'rectifyCasesCreated');
   assert.equal(autoDelistComparison.current, insights.current.totals.autoDelists);
+  assert.equal(stageComparison.current, insights.current.totals.scoreStageChanges);
   assert.equal(rectifyComparison.current, insights.current.totals.rectifyCasesCreated);
   const totalOrdersComparison = insights.comparisons.find((item) => item.key === 'totalOrders');
   assert.equal(totalOrdersComparison.current, insights.current.totals.ebikeOrders
@@ -2300,6 +2303,9 @@ test('operations report provides trends and csv export', async () => {
       riskLogIds.push(id);
       data.merchantScoreLogs.unshift({ id, type: 'AUTO_DELIST', createdAt: new Date().toISOString() });
     }
+    const stageLogId = 'log_operations_stage_change';
+    riskLogIds.push(stageLogId);
+    data.merchantScoreLogs.unshift({ id: stageLogId, type: 'STAGE_CHANGE', createdAt: new Date().toISOString() });
     const caseId = 'case_operations_alert_open';
     riskCaseIds.push(caseId);
     data.serviceScoreCases.unshift({ id: caseId, type: 'RECTIFY', status: 'OPEN', createdAt: new Date().toISOString() });
@@ -2310,6 +2316,8 @@ test('operations report provides trends and csv export', async () => {
   const riskAlerts = riskOverview.body.data.operationsInsights.alerts || [];
   assert.ok(riskAlerts.some((item) => item.level === 'HIGH' && item.message.includes('自动下架')));
   assert.ok(riskAlerts.some((item) => item.message.includes('整改工单')));
+  assert.ok(riskAlerts.some((item) => item.message.includes('分档变化')));
+  assert.ok(riskOverview.body.data.operationsReport.totals.scoreStageChanges >= 1);
   store.update((data) => {
     data.merchantScoreLogs = (data.merchantScoreLogs || []).filter((item) => !riskLogIds.includes(item.id));
     data.serviceScoreCases = (data.serviceScoreCases || []).filter((item) => !riskCaseIds.includes(item.id));
@@ -2324,7 +2332,7 @@ test('operations report provides trends and csv export', async () => {
   assert.deepEqual([...exportBytes.slice(0, 3)], [0xef, 0xbb, 0xbf]);
   const csv = new TextDecoder('utf-8').decode(exportBytes);
   assert.ok(csv.includes('日期,电瓶车订单,电话卡订单,话费权益,牌照申请'));
-  assert.ok(csv.includes('自动下架,恢复上架,整改工单,整改通过'));
+  assert.ok(csv.includes('自动下架,恢复上架,服务分分档变化,整改工单,整改通过'));
   assert.ok(csv.includes('近14天合计'));
 
   const unauthorized = await fetch(`${baseUrl}/api/admin/operations-report/export`);
@@ -4456,6 +4464,97 @@ test('service score stage changes reach merchants, platform and patrol audit', a
   assert.ok((stateAfter.notifications || []).some((item) => (
     item.userId === 'PLATFORM' && item.title === '服务分已恢复' && item.content.includes(merchant.name)
   )));
+
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ patrolIntervalMinutes: 10 })
+  });
+});
+
+test('rectification cases warn merchants before the review deadline', async () => {
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ patrolIntervalMinutes: 1 })
+  });
+
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  store.update((data) => {
+    data.afterSales = (data.afterSales || []).map((item) => ({ ...item, status: 'CLOSED' }));
+    data.slaAlerts = (data.slaAlerts || []).map((item) => ({ ...item, status: 'RESOLVED' }));
+    data.serviceScoreCases = [];
+    const merchant = data.merchants.find((item) => item.id === 'merchant_001');
+    merchant.serviceScore = null;
+    data.serviceMessageSubscribers = [...new Set([...(data.serviceMessageSubscribers || []), merchant.userId])];
+    data.patrolState = { lastRunAt: '', runCount: 0, lastCreated: 0, lastResolved: 0, lastOpen: 0, lastScoreChanges: 0 };
+  });
+
+  const created = await api('/api/merchant/score-cases', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ type: 'RECTIFY', reason: '48 小时内完成整改', plan: '清理逾期工单并回访用户' })
+  });
+  assert.equal(created.response.status, 201);
+
+  await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  const earlyState = store.read();
+  assert.ok(!(earlyState.slaAlerts || []).some((alert) => (
+    alert.ruleKey === 'SCORE_RECTIFY_MERCHANT' && alert.businessId === created.body.data.id && alert.status !== 'RESOLVED'
+  )));
+
+  store.update((data) => {
+    const record = data.serviceScoreCases.find((item) => item.id === created.body.data.id);
+    record.dueAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    data.patrolState = { ...data.patrolState, lastRunAt: '' };
+  });
+  await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  let state = store.read();
+  let warning = state.slaAlerts.find((alert) => (
+    alert.ruleKey === 'SCORE_RECTIFY_MERCHANT' && alert.businessId === created.body.data.id
+  ));
+  assert.ok(warning);
+  assert.equal(warning.ownerRole, 'MERCHANT');
+  assert.equal(warning.level, 'WARNING');
+  assert.ok((state.notifications || []).some((item) => (
+    item.userId === 'wx_merchant_demo' && item.title === '履约即将超时' && item.content.includes('商家整改临期')
+  )));
+  assert.ok((state.subscribeMessages || []).some((item) => (
+    item.templateId === 'sla_warning' && item.status === 'QUEUED' && item.userId === 'wx_merchant_demo'
+  )));
+
+  store.update((data) => {
+    const record = data.serviceScoreCases.find((item) => item.id === created.body.data.id);
+    record.dueAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    data.patrolState = { ...data.patrolState, lastRunAt: '' };
+  });
+  await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  state = store.read();
+  const overdue = state.slaAlerts.find((alert) => (
+    alert.ruleKey === 'SCORE_RECTIFY_MERCHANT' && alert.businessId === created.body.data.id
+  ));
+  assert.equal(overdue.level, 'OVERDUE');
+  assert.ok((state.notifications || []).some((item) => (
+    item.userId === 'wx_merchant_demo' && item.title === '履约已超时' && item.content.includes('商家整改临期')
+  )));
+
+  store.update((data) => {
+    data.serviceScoreCases = data.serviceScoreCases.filter((item) => item.id !== created.body.data.id);
+    data.patrolState = { ...data.patrolState, lastRunAt: '' };
+  });
+  await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  const finalState = store.read();
+  assert.equal(finalState.slaAlerts.find((alert) => (
+    alert.ruleKey === 'SCORE_RECTIFY_MERCHANT' && alert.businessId === created.body.data.id
+  )).status, 'RESOLVED');
 
   await api('/api/admin/settings', {
     method: 'POST', headers: adminHeaders,
