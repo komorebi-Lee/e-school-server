@@ -108,6 +108,11 @@ const scoreNotificationTemplates = {
 };
 
 const orderNotificationTemplates = {
+  FAVORITE_PRICE_NOTICE: {
+    id: 'favorite_price_notice',
+    keywords: ['收藏', '降价', '限时促销'],
+    description: '收藏的商品开始限时特价时提醒用户'
+  },
   RESTOCK_NOTICE: {
     id: 'restock_notice',
     keywords: ['商品', '补货', '到货'],
@@ -1573,6 +1578,30 @@ function createApp({
       id: `sub_${randomUUID()}`,
       userId,
       templateId: orderNotificationTemplates[templateKey]?.id || templateKey,
+      status: 'QUEUED',
+      title,
+      content,
+      error: '',
+      createdAt: now,
+      sentAt: ''
+    });
+    data.subscribeMessages = data.subscribeMessages.slice(0, 500);
+    return { notification, subscribeMessage: data.subscribeMessages[0] };
+  }
+
+  function sendFavoritePriceDropNotification(data, userId, product, promotion, now = new Date().toISOString()) {
+    if (!product || !promotion) return null;
+    const savedInCents = Math.max(0, Number(promotion.originalPriceInCents || 0) - Number(promotion.salePriceInCents || 0));
+    const title = '收藏商品降价';
+    const content = `「${product.name}」开始限时特价 ¥${(Number(promotion.salePriceInCents) / 100).toFixed(2).replace(/\.00$/, '')}，较原价节省 ¥${(savedInCents / 100).toFixed(2).replace(/\.00$/, '')}，库存有限先到先得。`;
+    const notification = addNotification(data, userId, 'PROMOTION', title, content);
+    if (!notification) return null;
+    if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
+    data.subscribeMessages.unshift({
+      id: `sub_${randomUUID()}`,
+      userId,
+      templateId: 'favorite_price_notice',
+      page: 'pages/detail/detail',
       status: 'QUEUED',
       title,
       content,
@@ -3940,6 +3969,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           sla_warning: settings.slaWarningTemplateId || ''
         };
         const configuredUserIds = {
+          favorite_price_notice: settings.favoritePriceNoticeTemplateId || '',
           order_status: settings.orderStatusTemplateId || '',
           order_service: settings.orderServiceTemplateId || '',
           restock_notice: settings.restockNoticeTemplateId || '',
@@ -4895,6 +4925,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             item.imageUrl = imageUrl;
           }
           if (body.priceInCents !== undefined) item.priceInCents = requirePositiveInteger(body.priceInCents, 'priceInCents');
+          const previousPromotion = withProductSale(item).promotion;
           const sale = normalizeProductSaleCampaign(body, item);
           if (sale) {
             if (sale.salePriceInCents >= item.priceInCents) throw new ApiError(400, 'VALIDATION_ERROR', '促销价必须低于商品原价');
@@ -4920,7 +4951,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             }
           }
           if (body.active !== undefined) item.active = Boolean(body.active);
-          item.updatedAt = new Date().toISOString();
+          const now = new Date().toISOString();
+          item.updatedAt = now;
           evaluateLowStockAlert(data, item, item.updatedAt);
           addAudit(data, '商家更新商品', item.name);
           notifyRestockSubscribers(
@@ -4929,6 +4961,16 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             data.merchants.find((merchant) => merchant.id === merchantSession.merchantId)?.name || '',
             item.updatedAt
           );
+          const currentPromotion = withProductSale(item, now).promotion;
+          const saleSignature = `${item.salePriceInCents || 0}:${item.saleStartsAt || ''}:${item.saleEndsAt || ''}`;
+          if (currentPromotion && sale && previousPromotion !== currentPromotion && item.lastSaleNoticeKey !== saleSignature) {
+            for (const favorite of (data.productFavorites || []).filter((row) => row.productId === item.id)) {
+              if (favorite.userId !== merchantSession.userId) {
+                sendFavoritePriceDropNotification(data, favorite.userId, item, currentPromotion, now);
+              }
+            }
+            item.lastSaleNoticeKey = saleSignature;
+          }
           return item;
         });
         return sendJson(response, 200, { data: product, requestId });
@@ -6426,6 +6468,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               audience: 'USER',
               keywords: item.keywords.join('；'),
               configuredId: ({
+                favorite_price_notice: data.adminSettings?.favoritePriceNoticeTemplateId || '',
                 order_status: data.adminSettings?.orderStatusTemplateId || '',
                 order_service: data.adminSettings?.orderServiceTemplateId || '',
                 restock_notice: data.adminSettings?.restockNoticeTemplateId || '',
@@ -6462,6 +6505,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           ,stock_low_stock: settings.stockLowStockTemplateId || ''
           ,sla_warning: settings.slaWarningTemplateId || ''
           ,order_status: settings.orderStatusTemplateId || '',
+          favorite_price_notice: settings.favoritePriceNoticeTemplateId || '',
           order_service: settings.orderServiceTemplateId || '',
           restock_notice: settings.restockNoticeTemplateId || '',
           after_sale: settings.afterSaleTemplateId || ''
@@ -6483,7 +6527,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const payload = {
               touser: wechatIdentity,
               template_id: templateId,
-              page: merchantTemplate ? 'pages/merchant/index' : 'pages/orders/orders',
+              page: message.page || (merchantTemplate ? 'pages/merchant/index' : 'pages/orders/orders'),
               data: {
                 thing1: { value: (message.title || '').slice(0, 20) },
                 thing2: { value: (message.content || '').slice(0, 20) }
@@ -6701,7 +6745,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isFinite(value) || value < 1 || value > 4.5) throw new ApiError(400, 'VALIDATION_ERROR', '均分下架阈值需为 1-4.5 分');
             current.productComplianceAverageRatingThreshold = Math.round(value * 10) / 10;
           }
-          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'slaWarningTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'restockNoticeTemplateId', 'afterSaleTemplateId']) {
+          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'slaWarningTemplateId', 'favoritePriceNoticeTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'restockNoticeTemplateId', 'afterSaleTemplateId']) {
             if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);
           }
           if (body.paymentTimeoutMinutes !== undefined) {

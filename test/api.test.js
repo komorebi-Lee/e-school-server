@@ -110,6 +110,7 @@ test('merchant overview exposes product sales and restock hints', async () => {
     body: JSON.stringify({ merchantId: 'merchant_001' })
   });
   assert.equal(merchantLogin.response.status, 200);
+  assert.equal(merchantLogin.response.status, 200);
   const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
 
   const product = await api('/api/merchant/products', {
@@ -4217,5 +4218,66 @@ test('merchant and admin surfaces turn favorites into demand signals', async () 
   assert.ok(adminProduct.favoriteCount >= 2);
   assert.ok(adminOverview.body.data.favoriteDemandProducts.some((item) => (
     item.id === 'prod_ebike_001' && item.favoriteCount >= 2
+  )));
+});
+
+test('favorite users receive a conversion notice when a product goes on sale', async () => {
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+  const created = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ name: '收藏转化测试车', category: 'DIGITAL', description: '降价转化链路验证', priceInCents: 100000, stock: 3 })
+  });
+  const productId = created.body.data.id;
+
+  const userSession = await loginWeChat('favorite_price_user');
+  await api(`/api/products/${productId}/favorite`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ favorited: true })
+  });
+
+  const now = Date.now();
+  const sale = await api(`/api/merchant/products/${productId}`, {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({
+      salePriceInCents: 80000,
+      saleStartsAt: new Date(now - 60 * 1000).toISOString(),
+      saleEndsAt: new Date(now + 24 * 3600 * 1000).toISOString()
+    })
+  });
+  assert.equal(sale.response.status, 200);
+
+  const notifications = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  const notice = notifications.body.data.find((item) => item.title === '收藏商品降价');
+  assert.ok(notice);
+  assert.ok(notice.content.includes('收藏转化测试车'));
+  assert.ok(notice.content.includes('¥800'));
+  assert.ok(notice.content.includes('节省 ¥200'));
+
+  const queued = (store.read().subscribeMessages || []).find((item) => (
+    item.userId === userSession.userId && item.templateId === 'favorite_price_notice'
+  ));
+  assert.ok(queued);
+  assert.equal(queued.page, 'pages/detail/detail');
+
+  const admin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  await api('/api/admin/settings', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${admin.body.data.token}` },
+    body: JSON.stringify({ favoritePriceNoticeTemplateId: 'wx_favorite_price_notice' })
+  });
+  const templates = await api('/api/admin/subscribe-templates', {
+    headers: { authorization: `Bearer ${admin.body.data.token}` }
+  });
+  assert.ok(templates.body.data.some((item) => (
+    item.id === 'favorite_price_notice' && item.configuredId === 'wx_favorite_price_notice'
   )));
 });
