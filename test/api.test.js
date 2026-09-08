@@ -2442,6 +2442,10 @@ test('merchant workspace receives service score trend snapshots', async () => {
   assert.equal(trend.effect.scoreBefore, 72);
   assert.equal(trend.effect.scoreAfter, 92);
   assert.equal(trend.effect.gain, 20);
+  for (const field of ['riskPoints', 'overdueAfterSales', 'openAfterSales', 'overdueAlerts', 'openAlerts']) {
+    assert.equal(Number.isInteger(trend.risk[field]), true, `${field} should be a count`);
+  }
+  assert.ok(trend.risk.riskPoints >= 0);
   const snapshots = (store.read().merchantScoreSnapshots || [])
     .filter((item) => item.merchantId === 'merchant_001');
   assert.ok(snapshots.some((item) => item.date === today), 'merchant overview should persist today snapshot');

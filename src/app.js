@@ -2963,6 +2963,38 @@ function createApp({
     }
   }
 
+  function merchantScoreRisk(data, merchant) {
+    if (!merchant?.serviceScore) return null;
+    const now = new Date().toISOString();
+    const openAlerts = (data.slaAlerts || []).filter((alert) => alert.status !== 'RESOLVED'
+      && alert.ownerRole === 'MERCHANT' && alert.merchantId === merchant.id);
+    const overdueAlerts = openAlerts.filter((alert) => alert.level === 'OVERDUE').length;
+    const productIds = new Set((data.products || []).filter((item) => item.merchantId === merchant.id).map((item) => item.id));
+    const orders = (data.orders || []).filter((order) => resolveOrderMerchantId(data, order) === merchant.id
+      || (order.items || []).some((item) => productIds.has(item.productId)));
+    const afterSales = (data.afterSales || []).filter((record) => orders.some((order) => order.id === record.orderId));
+    const openAfterSales = afterSales.filter((record) => record.status !== 'CLOSED').length;
+    const overdueAfterSales = afterSales.filter((record) => record.status !== 'CLOSED'
+      && record.responseDueAt && record.responseDueAt < now).length;
+    const breakdown = (merchant.serviceScore.breakdown || []);
+    const currentAfterSale = breakdown.find((item) => item.key === 'AFTER_SALE')?.score ?? 100;
+    const currentSla = breakdown.find((item) => item.key === 'SLA')?.score ?? 100;
+    // 和评分公式同一套扣分系数：这里只计算“处理完当前超时/未关闭事项”能找回的分数。
+    const projectedAfterSale = clampScore(100 - overdueAfterSales * 12 - openAfterSales * 4);
+    const projectedSla = clampScore(100 - overdueAlerts * 20 - (openAlerts.length - overdueAlerts) * 8);
+    const afterSaleRecoverable = Math.max(0, projectedAfterSale - currentAfterSale);
+    const slaRecoverable = Math.max(0, projectedSla - currentSla);
+    const riskPoints = Math.round((afterSaleRecoverable * 25 + slaRecoverable * 15) / 100);
+    if (!riskPoints) return null;
+    return {
+      riskPoints,
+      overdueAfterSales,
+      openAfterSales,
+      overdueAlerts,
+      openAlerts: openAlerts.length
+    };
+  }
+
   function merchantScoreTrend(data, merchantId, days = 14) {
     const count = Number.isInteger(days) && days >= 2 && days <= 90 ? days : 14;
     const today = new Date().toISOString().slice(0, 10);
@@ -3009,6 +3041,7 @@ function createApp({
       change: first && latest ? latest.score - first.score : 0,
       trendText: first && latest ? `${latest.score - first.score >= 0 ? '+' : ''}${latest.score - first.score} 分` : '暂无趋势',
       effect,
+      risk: merchantScoreRisk(data, (data.merchants || []).find((item) => item.id === merchantId)),
       points: rows
     };
   }
