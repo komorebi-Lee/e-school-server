@@ -1920,6 +1920,62 @@ test('admin order status update rejects unsupported status', async () => {
   assert.equal(response.body.error.code, 'VALIDATION_ERROR');
 });
 
+test('admin urges pending negative review and tracks reply rate', async () => {
+  const adminHeaders = await loginAdmin();
+  const templateConfig = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ negativeReviewReplyTemplateId: 'wx_test_negative_reply' })
+  });
+  assert.equal(templateConfig.response.status, 200);
+  assert.equal(templateConfig.body.data.negativeReviewReplyTemplateId, 'wx_test_negative_reply');
+  const now = new Date().toISOString();
+  store.update((data) => {
+    data.serviceMessageSubscribers = Array.isArray(data.serviceMessageSubscribers)
+      ? Array.from(new Set([...data.serviceMessageSubscribers, 'wx_merchant_demo']))
+      : ['wx_merchant_demo'];
+    data.productReviews.unshift({
+      id: 'review_urge_pending', productId: 'prod_ebike_rent_001', rating: 1,
+      content: '平台催办测试差评', customerName: '测试同学', purchaseVerified: true,
+      visibility: 'PUBLISHED', reply: null, replyDueAt: now, createdAt: now
+    });
+  });
+
+  const urge = await api('/api/admin/product-reviews/review_urge_pending/urge', {
+    method: 'POST', headers: adminHeaders
+  });
+  assert.equal(urge.response.status, 200);
+  assert.equal(urge.body.data.merchantName, '狮山校园车行');
+  assert.ok(urge.body.data.replyDueAt);
+  assert.equal(urge.body.data.lastUrge.operator, process.env.ADMIN_USERNAME);
+
+  const persisted = store.read().productReviews.find((item) => item.id === 'review_urge_pending');
+  assert.ok(persisted.lastUrge, 'urge operation should persist accountability');
+  assert.ok((store.read().subscribeMessages || []).some((item) => (
+    item.templateId === 'negative_review_reply' && item.status === 'QUEUED'
+      && item.title === '平台催办差评回复' && item.page?.includes(encodeURIComponent(persisted.id))
+  )));
+
+  const templateList = await api('/api/admin/subscribe-templates', { headers: adminHeaders });
+  assert.ok(templateList.body.data.some((item) => (
+    item.id === 'negative_review_reply' && item.audience === 'MERCHANT'
+      && item.configuredId === 'wx_test_negative_reply'
+  )));
+
+  const overview = await api('/api/admin/overview', { method: 'GET', headers: adminHeaders });
+  const operations = overview.body.data.negativeReviewOperations;
+  const expectedTotal = store.read().productReviews
+    .filter((item) => Number(item.rating) <= 2 && item.visibility !== 'HIDDEN').length;
+  assert.ok(operations);
+  assert.equal(operations.total, expectedTotal);
+  assert.ok(operations.openCount >= 1);
+  assert.ok(operations.replyRate >= 0 && operations.replyRate <= 100);
+
+  // 催办用例只验证指标与提醒，不把测试差评留在共享商品上影响后续风控测试。
+  store.update((data) => {
+    data.productReviews = data.productReviews.filter((item) => item.id !== 'review_urge_pending');
+  });
+});
+
 test('admin order control preserves delivery verification and stock truth', async () => {
   const session = await loginWeChat('admin_order_control');
   const product = await api('/api/products/prod_ebike_001');

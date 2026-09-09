@@ -100,6 +100,11 @@ const scoreNotificationTemplates = {
     keywords: ['库存', '补货', '商品'],
     description: '商品可售库存达到补货阈值时提醒商家及时补货'
   },
+  NEGATIVE_REVIEW_REPLY: {
+    id: 'negative_review_reply',
+    keywords: ['差评', '回复', '时限'],
+    description: '收到差评后提醒商家在承诺时限内回复，避免服务分受损'
+  },
   SLA_WARNING: {
     id: 'sla_warning',
     keywords: ['履约', '超时', '预警'],
@@ -3034,6 +3039,7 @@ function createApp({
       ,product_auto_delist: settings.productAutoDelistTemplateId || '',
       product_compliance_restored: settings.productComplianceRestoredTemplateId || ''
       ,stock_low_stock: settings.stockLowStockTemplateId || ''
+      ,negative_review_reply: settings.negativeReviewReplyTemplateId || ''
       ,sla_warning: settings.slaWarningTemplateId || ''
       ,order_status: settings.orderStatusTemplateId || '',
       favorite_price_notice: settings.favoritePriceNoticeTemplateId || '',
@@ -3923,6 +3929,28 @@ function createApp({
     };
   }
 
+  function negativeReviewOpsSummary(data) {
+    const reviews = (data.productReviews || []).filter((item) => Number(item.rating) <= 2 && item.visibility !== 'HIDDEN');
+    const replied = reviews.filter((item) => item.reply && String(item.reply.content || '').trim());
+    const now = Date.now();
+    const overdue = reviews.filter((item) => !item.reply?.content
+      && item.replyDueAt
+      && new Date(item.replyDueAt).getTime() < now);
+    const dueSoonMs = 6 * 3600 * 1000;
+    const dueSoon = reviews.filter((item) => !item.reply?.content
+      && item.replyDueAt
+      && new Date(item.replyDueAt).getTime() >= now
+      && new Date(item.replyDueAt).getTime() - now <= dueSoonMs);
+    return {
+      total: reviews.length,
+      repliedCount: replied.length,
+      openCount: reviews.length - replied.length,
+      overdueCount: overdue.length,
+      dueSoonCount: dueSoon.length,
+      replyRate: reviews.length ? Math.round((replied.length / reviews.length) * 100) : 100
+    };
+  }
+
   function refreshScoresNow() {
     return store.update((data) => refreshMerchantScores(data, new Date().toISOString()));
   }
@@ -4725,6 +4753,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           ,product_auto_delist: settings.productAutoDelistTemplateId || '',
           product_compliance_restored: settings.productComplianceRestoredTemplateId || '',
           stock_low_stock: settings.stockLowStockTemplateId || '',
+          negative_review_reply: settings.negativeReviewReplyTemplateId || '',
           sla_warning: settings.slaWarningTemplateId || ''
         };
         const configuredUserIds = {
@@ -4873,7 +4902,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const product = data.products.find((item) => item.id === productId);
             const merchant = (data.merchants || []).find((item) => item.id === product?.merchantId);
             if (merchant?.userId) {
-              notifyMerchantScore(data, merchant.id, 'SLA_WARNING', '收到新的差评',
+              notifyMerchantScore(data, merchant.id, 'NEGATIVE_REVIEW_REPLY', '收到新的差评',
                 `《${product?.name || '商品'}》收到 ${rating} 分差评，请在 ${slaHours(data, 'reviewReplyHours', 24)} 小时内回复。`,
                 now, 'SCORE', { reviewId: record.id });
             }
@@ -6415,6 +6444,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               .sort((a, b) => a.serviceScore.score - b.serviceScore.score)
               .map((merchant) => ({ merchantId: merchant.id, merchantName: merchant.name, ...merchant.serviceScore })),
             merchantScoreSummary: serviceScoreSummary(data.merchants || []),
+            negativeReviewOperations: negativeReviewOpsSummary(data),
             merchantScoreLogs: (data.merchantScoreLogs || []).slice(0, 50),
             settingChangeLogs: (data.settingChangeLogs || []).slice(0, 20),
             serviceScoreCases: (data.serviceScoreCases || []).slice(0, 80),
@@ -7011,6 +7041,44 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/admin/leads/export') { const leads=store.read().leads||[]; return sendJson(response,200,{data:leads,requestId}); }
 
       const adminReviewVisibilityMatch = pathname.match(/^\/api\/admin\/product-reviews\/([^/]+)\/visibility$/);
+      const adminReviewUrgeMatch = pathname.match(/^\/api\/admin\/product-reviews\/([^/]+)\/urge$/);
+      if (request.method === 'POST' && adminReviewUrgeMatch) {
+        const actor = requireAdmin(request, 'ORDER_MANAGE');
+        const result = store.update((data) => {
+          const review = (data.productReviews || []).find((record) => record.id === adminReviewUrgeMatch[1]);
+          if (!review) throw new ApiError(404, 'REVIEW_NOT_FOUND', 'Review not found');
+          if (Number(review.rating) > 2 || review.reply?.content || review.visibility === 'HIDDEN') {
+            throw new ApiError(409, 'REVIEW_NOT_PENDING_REPLY', '仅待回复的公开差评可以催办');
+          }
+          const product = data.products.find((item) => item.id === review.productId);
+          const merchant = data.merchants.find((item) => item.id === product?.merchantId);
+          if (!merchant?.userId) throw new ApiError(404, 'MERCHANT_NOT_FOUND', '未找到评价关联商家');
+          const now = new Date().toISOString();
+          const dueAt = review.replyDueAt || addHours(now, slaHours(data, 'reviewReplyHours', 24));
+          review.replyDueAt = dueAt;
+          review.lastUrge = {
+            operator: actor.username,
+            note: '平台已催办，请在承诺时限内完成回复。',
+            urgedAt: now
+          };
+          notifyMerchantScore(data, merchant.id, 'NEGATIVE_REVIEW_REPLY', '平台催办差评回复',
+            `《${product?.name || '商品'}》差评待回复，截止 ${dueAt.replace('T', ' ').slice(0, 16)}。请尽快联系用户并说明处理方案。`,
+            now, 'SCORE', { reviewId: review.id });
+          addNotification(data, 'PLATFORM', 'SCORE', '差评回复已催办',
+            `${merchant.name} · ${product?.name || review.productId}`, { reviewId: review.id });
+          addAudit(data, '催办差评回复', `${merchant.name} · ${review.id}`, actor.username);
+          return { review, merchantName: merchant.name };
+        });
+        return sendJson(response, 200, {
+          data: {
+            id: result.review.id,
+            replyDueAt: result.review.replyDueAt || '',
+            lastUrge: result.review.lastUrge || null,
+            merchantName: result.merchantName
+          },
+          requestId
+        });
+      }
       const merchantReviewReplyMatch = pathname.match(/^\/api\/merchant\/product-reviews\/([^/]+)\/reply$/);
       if (request.method === 'POST' && merchantReviewReplyMatch) {
         const body = await readJson(request);
@@ -7460,6 +7528,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 product_auto_delist: data.adminSettings?.productAutoDelistTemplateId || '',
                 product_compliance_restored: data.adminSettings?.productComplianceRestoredTemplateId || '',
                 stock_low_stock: data.adminSettings?.stockLowStockTemplateId || '',
+                negative_review_reply: data.adminSettings?.negativeReviewReplyTemplateId || '',
                 sla_warning: data.adminSettings?.slaWarningTemplateId || ''
               })[item.id] || ''
             })),
@@ -7682,7 +7751,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isInteger(value) || value < 1 || value > 20) throw new ApiError(400, 'VALIDATION_ERROR', '售后超时下架阈值需为 1-20 单');
             current.productComplianceOverdueAfterSaleThreshold = value;
           }
-          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'slaWarningTemplateId', 'favoritePriceNoticeTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'restockNoticeTemplateId', 'afterSaleTemplateId', 'leadFollowUpTemplateId']) {
+          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'negativeReviewReplyTemplateId', 'slaWarningTemplateId', 'favoritePriceNoticeTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'restockNoticeTemplateId', 'afterSaleTemplateId', 'leadFollowUpTemplateId']) {
             if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);
           }
           if (body.paymentTimeoutMinutes !== undefined) {
