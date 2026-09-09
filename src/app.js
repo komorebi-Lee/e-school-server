@@ -2364,6 +2364,7 @@ function createApp({
       paymentOrder.updatedAt = now;
     }
     order.paymentStatus = 'PARTIALLY_REFUNDED';
+    order.partialRefundedInCents = Number(order.partialRefundedInCents || 0) + refundInCents;
     order.status = order.statusBeforeAfterSale || 'COMPLETED';
     order.updatedAt = now;
     restoreOrderStockQuantity(data, order, refundItems);
@@ -2377,6 +2378,7 @@ function createApp({
     }
     addAudit(data, '售后部分退款完成', `${order.orderNo}：${refundQuantity} 件`);
     addNotification(data, order.userId, 'ORDER', '订单部分退款成功', `订单 ${order.orderNo} 已按 ${refundQuantity} 件完成退款。`, { focusId: order.id });
+    notifyOrderMerchant(data, order, 'AFTER_SALE', '订单部分退款完成', `订单 ${order.orderNo} 已退 ${refundQuantity} 件，请按剩余件数继续履约。`);
     return { refundInCents, full: false };
   }
 

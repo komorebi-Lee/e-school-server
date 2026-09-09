@@ -2483,6 +2483,23 @@ test('multi-quantity orders support partial after-sale refunds', async () => {
   const firstSnapshot = await api(`/api/orders/${created.body.data.id}`, { headers: { authorization: `Bearer ${session.token}` } });
   assert.equal(firstSnapshot.body.data.status, 'PAID');
   assert.equal(firstSnapshot.body.data.paymentStatus, 'PARTIALLY_REFUNDED');
+  assert.equal(firstSnapshot.body.data.refundedQuantity, 1);
+  assert.equal(firstSnapshot.body.data.partialRefundedInCents, Math.round(order.body.data.totalInCents / 3));
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const merchantOverview = await api('/api/merchant/overview', {
+    headers: { authorization: `Bearer ${merchantLogin.body.data.token}` }
+  });
+  const merchantOrder = merchantOverview.body.data.orders.find((item) => item.id === created.body.data.id);
+  assert.equal(merchantOrder.paymentStatus, 'PARTIALLY_REFUNDED');
+  assert.equal(merchantOrder.refundedQuantity, 1);
+  const merchantNotifications = await api('/api/merchant/notifications', {
+    headers: { authorization: `Bearer ${merchantLogin.body.data.token}` }
+  });
+  assert.ok(merchantNotifications.body.data.some((item) => item.title === '订单部分退款完成' && item.metadata?.orderId === created.body.data.id));
   const afterStock = await api('/api/products/prod_ebike_001');
   assert.equal(afterStock.body.data.stock, baseline.body.data.stock - 2);
   const overview = await api('/api/admin/overview', { headers: adminHeaders });
