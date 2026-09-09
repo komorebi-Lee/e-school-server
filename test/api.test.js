@@ -2485,6 +2485,11 @@ test('multi-quantity orders support partial after-sale refunds', async () => {
   assert.equal(firstSnapshot.body.data.paymentStatus, 'PARTIALLY_REFUNDED');
   assert.equal(firstSnapshot.body.data.refundedQuantity, 1);
   assert.equal(firstSnapshot.body.data.partialRefundedInCents, Math.round(order.body.data.totalInCents / 3));
+  const myOrders = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
+  const myOrder = myOrders.body.data.ebikeOrders.find((item) => item.id === created.body.data.id);
+  assert.equal(myOrder.statusLabel, '部分退款');
+  assert.equal(myOrder.refundedQuantity, 1);
+  assert.equal(myOrder.partialRefundedInCents, Math.round(order.body.data.totalInCents / 3));
   const merchantSession = await loginWeChat('merchant_demo');
   const merchantLogin = await api('/api/merchant/login', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
