@@ -5270,6 +5270,10 @@ test('service record messages track platform response SLA', async () => {
   });
   assert.equal(messaged.response.status, 200);
   assert.ok(messaged.body.data.collaboration.unrepliedMessage);
+  assert.ok((store.read().notifications || []).some((item) => (
+    item.userId === 'PLATFORM' && item.type === 'SERVICE_MESSAGE'
+    && item.metadata?.focusId === recharge.body.data.id
+  )), 'platform should receive the service message notification');
 
   const adminLogin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -5301,6 +5305,14 @@ test('service record messages track platform response SLA', async () => {
   });
   assert.equal(replied.response.status, 200);
   assert.equal(replied.body.data.collaboration.unrepliedMessage, null);
+
+  const myNotifications = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  assert.equal(myNotifications.response.status, 200);
+  assert.ok(myNotifications.body.data.some((item) => (
+    item.title === '平台已回复服务单' && item.metadata?.focusId === recharge.body.data.id
+  )), 'user should receive the platform reply notification');
 
   store.update((data) => {
     data.patrolState = { ...data.patrolState, lastRunAt: '' };
