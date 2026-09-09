@@ -1,5 +1,5 @@
 const savedAdminUser=JSON.parse(localStorage.getItem('shishan_admin_user')||'null');
-const state={data:null,view:'dashboard',query:'',status:'ALL',token:localStorage.getItem('shishan_admin_token')||'',user:savedAdminUser};
+const state={data:null,view:'dashboard',query:'',status:'ALL',ownerFilter:'ALL',token:localStorage.getItem('shishan_admin_token')||'',user:savedAdminUser};
 const lowStockThreshold=Number((state.data.settings||{}).lowStockThreshold??10);
 const titles={dashboard:'经营概览',merchants:'商家入驻',qualification:'资质复审',products:'商品中心',stock:'库存流水',promos:'话费活动',reviews:'商品评价',orders:'电瓶车订单',payments:'支付单',phones:'电话卡订单',recharges:'话费权益',finance:'财务流水',broadband:'宽带资格',plates:'牌照辅助',afterSales:'售后工单',notifications:'站内通知',logs:'操作日志',settings:'运营设置',settlements:'商家结算',payouts:'商家提现',patrol:'超时预警',scores:'商家服务分'};
 titles.serviceCollabs='服务单协同';
@@ -56,7 +56,8 @@ dashboard=function(){
   const reconciliationTask=task('支付对账差异','核对微信账单与本地流水',(dashboardData.financeTasks||[]).filter(x=>x.type==='PAYMENT_RECONCILIATION'&&x.status!=='RESOLVED').length,'payments');
   return baseDashboard()
     .replace('<div class="task-list">',`<div class="task-list">${reconciliationTask}`)
-    .replace('<div class="dashboard-grid">',operationsReportPanel()+'<div class="dashboard-grid">');
+    .replace('<div class="dashboard-grid">',operationsReportPanel()+'<div class="dashboard-grid">')
+    .replace('<section class="panel" style="margin-top:16px">',`${slaOwnerTasksPanel()}<section class="panel" style="margin-top:16px">`);
 };
 function toolbar(count,{add=false,statusesList=[]}={}){return`<div class="page-actions"><p>共 ${count} 条记录</p><div>${add?'<button id="addProduct" class="primary">＋ 新增商品</button>':''}</div></div><div class="filterbar"><div class="filters"><input id="listSearch" class="search" value="${esc(state.query)}" placeholder="搜索当前列表">${statusesList.length?`<select id="statusFilter" class="filter-select"><option value="ALL">全部状态</option>${statusesList.map(x=>`<option value="${x}" ${state.status===x?'selected':''}>${label(x)}</option>`).join('')}</select>`:''}</div><button id="exportButton" class="export-button">导出 CSV</button></div>`}
 function table(headers,rows,count){return`<div class="table-wrap"><table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')||`<tr><td colspan="${headers.length}" class="empty">没有符合条件的记录</td></tr>`}</tbody></table><div class="pagination"><span>显示 1-${Math.min(count,20)}，共 ${count} 条</span><div><button disabled>上一页</button> <button disabled>下一页</button></div></div></div>`}
@@ -324,7 +325,7 @@ async function saveStatus(button){
   await api(`/api/admin/${endpointTypes[button.dataset.view]}/${button.dataset.id}/status`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});
   showToast('业务状态已更新');await load();
 }
-function goView(view){state.view=view;state.query='';state.status='ALL';document.querySelectorAll('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.view===view));render()}
+function goView(view){state.view=view;state.query='';state.status='ALL';state.ownerFilter='ALL';document.querySelectorAll('.nav-item').forEach(x=>x.classList.toggle('active',x.dataset.view===view));render()}
 function detailItem(labelText,value){return value===undefined||value===null||value===''?'':`<div class="detail-item"><small>${esc(labelText)}</small><strong>${esc(value)}</strong></div>`}
 function renderCollabTimeline(collab){
   const events=(collab?.handoffs||[]).slice(0,8);
@@ -660,6 +661,16 @@ bindView = function () {
 
 // 超时预警视图：把巡检结果落成一张“谁该做什么、还剩多久”的清单。
 const slaOwnerLabels = { MERCHANT: '商家', PLATFORM: '平台运营' };
+function slaOwnerKey(alert) {
+  if (alert.ownerRole === 'MERCHANT') return `MERCHANT:${alert.merchantId || 'UNASSIGNED'}`;
+  if (alert.ownerId || alert.acknowledgedById) return `PLATFORM:${alert.ownerId || alert.acknowledgedById}`;
+  return 'PLATFORM:UNASSIGNED';
+}
+function slaOwnerTasksPanel() {
+  const tasks = (state.data.slaOwnerTasks || []).slice(0, 8);
+  return `<section class="panel owner-task-panel" style="margin-top:16px"><div class="panel-head"><h2>负责人待办</h2><span>按风险聚合未关闭预警</span></div><div class="owner-task-grid">${tasks.length ? tasks.map((task) => `<button class="owner-task" data-goto="patrol" data-owner="${esc(task.key)}"><span>${esc(task.ownerName)}</span><strong>${task.openCount}</strong><small>超时 ${task.overdueCount} · 临期 ${task.warningCount}${task.acknowledgedCount ? ` · 已认领 ${task.acknowledgedCount}` : ''}</small></button>`).join('') : '<p class="muted-empty">当前没有未关闭预警</p>'}</div></section>`;
+}
+
 const slaJumpViews = {
   ORDER: 'orders',
   PHONE_PLAN: 'phones',
@@ -692,8 +703,12 @@ function patrolView() {
   const patrol = state.data.patrolState || {};
   const alerts = (state.data.slaAlerts || [])
     .filter(match)
+    .filter((alert) => state.ownerFilter === 'ALL' || slaOwnerKey(alert) === state.ownerFilter)
     .filter((alert) => (state.status === 'ALL' ? alert.status !== 'RESOLVED' : alert.status === state.status || alert.level === state.status))
     .sort((a, b) => String(a.dueAt).localeCompare(String(b.dueAt)));
+  const ownerTasks = [{ key:'ALL', ownerName:'全部负责人', openCount:summary.openCount || 0, overdueCount:summary.overdueCount || 0, warningCount:summary.warningCount || 0, acknowledgedCount:summary.acknowledgedCount || 0 }]
+    .concat((state.data.slaOwnerTasks || []).slice(0, 8));
+  const ownerFilterBar = `<div class="owner-filter">${ownerTasks.map((task) => `<button class="owner-chip ${state.ownerFilter === task.key ? 'active' : ''} ${task.overdueCount ? 'risk' : ''}" data-owner="${esc(task.key)}"><span>${esc(task.ownerName)}</span><strong>${task.openCount}</strong><small>超时 ${task.overdueCount} · 临期 ${task.warningCount}${task.acknowledgedCount ? ` · 已认领 ${task.acknowledgedCount}` : ''}</small></button>`).join('')}</div>`;
   const cards = `<div class="metric-grid">
     ${metric('已超时', summary.overdueCount || 0, '超过承诺时限仍未处理', true)}
     ${metric('即将超时', summary.warningCount || 0, '进入预警窗口需提前处理')}
@@ -717,7 +732,7 @@ function patrolView() {
       <td><div class="row-actions">${actions}${jump}</div></td>
     </tr>`;
   });
-  return cards
+  return cards + ownerFilterBar
     + toolbar(alerts.length, { statusesList: ['OVERDUE', 'WARNING', 'OPEN', 'ACKNOWLEDGED', 'RESOLVED'] })
     + table(['预警规则', '业务详情', '责任方', '承诺时限', '状态', '操作'], rows, alerts.length);
 }
@@ -725,6 +740,14 @@ function patrolView() {
 const baseBindPatrolView = bindView;
 bindView = function () {
   baseBindPatrolView();
+  document.querySelectorAll('.owner-filter .owner-chip').forEach((button) => button.addEventListener('click', () => {
+    state.ownerFilter = button.dataset.owner || 'ALL';
+    render();
+  }));
+  document.querySelectorAll('.owner-task-panel .owner-task').forEach((button) => button.addEventListener('click', () => {
+    state.ownerFilter = button.dataset.owner || 'ALL';
+    goView('patrol');
+  }));
   document.querySelector('#runPatrol')?.addEventListener('click', async () => {
     const result = await api('/api/admin/patrol/run', { method: 'POST' });
     showToast(`巡检完成：新增 ${result.data.created} · 关闭 ${result.data.resolved} · 待处理 ${result.data.open} · 服务分变化 ${result.data.scoreChanges || 0}`);

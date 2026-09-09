@@ -2814,6 +2814,49 @@ function createApp({
     };
   }
 
+  function slaOwnerKey(alert) {
+    if (alert.ownerRole === 'MERCHANT') return `MERCHANT:${alert.merchantId || 'UNASSIGNED'}`;
+    if (alert.ownerId || alert.acknowledgedById) return `PLATFORM:${alert.ownerId || alert.acknowledgedById}`;
+    return 'PLATFORM:UNASSIGNED';
+  }
+
+  function slaOwnerTasks(alerts = []) {
+    const groups = new Map();
+    for (const alert of alerts) {
+      if (alert.status === 'RESOLVED') continue;
+      const key = slaOwnerKey(alert);
+      const ownerRole = alert.ownerRole === 'MERCHANT' ? 'MERCHANT' : 'PLATFORM';
+      const ownerName = ownerRole === 'MERCHANT'
+        ? (alert.merchantName || alert.ownerName || alert.acknowledgedBy || '商家')
+        : (alert.ownerName || alert.acknowledgedBy || '待认领');
+      const group = groups.get(key) || {
+        key,
+        ownerRole,
+        ownerId: key.endsWith(':UNASSIGNED') ? '' : key.split(':')[1] || '',
+        ownerName,
+        openCount: 0,
+        overdueCount: 0,
+        warningCount: 0,
+        acknowledgedCount: 0,
+        businessTypes: [],
+        nearestDueAt: ''
+      };
+      group.openCount += 1;
+      group.overdueCount += alert.level === 'OVERDUE' ? 1 : 0;
+      group.warningCount += alert.level === 'WARNING' ? 1 : 0;
+      group.acknowledgedCount += alert.status === 'ACKNOWLEDGED' ? 1 : 0;
+      if (alert.businessType && !group.businessTypes.includes(alert.businessType)) group.businessTypes.push(alert.businessType);
+      if (alert.dueAt && (!group.nearestDueAt || String(alert.dueAt) < group.nearestDueAt)) group.nearestDueAt = alert.dueAt;
+      groups.set(key, group);
+    }
+    return [...groups.values()].sort((a, b) => (
+      b.overdueCount - a.overdueCount
+      || b.openCount - a.openCount
+      || String(a.nearestDueAt).localeCompare(String(b.nearestDueAt))
+      || a.ownerName.localeCompare(b.ownerName)
+    ));
+  }
+
   // 商家与运营看板需要当下的分数，读接口先重算一次再返回。
   // ===== 商家服务分 =====
   // 分数只由平台已经记录的事实推导：交付是否按时、售后多不多、学生评价好不好、超时预警有没有堆积。
@@ -5692,6 +5735,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           item.status = 'ACKNOWLEDGED';
           item.acknowledgedBy = actor.displayName || actor.username;
           item.acknowledgedById = actor.id;
+          if (item.ownerRole !== 'MERCHANT' && !item.ownerId) {
+            item.ownerId = actor.id;
+            item.ownerName = actor.displayName || actor.username;
+          }
           item.acknowledgedAt = now;
           item.acknowledgeNote = note;
           item.updatedAt = now;
@@ -5943,6 +5990,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             financeSummary,
             slaAlerts: data.slaAlerts || [],
             slaSummary: slaSummary(data.slaAlerts || []),
+            slaOwnerTasks: slaOwnerTasks(data.slaAlerts || []),
             patrolState: data.patrolState || {},
             operationsReport: dailyOperationsReports(data, 7),
             operationsInsights: operationsReportInsights(data),

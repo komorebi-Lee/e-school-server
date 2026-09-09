@@ -3026,7 +3026,8 @@ test('after-sale freezes merchant settlement until the case is closed', async ()
     body: JSON.stringify({ items: [{ productId: product.body.data.id, quantity: 1 }] })
   });
   assert.equal(order.response.status, 201);
-  await confirmPayment(order.body.paymentOrder.id, buyer.token);
+  const orderPayment = await confirmPayment(order.body.paymentOrder.id, buyer.token);
+  assert.equal(orderPayment.response.status, 200);
 
   const detail = await api(`/api/orders/${order.body.data.id}`, { headers: { authorization: `Bearer ${buyer.token}` } });
   const completed = await api(`/api/merchant/orders/${order.body.data.id}/status`, {
@@ -3408,14 +3409,16 @@ test('operations patrol raises overdue alerts and closes them when work moves on
     body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
   });
   assert.equal(order.response.status, 201);
-  await confirmPayment(order.body.paymentOrder.id, buyer.token);
+  const orderPayment = await confirmPayment(order.body.paymentOrder.id, buyer.token);
+  assert.equal(orderPayment.response.status, 200);
 
   const card = await api('/api/phone-card-orders', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
     body: JSON.stringify({ productId: 'prod_card_service_001', customerName: '巡检同学', phone: '15527112233' })
   });
   assert.equal(card.response.status, 201);
-  await confirmPayment(card.body.paymentOrder.id, buyer.token);
+  const cardPayment = await confirmPayment(card.body.paymentOrder.id, buyer.token);
+  assert.equal(cardPayment.response.status, 200);
 
   // 把两笔业务的时间往前拨，模拟真实世界里已经拖过承诺时限的单子。
   const staleAt = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
@@ -3605,6 +3608,82 @@ test('patrol closes expired pending payments without user traffic', async () => 
   assert.equal(order.cancelReason, 'PAYMENT_TIMEOUT');
   assert.equal(state.products.find((item) => item.id === 'prod_ebike_001').reservedStock, 0);
   assert.equal(state.paymentOrders.find((item) => item.id === created.body.data.paymentOrderId).status, 'CANCELLED');
+});
+
+test('sla alerts aggregate owner workload and claim platform items', async () => {
+  const adminHeaders = await loginAdmin();
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ deliveryResponseHours: 2, phoneCardActivationHours: 2, patrolIntervalMinutes: 1 })
+  });
+  const buyer = await loginWeChat('sla_owner_buyer');
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(order.response.status, 201);
+  const orderPayment = await confirmPayment(order.body.paymentOrder.id, buyer.token);
+  assert.equal(orderPayment.response.status, 200);
+  const card = await api('/api/phone-card-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ productId: 'prod_card_service_001', customerName: '责任聚合同学', phone: '15527112233' })
+  });
+  assert.equal(card.response.status, 201);
+  const cardPayment = await confirmPayment(card.body.paymentOrder.id, buyer.token);
+  assert.equal(cardPayment.response.status, 200);
+
+  const staleAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+  store.update((data) => {
+    const paidOrder = data.orders.find((item) => item.id === order.body.data.id);
+    paidOrder.paidAt = staleAt;
+    paidOrder.updatedAt = staleAt;
+    const phoneCard = data.phoneCardOrders.find((item) => item.id === card.body.data.id);
+    phoneCard.updatedAt = staleAt;
+    data.patrolState = { lastRunAt: '', runCount: 0, lastCreated: 0, lastResolved: 0, lastOpen: 0 };
+  });
+  const patrol = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(patrol.response.status, 200);
+  assert.ok(patrol.body.data.created >= 2, 'stale order and phone card should enter patrol');
+
+  const alerts = await api('/api/admin/sla-alerts', { headers: adminHeaders });
+  const deliveryAlert = alerts.body.data.find((item) => item.ruleKey === 'ORDER_DELIVERY' && item.businessId === order.body.data.id);
+  const cardAlert = alerts.body.data.find((item) => item.ruleKey === 'PHONE_ACTIVATION' && item.businessId === card.body.data.id);
+  assert.ok(deliveryAlert && cardAlert);
+
+  const unclaimed = await api('/api/admin/overview', { headers: adminHeaders });
+  const merchantTask = unclaimed.body.data.slaOwnerTasks.find((item) => item.key === `MERCHANT:${deliveryAlert.merchantId}`);
+  const platformTask = unclaimed.body.data.slaOwnerTasks.find((item) => item.key === 'PLATFORM:UNASSIGNED');
+  assert.ok(merchantTask);
+  assert.ok(platformTask);
+  assert.ok(merchantTask.openCount >= 1);
+  assert.ok(merchantTask.overdueCount >= 1);
+  assert.ok(platformTask.openCount >= 1);
+
+  const claimed = await api(`/api/admin/sla-alerts/${cardAlert.id}/acknowledge`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ note: '已联系运营商跟进' })
+  });
+  assert.equal(claimed.response.status, 200);
+  assert.equal(claimed.body.data.status, 'ACKNOWLEDGED');
+  const adminId = store.read().adminUsers.find((item) => item.username === process.env.ADMIN_USERNAME).id;
+  assert.equal(claimed.body.data.ownerId, adminId);
+  assert.equal(claimed.body.data.ownerName, '运营管理员');
+
+  const afterClaim = await api('/api/admin/overview', { headers: adminHeaders });
+  const claimedTask = afterClaim.body.data.slaOwnerTasks.find((item) => item.key === `PLATFORM:${adminId}`);
+  assert.ok(claimedTask);
+  assert.equal(claimedTask.ownerName, '运营管理员');
+  assert.ok(claimedTask.acknowledgedCount >= 1);
+
+  store.update((data) => {
+    data.orders = data.orders.filter((item) => item.id !== order.body.data.id);
+    data.paymentOrders = (data.paymentOrders || []).filter((item) => item.id !== order.body.paymentOrder.id);
+    data.phoneCardOrders = data.phoneCardOrders.filter((item) => item.id !== card.body.data.id);
+  });
+  const restored = await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ deliveryResponseHours: 24, phoneCardActivationHours: 24, patrolIntervalMinutes: 10 })
+  });
+  assert.equal(restored.response.status, 200);
 });
 
 test('patrol releases matured settlements without dashboard traffic', async () => {
