@@ -4187,6 +4187,13 @@ test('service score cases support appeal review, rectification and subscription 
 
   const adminOverview = await api('/api/admin/overview', { headers: adminHeaders });
   assert.ok(adminOverview.body.data.serviceScoreCases.some((item) => item.id === appeal.body.data.id));
+  const overdueMerchantOverview = await api('/api/merchant/overview', { headers: merchantHeaders });
+  const overdueScoreCaseTask = overdueMerchantOverview.body.data.riskTasks.find((item) => (
+    item.type === 'SCORE_CASE' && item.reference === appeal.body.data.id
+  ));
+  assert.ok(overdueScoreCaseTask, 'overdue service score case should enter merchant risk tasks');
+  assert.equal(overdueScoreCaseTask.priority, 'HIGH');
+  assert.equal(overdueScoreCaseTask.action, '查看复核进度');
 
   const invalidAdjustment = await api(`/api/admin/score-cases/${appeal.body.data.id}/review`, {
     method: 'POST', headers: adminHeaders,
@@ -4321,6 +4328,12 @@ test('low quality products are auto delisted and can be restored after complianc
   assert.equal(delisted.autoDelistRule, 'LOW_QUALITY');
   assert.equal(delisted.autoDelistEvidence.lowRatingCount, 2);
   assert.equal(delisted.autoDelistEvidence.thresholds.lowReviewLimit, 2);
+  const delistRiskTask = merchantOverview.body.data.riskTasks.find((item) => (
+    item.type === 'AUTO_DELIST' && item.reference === 'prod_ebike_001'
+  ));
+  assert.ok(delistRiskTask, 'auto delisted product should enter merchant risk tasks');
+  assert.equal(delistRiskTask.caseStatus, 'COMPLETED');
+  assert.equal(delistRiskTask.action, '提交整改');
   assert.ok((store.read().subscribeMessages || []).some((item) => item.templateId === 'product_auto_delist' && item.status === 'QUEUED'));
 
   // 清理测试注入的低分评价，避免恢复后再次触发同一条风控规则。

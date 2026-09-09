@@ -3435,7 +3435,7 @@ function createApp({
     };
   }
 
-  function merchantRiskTasks(afterSales = [], slaAlerts = [], reviews = [], products = [], stockThreshold = 10) {
+  function merchantRiskTasks(afterSales = [], slaAlerts = [], reviews = [], products = [], stockThreshold = 10, scoreCases = []) {
     const now = new Date().toISOString();
     const priorityOrder = { URGENT: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
     const tasks = [];
@@ -3491,6 +3491,40 @@ function createApp({
         reference: product.id,
         dueAt: '',
         action: '去补充库存'
+      });
+    }
+    const productCaseById = new Map((scoreCases || []).map((item) => [item.id, item]));
+    for (const product of products) {
+      if (product.active !== false || !['LOW_QUALITY', 'SERVICE_RISK'].includes(product.autoDelistRule)) continue;
+      const caseRecord = product.autoDelistCaseId ? productCaseById.get(product.autoDelistCaseId) : null;
+      const pendingCase = caseRecord && ['SUBMITTED', 'REVIEWING'].includes(caseRecord.status);
+      const rejectedCase = caseRecord?.status === 'REJECTED';
+      const overdue = Boolean(caseRecord?.dueAt && caseRecord.dueAt < now);
+      tasks.push({
+        id: `delist_${product.id}`,
+        type: 'AUTO_DELIST',
+        priority: overdue ? 'URGENT' : pendingCase ? 'MEDIUM' : 'HIGH',
+        title: `商品整改 · ${product.name || '商品'}`,
+        detail: product.autoDelistReason || '触发平台风控规则',
+        caseStatus: caseRecord?.status || product.autoDelistStatus || 'DELISTED',
+        reference: product.id,
+        dueAt: caseRecord?.dueAt || '',
+        action: pendingCase ? '查看复核进度' : rejectedCase ? '补充整改' : '提交整改'
+      });
+    }
+    for (const caseRecord of scoreCases || []) {
+      if (!['SUBMITTED', 'REVIEWING'].includes(caseRecord.status) || caseRecord.productId) continue;
+      const overdue = Boolean(caseRecord.dueAt && caseRecord.dueAt < now);
+      tasks.push({
+        id: `score_case_${caseRecord.id}`,
+        type: 'SCORE_CASE',
+        priority: overdue ? 'HIGH' : 'MEDIUM',
+        title: `${caseRecord.typeLabel || '服务分工单'} · ${caseRecord.caseNo || '待复核'}`,
+        detail: caseRecord.reason || caseRecord.plan || '',
+        caseStatus: caseRecord.status,
+        reference: caseRecord.id,
+        dueAt: caseRecord.dueAt || '',
+        action: '查看复核进度'
       });
     }
     return tasks
@@ -5419,7 +5453,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             merchant: merchantPublic(merchant),
             serviceScore: merchant.serviceScore || null,
             scoreTrend: merchantScoreTrend(data, merchant.id),
-            riskTasks: merchantRiskTasks(afterSales, slaAlerts, reviews, products, stockThreshold),
+            riskTasks: merchantRiskTasks(afterSales, slaAlerts, reviews, products, stockThreshold, data.serviceScoreCases || []),
             lowStockThreshold: stockThreshold,
             scoreCases: (data.serviceScoreCases || []).filter((item) => item.merchantId === merchant.id),
             qualificationRenewals,
