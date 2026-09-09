@@ -1896,7 +1896,7 @@ test('payment lifecycle creates notifications and supports cancel or refund', as
 
   const paidOrder = await api('/api/orders', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
-    body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_001', quantity: 1 }] })
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
   });
   assert.equal(paidOrder.response.status, 201);
   const confirmed = await confirmPayment(paidOrder.body.paymentOrder.id, session.token);
@@ -4159,9 +4159,53 @@ test('order notifications queue and dispatch to subscribed users', async () => {
     && message.page === `/pages/orders/orders?focusId=${encodeURIComponent(created.body.data.id)}`));
 });
 
+test('user notification center supports history filters and per-item read state', async () => {
+  const session = await loginWeChat('notice_center_user');
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_001', quantity: 1 }] })
+  });
+  assert.equal(order.response.status, 201);
+  const payment = await confirmPayment(order.body.paymentOrder.id, session.token);
+  assert.equal(payment.response.status, 200);
+
+  const before = await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.equal(before.response.status, 200);
+  assert.ok(before.body.data.length >= 1, 'message center should expose the complete user history');
+  const target = before.body.data.find((item) => item.type === 'ORDER' && item.metadata?.focusId === order.body.data.id)
+    || before.body.data[0];
+  assert.ok(target, 'paid order should expose a message center item');
+
+  const marked = await api(`/api/my/notifications/${target.id}/read`, {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(marked.response.status, 200);
+  assert.equal(marked.body.data.updated, 1);
+
+  const repeated = await api(`/api/my/notifications/${target.id}/read`, {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(repeated.body.data.updated, 0);
+
+  const after = await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } });
+  const saved = after.body.data.find((item) => item.id === target.id);
+  assert.equal(saved.read, true);
+  assert.ok(saved.readAt);
+
+  const other = await api(`/api/my/notifications/${target.id}/read`, {
+    method: 'POST', headers: { authorization: `Bearer ${await loginWeChat('notice_other_user')}` }
+  });
+  assert.equal(other.response.status, 401);
+});
+
 test('failed subscribe messages can be retried after template configuration', async () => {
   const adminHeaders = await loginAdmin();
   const session = await loginWeChat('retry_user');
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_rent_001');
+    product.stock = 5;
+    product.reservedStock = 0;
+  });
   await api('/api/admin/settings', {
     method: 'POST', headers: adminHeaders,
     body: JSON.stringify({ orderStatusTemplateId: '' })
@@ -4771,7 +4815,7 @@ test('service score stage changes reach merchants, platform and patrol audit', a
   const buyer = await loginWeChat('score_stage_buyer');
   const created = await api('/api/orders', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
-    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_001', quantity: 1 }] })
   });
   assert.equal(created.response.status, 201);
   const paid = await confirmPayment(created.body.paymentOrder.id, buyer.token);
@@ -4781,18 +4825,19 @@ test('service score stage changes reach merchants, platform and patrol audit', a
     const order = data.orders.find((item) => item.id === created.body.data.id);
     data.afterSales.unshift({
       id: 'after_sale_stage_test', orderId: order.id, userId: buyer.userId,
-      type: 'REFUND', typeLabel: '退款/退货', reason: '服务分巡检测试', status: 'REVIEWING',
+      type: 'REFUND', typeLabel: '退款/退货', reason: '服务分巡检测试', status: 'SUBMITTED',
       images: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      responseDueAt: new Date(Date.now() - 2 * 3600 * 1000).toISOString()
+      responseDueAt: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
+      resolutionDueAt: new Date(Date.now() + 24 * 3600 * 1000).toISOString()
     });
     data.patrolState = { ...data.patrolState, lastRunAt: '' };
   });
 
-  const afterAlert = await api('/api/products?category=E_BIKE_NEW');
+  const afterAlert = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
   assert.equal(afterAlert.response.status, 200);
   const state = store.read();
   const merchantAfter = state.merchants.find((item) => item.id === 'merchant_001').serviceScore;
-  assert.equal(merchantAfter.stage, 'LIMITED');
+  assert.equal(merchantAfter.stage, 'LIMITED', `score=${JSON.stringify(merchantAfter, null, 2)}`);
   assert.ok(merchantAfter.score < scoreBefore.score);
   const stageLog = (state.merchantScoreLogs || []).find((log) => log.merchantId === 'merchant_001' && log.type === 'STAGE_CHANGE');
   assert.equal(stageLog.fromStage, 'NORMAL');

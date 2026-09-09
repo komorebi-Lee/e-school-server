@@ -6282,11 +6282,25 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const updated = store.update((data) => {
           let count = 0;
           for (const item of data.notifications || []) {
-            if (item.userId === userId && !item.read) { item.read = true; count += 1; }
+            if (item.userId === userId && !item.read) { item.read = true; item.readAt = new Date().toISOString(); count += 1; }
           }
           return { updated: count };
         });
         return sendJson(response, 200, { data: updated, requestId });
+      }
+
+      const notificationReadMatch = pathname.match(/^\/api\/my\/notifications\/([^/]+)\/read$/);
+      if (request.method === 'POST' && notificationReadMatch) {
+        const { userId } = requireUser(request);
+        const result = store.update((data) => {
+          const notification = (data.notifications || []).find((item) => item.id === notificationReadMatch[1]);
+          if (!notification || notification.userId !== userId) throw new ApiError(404, 'NOTIFICATION_NOT_FOUND', '通知不存在');
+          if (notification.read) return { updated: 0 };
+          notification.read = true;
+          notification.readAt = new Date().toISOString();
+          return { updated: 1 };
+        });
+        return sendJson(response, 200, { data: result, requestId });
       }
 
       const favoriteNoticeMatch = pathname.match(/^\/api\/my\/notifications\/([^/]+)\/action$/);
