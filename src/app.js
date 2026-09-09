@@ -3742,6 +3742,39 @@ function createApp({
     if (current.rectifyCasesCreated > 0 && current.rectifyCasesApproved === 0) {
       alerts.push({ level: 'MEDIUM', message: `近 7 天有 ${current.rectifyCasesCreated} 个整改工单尚未验收通过，请检查商家整改进度。` });
     }
+    const orderQueue = (order) => ({
+      id: order.id,
+      orderNo: order.orderNo || order.id,
+      merchantName: (data.merchants || []).find((merchant) => merchant.id === (order.collaboration?.merchantId || order.items?.[0]?.merchantId))?.name || '平台自营',
+      amountInCents: Number(order.totalInCents || 0),
+      customerName: order.fulfillment?.contactName || order.userId || '用户',
+      contactPhone: order.fulfillment?.contactPhone || '',
+      address: order.fulfillment?.address || '',
+      timeSlot: order.fulfillment?.timeSlot || '',
+      items: (order.items || []).map((item) => ({ name: item.name, quantity: Number(item.quantity || 1) })),
+      paidAt: order.paidAt || '',
+      dueAt: addHours(order.paidAt || order.updatedAt || order.createdAt, slaHours(data, 'deliveryResponseHours', 24)),
+      updatedAt: order.updatedAt || order.createdAt || ''
+    });
+    const orderQueues = {
+      pendingAccept: (data.orders || []).filter((order) => order.status === 'PAID')
+        .sort((a, b) => String(b.paidAt || b.updatedAt || b.createdAt).localeCompare(String(a.paidAt || a.updatedAt || a.createdAt)))
+        .slice(0, 5).map(orderQueue),
+      delivering: (data.orders || []).filter((order) => order.status === 'FULFILLING')
+        .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))
+        .slice(0, 5).map(orderQueue),
+      unrepliedMessages: (data.orders || [])
+        .filter((order) => order.collaboration?.unrepliedMessage)
+        .slice(0, 5)
+        .map((order) => ({
+          id: order.id,
+          orderNo: order.orderNo || order.id,
+          merchantName: (data.merchants || []).find((merchant) => merchant.id === (order.collaboration?.merchantId || order.items?.[0]?.merchantId))?.name || '平台自营',
+          text: order.collaboration.unrepliedMessage.text || '',
+          createdAt: order.collaboration.unrepliedMessage.createdAt || '',
+          dueAt: addHours(order.collaboration.unrepliedMessage.createdAt, slaHours(data, 'leadResponseHours', 24))
+        }))
+    };
     return {
       reports,
       current: { reports: currentReports, totals: current },
@@ -3756,6 +3789,7 @@ function createApp({
       { label: '支付超时', key: 'paymentTimeouts', current: current.paymentTimeouts, previous: previous.paymentTimeouts, changePercent: change(current.paymentTimeouts, previous.paymentTimeouts) },
       { label: '支付收入', key: 'paymentInCents', current: current.paymentInCents, previous: previous.paymentInCents, changePercent: change(current.paymentInCents, previous.paymentInCents) }
       ],
+      orderQueues,
       alerts
     };
   }

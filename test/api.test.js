@@ -5214,6 +5214,12 @@ test('unreplied order message creates merchant SLA alert and resolves after repl
   assert.equal(messaged.response.status, 200);
   assert.ok(messaged.body.data.collaboration.unrepliedMessage);
 
+  const overview = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.equal(overview.response.status, 200);
+  const queues = overview.body.data.operationsInsights.orderQueues;
+  assert.ok(queues.pendingAccept.some((order) => order.id === created.body.data.id), 'overview should expose pending fulfillment orders');
+  assert.ok(queues.unrepliedMessages.some((order) => order.id === created.body.data.id), 'overview should expose unreplied order messages');
+
   await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
   assert.ok(!(store.read().slaAlerts || []).some((alert) => (
     alert.ruleKey === 'ORDER_USER_MESSAGE' && alert.businessId === created.body.data.id && alert.status !== 'RESOLVED'
