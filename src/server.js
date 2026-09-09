@@ -109,6 +109,9 @@ async function bootstrap() {
       if (result.created.length || result.escalated.length || result.resolved.length) {
         console.log(`[patrol] +${result.created.length} 新增 · ${result.escalated.length} 升级 · -${result.resolved.length} 关闭 · ${result.open} 待处理`);
       }
+      if (result.subscribeDispatch?.sent || result.subscribeDispatch?.failed) {
+        console.log(`[subscribe-dispatch] 成功 ${result.subscribeDispatch.sent} · 失败 ${result.subscribeDispatch.failed} · 剩余 ${result.subscribeDispatch.remaining}`);
+      }
     }
   });
   console.log(`Operations patrol every ${patrol.intervalMinutes} minute(s)`);
