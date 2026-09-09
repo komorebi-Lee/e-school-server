@@ -1736,6 +1736,64 @@ test('completed order owner can submit one verified product review', async () =>
   assert.ok(replyNotice, '商家回复后应通知评价作者');
   assert.ok(replyNotice.content.includes('评价测试车'));
   assert.ok(replyNotice.content.includes('感谢反馈，我们会持续检查车辆与配送服务。'));
+  assert.equal(replyNotice.link, `/pages/orders/orders?focusId=${encodeURIComponent(orderId)}`);
+
+  // 差评回复要进统一 SLA：刚收到差评先提醒商家，拖过承诺时限后开预警，回复后自动闭环。
+  const negativeOrder = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ items: [{ productId: product.body.data.id, quantity: 1 }] })
+  });
+  assert.equal(negativeOrder.response.status, 201);
+  await confirmPayment(negativeOrder.body.paymentOrder.id, userSession.token);
+  await api(`/api/merchant/orders/${negativeOrder.body.data.id}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ status: 'FULFILLING' })
+  });
+  const negativeOrderDetail = await api(`/api/orders/${negativeOrder.body.data.id}`, {
+    headers: { authorization: `Bearer ${userSession.token}` }
+  });
+  await api(`/api/merchant/orders/${negativeOrder.body.data.id}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ status: 'COMPLETED', deliveryCode: negativeOrderDetail.body.data.deliveryCode })
+  });
+  const negativeReview = await api('/api/product-reviews', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ orderId: negativeOrder.body.data.id, productId: product.body.data.id, rating: 2, content: '车辆和配送体验不行。' })
+  });
+  assert.equal(negativeReview.response.status, 201);
+  assert.ok(negativeReview.body.data.replyDueAt);
+  const staleNegativeReview = store.update((data) => {
+    const record = data.productReviews.find((item) => item.id === negativeReview.body.data.id);
+    record.createdAt = new Date(Date.now() - 6 * 3600 * 1000).toISOString();
+    record.replyDueAt = new Date(Date.now() - 60 * 1000).toISOString();
+    data.patrolState = { ...data.patrolState, lastRunAt: '' };
+    return record;
+  });
+  assert.ok(staleNegativeReview.replyDueAt, 'negative review should receive a reply deadline');
+  assert.ok((store.read().notifications || []).some((item) => (
+    item.type === 'SCORE' && item.title === '收到新的差评' && item.content.includes('评价测试车')
+  )));
+
+  const negativePatrol = await api('/api/admin/patrol/run', {
+    method: 'POST', headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
+  });
+  assert.equal(negativePatrol.response.status, 200);
+  const negativeAlert = (store.read().slaAlerts || []).find((item) => (
+    item.ruleKey === 'NEGATIVE_REVIEW_REPLY' && item.businessId === staleNegativeReview.id
+  ));
+  assert.ok(negativeAlert, 'overdue negative review should create a merchant-owned SLA alert');
+  assert.equal(negativeAlert.ownerRole, 'MERCHANT');
+  assert.equal(negativeAlert.level, 'OVERDUE');
+
+  await api(`/api/merchant/product-reviews/${staleNegativeReview.id}/reply`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
+    body: JSON.stringify({ content: '抱歉给您带来不便，我们已经安排专人跟进。' })
+  });
+  const closedPatrol = await api('/api/admin/patrol/run', {
+    method: 'POST', headers: { authorization: `Bearer ${adminLogin.body.data.token}` }
+  });
+  assert.equal(closedPatrol.response.status, 200);
+  assert.equal((store.read().slaAlerts || []).find((item) => item.id === negativeAlert.id).status, 'RESOLVED');
 
   const repliedOverview = await api('/api/merchant/overview', { headers: { authorization: `Bearer ${merchantLogin.body.data.token}` } });
   assert.equal(repliedOverview.body.data.metrics.pendingReplyCount, 0);

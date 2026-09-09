@@ -754,13 +754,17 @@ function publicStorefrontReviews(data, merchantId) {
   };
 }
 
-function userNotificationLink(notification) {
+function userNotificationLink(notification, data = null) {
   const metadata = notification?.metadata || {};
   if (metadata.focusId) {
     return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.focusId))}`;
   }
   if (metadata.productId) {
     return `/pages/detail/detail?id=${encodeURIComponent(String(metadata.productId))}`;
+  }
+  if (data && metadata.reviewId) {
+    const review = (data.productReviews || []).find((item) => item.id === metadata.reviewId);
+    if (review) return `/pages/orders/orders?focusId=${encodeURIComponent(String(review.orderId))}`;
   }
   return '';
 }
@@ -1748,9 +1752,9 @@ function createApp({
   }
 
 
-  function notifyMerchantScore(data, merchantId, templateKey, title, content, now = new Date().toISOString()) {
+  function notifyMerchantScore(data, merchantId, templateKey, title, content, now = new Date().toISOString(), notificationType = 'SCORE', metadata = null) {
     const merchant = (data.merchants || []).find((item) => item.id === merchantId);
-    return sendScoreNotification(data, merchant?.userId, templateKey, title, content, now);
+    return sendScoreNotification(data, merchant?.userId, templateKey, title, content, now, notificationType, metadata);
   }
 
   function notifyOrderMerchant(data, order, type, title, content) {
@@ -2615,6 +2619,27 @@ function createApp({
       });
     }
 
+    // 差评回复是商家服务质量的一部分。放进统一巡检后，商家能收到预警/超时，
+    // 平台也能追踪逾期记录；回复完成或评价隐藏后，目标会消失并自动关闭预警。
+    for (const record of data.productReviews || []) {
+      if (Number(record.rating) > 2 || record.reply?.content || record.visibility === 'HIDDEN') continue;
+      const product = (data.products || []).find((item) => item.id === record.productId);
+      const merchantId = product?.merchantId || '';
+      targets.push({
+        ruleKey: 'NEGATIVE_REVIEW_REPLY',
+        ruleLabel: '差评回复',
+        businessType: 'PRODUCT_REVIEW',
+        businessId: record.id,
+        businessNo: record.id,
+        ownerRole: 'MERCHANT',
+        merchantId,
+        merchantName: merchantName(merchantId),
+        userId: record.userId || '',
+        dueAt: record.replyDueAt || addHours(record.createdAt, slaHours(data, 'reviewReplyHours', 24)),
+        detail: `${product?.name || record.productId} · ${record.content || ''}`.slice(0, 120)
+      });
+    }
+
     // 资质有效期是长期经营风险：复审要提前完成，不能等到执照过期后再处理。
     for (const merchant of data.merchants || []) {
       if (merchant.status !== 'APPROVED' || !merchant.licenseExpireDate) continue;
@@ -3157,14 +3182,15 @@ function createApp({
     }
     for (const review of reviews) {
       if (Number(review.rating) > 2 || review.reply) continue;
+      const overdue = Boolean(review.replyDueAt && review.replyDueAt < now);
       tasks.push({
         id: review.id,
         type: 'NEGATIVE_REVIEW',
-        priority: 'MEDIUM',
+        priority: overdue ? 'URGENT' : 'HIGH',
         title: `差评待回复 · ${review.rating} 分`,
         detail: review.content || '',
         reference: review.id,
-        dueAt: '',
+        dueAt: review.replyDueAt || '',
         action: '去回复差评'
       });
     }
@@ -3245,6 +3271,9 @@ function createApp({
     }
     if (notification.type === 'STOCK' && metadata.productId) {
       return `/pages/merchant/products?focusId=${encodeURIComponent(String(metadata.productId))}&filter=LOW`;
+    }
+    if (metadata.reviewId) {
+      return `/pages/merchant/reviews?focusId=${encodeURIComponent(String(metadata.reviewId))}`;
     }
     return '';
   }
@@ -4450,6 +4479,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 purchaseVerified: review.purchaseVerified !== false,
                 images: Array.isArray(review.images) ? review.images.slice(0, 3) : [],
                 reply: review.reply || null,
+                replyDueAt: review.replyDueAt || '',
                 createdAt: review.createdAt
               }))
             ,
@@ -4502,9 +4532,19 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             visibility: 'PUBLISHED',
             images,
             reply: null,
+            replyDueAt: rating <= 2 ? addHours(now, slaHours(data, 'reviewReplyHours', 24)) : '',
             createdAt: now
           };
           records.unshift(record);
+          if (record.replyDueAt) {
+            const product = data.products.find((item) => item.id === productId);
+            const merchant = (data.merchants || []).find((item) => item.id === product?.merchantId);
+            if (merchant?.userId) {
+              notifyMerchantScore(data, merchant.id, 'SLA_WARNING', '收到新的差评',
+                `《${product?.name || '商品'}》收到 ${rating} 分差评，请在 ${slaHours(data, 'reviewReplyHours', 24)} 小时内回复。`,
+                now, 'SCORE', { reviewId: record.id });
+            }
+          }
           addAudit(data, '新增已购商品评价', productId);
           return record;
         });
@@ -4519,6 +4559,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             visibility: review.visibility,
             images: Array.isArray(review.images) ? review.images.slice(0, 3) : [],
             reply: review.reply || null,
+            replyDueAt: review.replyDueAt || '',
             createdAt: review.createdAt
           },
           requestId
@@ -4909,6 +4950,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             visibility: review.visibility || 'PUBLISHED',
             images: Array.isArray(review.images) ? review.images.slice(0, 3) : [],
             reply: review.reply || null,
+            replyDueAt: review.replyDueAt || '',
             createdAt: review.createdAt
           }));
             const orders = data.orders
@@ -6231,7 +6273,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const data = store.read();
         const items = (data.notifications || [])
           .filter((item) => item.userId === userId)
-          .map((item) => ({ ...item, link: userNotificationLink(item) }));
+          .map((item) => ({ ...item, link: userNotificationLink(item, data) }));
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
@@ -6614,6 +6656,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             content,
             repliedAt: new Date().toISOString()
           };
+          item.repliedBy = merchantSession.merchantId;
           item.updatedAt = item.reply.repliedAt;
           sendOrderNotification(
             data,
@@ -6621,6 +6664,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             'ORDER',
             '你的评价收到了商家回复',
             `${repliedProduct?.name || '商品'}：${content}`
+            , item.reply.repliedAt, { focusId: item.orderId, productId: item.productId }
           );
           addAudit(data, '商家回复商品评价', item.productId);
           // 差评处理率是服务分的计算维度，回复完成后立即落盘，避免后台与用户端看到旧分数。
@@ -7277,7 +7321,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isInteger(rate) || rate < 0 || rate > 50) throw new ApiError(400, 'VALIDATION_ERROR', '平台佣金比例需为 0-50 的整数');
             current.commissionRatePercent = rate;
           }
-          for (const field of ['deliveryResponseHours', 'plateResponseHours', 'afterSaleResponseHours', 'afterSaleResolutionHours', 'phoneCardActivationHours', 'rechargeCreditHours', 'broadbandVerifyHours', 'payoutReviewHours', 'leadResponseHours', 'financeTaskResponseHours']) {
+          for (const field of ['deliveryResponseHours', 'plateResponseHours', 'afterSaleResponseHours', 'afterSaleResolutionHours', 'phoneCardActivationHours', 'rechargeCreditHours', 'broadbandVerifyHours', 'payoutReviewHours', 'leadResponseHours', 'financeTaskResponseHours', 'reviewReplyHours']) {
             if (body[field] !== undefined) {
               const hours = Number(body[field]);
               if (!Number.isInteger(hours) || hours < 1 || hours > 168) throw new ApiError(400, 'VALIDATION_ERROR', `${field} 需为 1-168 小时`);

@@ -199,6 +199,7 @@ function initialData() {
       broadbandVerifyHours: 48,
       payoutReviewHours: 48,
       leadResponseHours: 24,
+      reviewReplyHours: 24,
       financeTaskResponseHours: 24,
       patrolIntervalMinutes: 10,
       lowStockThreshold: 10,
