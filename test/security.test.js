@@ -21,6 +21,7 @@ process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
 let server;
 let baseUrl;
 let tempDirectory;
+let store;
 
 async function api(pathname, options) {
   const response = await fetch(`${baseUrl}${pathname}`, options);
@@ -41,7 +42,7 @@ async function loginWeChat() {
 
 before(async () => {
   tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-security-'));
-  const store = new JsonStore(path.join(tempDirectory, 'db.json'));
+  store = new JsonStore(path.join(tempDirectory, 'db.json'));
   const app = createApp({
     store,
     wechatAuth: async (code) => {
@@ -412,6 +413,93 @@ test('admin review table exposes image evidence and merchant replies', () => {
   assert.ok(adminScript.includes('review-gallery'), 'review table should render image evidence');
   assert.ok(adminScript.includes('review.reply?.content'), 'review table should show merchant replies');
   assert.ok(adminScript.includes('内容 / 图片证据'), 'review table should label image evidence');
+});
+
+test('admin overview aggregates merchant service risk handling', async () => {
+  const reviewPrefix = `review_risk_summary_${Date.now()}`;
+  const caseId = `case_risk_summary_${Date.now()}`;
+  const productId = 'prod_ebike_rent_001';
+  const past = new Date(Date.now() - 3600 * 1000).toISOString();
+  store.update((data) => {
+    data.products.unshift({
+      id: 'prod_service_risk_summary_001', name: '风控总览测试车', category: 'E_BIKE_NEW',
+      description: '验证后台服务风控总览聚合', priceInCents: 99000, stock: 2,
+      campusIds: ['campus_demo'], imageUrl: '', merchantId: 'merchant_001', active: true
+    });
+    for (let index = 0; index < 3; index += 1) {
+      data.productReviews.unshift({
+        id: `${reviewPrefix}_${index}`, productId, rating: 1, content: '风控总览测试差评',
+        customerName: '测试同学', purchaseVerified: true, visibility: 'PUBLISHED',
+        reply: null, replyDueAt: past, createdAt: past
+      });
+    }
+    data.products = data.products.map((product) => (
+      product.id === 'prod_service_risk_summary_001'
+        ? {
+          ...product, active: false, autoDelistRule: 'SERVICE_RISK',
+          autoDelistStatus: 'DELISTED', autoDelistReason: '售后超时',
+          autoDelistEvidence: { overdueAfterSaleCount: 1 }, autoDelistReviewNote: '待复核'
+        }
+        : product
+    ));
+    data.serviceScoreCases = [{
+      id: caseId,
+      caseNo: 'SCRISKSUM',
+      merchantId: 'merchant_001',
+      merchantName: '狮山校园车行',
+      type: 'RECTIFY',
+      typeLabel: '整改申请',
+      reason: '风控总览测试整改',
+      status: 'SUBMITTED',
+      score: 60,
+      stage: 'RESTRICTED',
+      createdAt: past,
+      updatedAt: past,
+      timeline: []
+    }];
+  });
+
+  // 前面的登录失败测试可能已触发主服务实例的登录锁定，这里用独立实例验证管理端。
+  const riskServer = http.createServer(createApp({ store }));
+  await new Promise((resolve) => riskServer.listen(0, '127.0.0.1', resolve));
+  const riskBaseUrl = `http://127.0.0.1:${riskServer.address().port}`;
+  try {
+    // 登录锁定会持久化，避免前面失败用例影响本用例的管理端登录。
+    store.update((data) => {
+      data.adminLoginFailures = [];
+    });
+    const adminLogin = await fetch(`${riskBaseUrl}/api/admin/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: ADMIN_USERNAME, password: ADMIN_PASSWORD })
+    });
+    assert.equal(adminLogin.status, 200);
+    const adminHeaders = { authorization: `Bearer ${(await adminLogin.json()).data.token}` };
+    const overview = await fetch(`${riskBaseUrl}/api/admin/overview`, { headers: adminHeaders });
+    assert.equal(overview.status, 200);
+    const summary = (await overview.json()).data.serviceRiskSummary;
+    const merchant = summary.merchants.find((item) => item.merchantId === 'merchant_001');
+    assert.ok(merchant, 'merchant with overdue review and delisted product should appear');
+  assert.ok(merchant.review.open >= 3);
+  assert.ok(merchant.review.overdue >= 3);
+    assert.ok(merchant.autoDelistedProducts >= 1);
+    assert.equal(merchant.openScoreCases, 1);
+    assert.ok(merchant.riskScore >= 6);
+    assert.equal(summary.totals.openScoreCaseCount, 1);
+    assert.equal(summary.totals.autoDelistedProductCount, 1);
+
+    const adminScript = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8');
+    assert.ok(adminScript.includes('服务风控总览'));
+    assert.ok(adminScript.includes('serviceRiskSummary'));
+    assert.ok(adminScript.includes("view: 'reviews'"), 'risk panel should jump to review handling');
+  } finally {
+    await new Promise((resolve) => riskServer.close(resolve));
+    store.update((data) => {
+    data.productReviews = data.productReviews.filter((item) => !item.id.startsWith(reviewPrefix));
+      data.products = data.products.filter((item) => item.id !== 'prod_service_risk_summary_001');
+      data.serviceScoreCases = (data.serviceScoreCases || []).filter((item) => item.id !== caseId);
+    });
+  }
 });
 
 test('disabling an admin revokes active sessions immediately', async () => {

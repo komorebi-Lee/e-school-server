@@ -3952,6 +3952,72 @@ function createApp({
     };
   }
 
+  function serviceRiskSummary(data) {
+    const now = new Date().toISOString();
+    const nowMs = new Date(now).getTime();
+    const dueSoonMs = 6 * 3600 * 1000;
+    const productsById = new Map((data.products || []).map((product) => [product.id, product]));
+    const reviewGroups = new Map();
+    for (const review of data.productReviews || []) {
+      if (Number(review.rating) > 2 || review.visibility === 'HIDDEN' || review.reply?.content) continue;
+      const merchantId = productsById.get(review.productId)?.merchantId || 'PLATFORM';
+      const group = reviewGroups.get(merchantId) || { open: 0, overdue: 0, dueSoon: 0 };
+      group.open += 1;
+      const dueAt = review.replyDueAt ? new Date(review.replyDueAt).getTime() : 0;
+      if (dueAt && dueAt < nowMs) group.overdue += 1;
+      else if (dueAt && dueAt - nowMs <= dueSoonMs) group.dueSoon += 1;
+      reviewGroups.set(merchantId, group);
+    }
+
+    const caseGroups = new Map();
+    for (const item of data.serviceScoreCases || []) {
+      if (!['SUBMITTED', 'REVIEWING'].includes(item.status)) continue;
+      caseGroups.set(item.merchantId, (caseGroups.get(item.merchantId) || 0) + 1);
+    }
+
+    const delistGroups = new Map();
+    for (const product of data.products || []) {
+      if (!['LOW_QUALITY', 'SERVICE_RISK'].includes(product.autoDelistRule) || product.active !== false) continue;
+      delistGroups.set(product.merchantId, (delistGroups.get(product.merchantId) || 0) + 1);
+    }
+
+    const merchants = (data.merchants || [])
+      .filter((merchant) => merchant.status === 'APPROVED' && merchant.serviceScore)
+      .map((merchant) => {
+        const review = reviewGroups.get(merchant.id) || { open: 0, overdue: 0, dueSoon: 0 };
+        const autoDelistedProducts = delistGroups.get(merchant.id) || 0;
+        const openScoreCases = caseGroups.get(merchant.id) || 0;
+        const riskScore = review.overdue * 5 + review.open * 2 + autoDelistedProducts * 4
+          + openScoreCases * 3
+          + (merchant.serviceScore.stage === 'RESTRICTED' ? 6 : merchant.serviceScore.stage === 'LIMITED' ? 3 : 0);
+        return {
+          merchantId: merchant.id,
+          merchantName: merchant.name,
+          score: merchant.serviceScore.score,
+          grade: merchant.serviceScore.grade,
+          gradeLabel: merchant.serviceScore.gradeLabel,
+          stage: merchant.serviceScore.stage,
+          stageLabel: merchant.serviceScore.stageLabel,
+          review,
+          autoDelistedProducts,
+          openScoreCases,
+          riskScore
+        };
+      })
+      .filter((item) => item.riskScore > 0)
+      .sort((a, b) => b.riskScore - a.riskScore || a.score - b.score);
+
+    const totals = {
+      riskMerchantCount: merchants.length,
+      criticalMerchantCount: merchants.filter((item) => item.riskScore >= 6).length,
+      openNegativeReviewCount: merchants.reduce((sum, item) => sum + item.review.open, 0),
+      overdueNegativeReviewCount: merchants.reduce((sum, item) => sum + item.review.overdue, 0),
+      autoDelistedProductCount: merchants.reduce((sum, item) => sum + item.autoDelistedProducts, 0),
+      openScoreCaseCount: merchants.reduce((sum, item) => sum + item.openScoreCases, 0)
+    };
+    return { generatedAt: now, totals, merchants };
+  }
+
   function refreshScoresNow() {
     return store.update((data) => refreshMerchantScores(data, new Date().toISOString()));
   }
@@ -6448,6 +6514,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               .map((merchant) => ({ merchantId: merchant.id, merchantName: merchant.name, ...merchant.serviceScore })),
             merchantScoreSummary: serviceScoreSummary(data.merchants || []),
             negativeReviewOperations: negativeReviewOpsSummary(data),
+            serviceRiskSummary: serviceRiskSummary(data),
             merchantScoreLogs: (data.merchantScoreLogs || []).slice(0, 50),
             settingChangeLogs: (data.settingChangeLogs || []).slice(0, 20),
             serviceScoreCases: (data.serviceScoreCases || []).slice(0, 80),

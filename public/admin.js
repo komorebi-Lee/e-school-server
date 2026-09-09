@@ -828,6 +828,50 @@ function scoreBreakdownText(item) {
   return (item.breakdown || []).map((part) => `${part.label} ${part.score}`).join(' · ');
 }
 
+function serviceRiskOverview() {
+  const summary = state.data.serviceRiskSummary || { totals: {}, merchants: [] };
+  const total = summary.totals || {};
+  const rows = summary.merchants || [];
+
+  const cards = rows.slice(0, 6).map((item) => {
+    const action = item.review.open
+      ? { label: '回复差评', view: 'reviews' }
+      : item.autoDelistedProducts
+        ? { label: '复核下架', view: 'scores' }
+        : item.openScoreCases
+          ? { label: '复核工单', view: 'scores' }
+          : { label: '查看预警', view: 'patrol' };
+    const chips = [
+      item.review.open ? `<span class="badge ${item.review.overdue ? 'red' : 'orange'}">差评 ${item.review.open}${item.review.overdue ? ` · 超时 ${item.review.overdue}` : ''}</span>` : '',
+      item.autoDelistedProducts ? `<span class="badge red">下架 ${item.autoDelistedProducts}</span>` : '',
+      item.openScoreCases ? `<span class="badge blue">工单 ${item.openScoreCases}</span>` : '',
+      `<span class="badge ${scoreStageBadges[item.stage] || 'orange'}">${esc(label(item.stage))}</span>`
+    ].filter(Boolean).join('');
+    return `<article class="risk-card">
+      <div class="risk-card-head">
+        <div><strong>${esc(item.merchantName)}</strong><small>服务分 ${item.score} · 处置优先级 ${item.riskScore}</small></div>
+        <div class="row-actions"><button class="text-button" data-goto="${action.view}">${action.label}</button><button class="text-button" data-goto="scores">服务分明细</button></div>
+      </div>
+      <div class="risk-chip-row">${chips}</div>
+      <p>${esc(scoreStageConsequences[item.stage] || '按平台规则持续监控')}</p>
+    </article>`;
+  }).join('');
+
+  return `<section class="panel" style="margin-top:16px">
+    <div class="panel-head"><h2>服务风控总览</h2><span>差评回复 · 自动下架 · 整改工单</span></div>
+    <div class="risk-overview">
+      <div class="risk-stats">
+        <div><strong>${total.riskMerchantCount || 0}</strong><span>风险商家</span></div>
+        <div class="${total.criticalMerchantCount ? 'red' : ''}"><strong>${total.criticalMerchantCount || 0}</strong><span>需立即处置</span></div>
+        <div><strong>${total.openNegativeReviewCount || 0}</strong><span>差评待回复</span></div>
+        <div><strong>${total.autoDelistedProductCount || 0}</strong><span>待复核下架</span></div>
+        <div><strong>${total.openScoreCaseCount || 0}</strong><span>整改工单</span></div>
+      </div>
+      ${cards ? `<div class="risk-grid">${cards}</div>` : '<p class="muted-empty">当前没有差评、下架或整改风险，继续保持。</p>'}
+    </div>
+  </section>`;
+}
+
 function scoresView() {
   const summary = state.data.merchantScoreSummary || {};
   const negativeReviewOps = state.data.negativeReviewOperations || {};
@@ -895,6 +939,7 @@ function scoresView() {
   </tr>`);
   const logPanel = `<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>服务分变更记录</h2><span>仅记录分档变化与人工调整</span></div><div class="log-list">${logs.slice(0, 8).map((log) => `<div class="log-item"><div><strong>${esc(log.merchantName)}</strong><p>${esc(log.note || '')}</p></div><small>${fmtDate(log.createdAt)}</small></div>`).join('') || '<p class="muted-empty">暂无变更记录</p>'}</div></section>`;
   return cards
+    + serviceRiskOverview()
     + templatePanel
     + toolbar(items.length, { statusesList: ['NORMAL', 'LIMITED', 'RESTRICTED'] })
     + table(['商家', '服务分', '维度得分', '履约与售后', '平台处置', '操作'], rows, items.length)
