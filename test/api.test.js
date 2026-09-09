@@ -15,18 +15,20 @@ let baseUrl;
 let tempDirectory;
 let store;
 const sentSubscribeMessages = [];
+let app;
 
 before(async () => {
   tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-test-'));
   store = new JsonStore(path.join(tempDirectory, 'db.json'));
-  server = http.createServer(createApp({
+  app = createApp({
     store,
     wechatAuth: async (code) => ({ openid: `openid_${code}`, userId: `wx_${code}` }),
     wechatSubscribeSend: async (message) => {
       sentSubscribeMessages.push(message);
       return { errcode: 0, errmsg: 'ok' };
     }
-  }));
+  });
+  server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
@@ -4252,6 +4254,45 @@ test('failed subscribe messages can be retried after template configuration', as
   assert.ok(sent);
   assert.ok(sentSubscribeMessages.some((message) => message.template_id === 'wx_test_order_status'
     && message.touser === 'openid_retry_user'));
+});
+
+test('patrol automatically dispatches queued subscribe messages', async () => {
+  const adminHeaders = await loginAdmin();
+  const session = await loginWeChat('patrol_dispatch_user');
+  await api('/api/order-message-subscriptions', {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ accepted: true })
+  });
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ orderStatusTemplateId: 'wx_test_patrol_dispatch' })
+  });
+
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_001', quantity: 1 }] })
+  });
+  assert.equal(order.response.status, 201);
+  await confirmPayment(order.body.paymentOrder.id, session.token);
+  const queued = (store.read().subscribeMessages || [])
+    .find((item) => item.templateId === 'order_status' && item.userId === session.userId && item.status === 'QUEUED');
+  assert.ok(queued, 'paid order should queue an order status reminder');
+
+  let stopPatrol;
+  const patrolResult = await new Promise((resolve) => {
+    const patrol = app.startOperationsPatrol({
+      onRun: (result) => {
+        stopPatrol = () => patrol.stop();
+        resolve(result);
+      }
+    });
+  });
+  if (typeof stopPatrol === 'function') stopPatrol();
+
+  assert.ok(patrolResult.subscribeDispatch.sent >= 1);
+  assert.ok(sentSubscribeMessages.some((message) => (
+    message.template_id === 'wx_test_patrol_dispatch' && message.touser === `openid_${'patrol_dispatch_user'}`
+  )), 'patrol timer should automatically send queued messages without admin traffic');
 });
 
 test('low stock reaches merchants exactly once and clears after restocking', async () => {

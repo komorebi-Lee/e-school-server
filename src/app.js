@@ -2816,6 +2816,90 @@ function createApp({
     };
   }
 
+  // 订阅消息派发服务：管理端可手动批量处理，巡检进程可自动处理队列。
+  async function dispatchSubscribeMessages({ limit = 20, source = 'ADMIN' } = {}) {
+    const limitInput = Number(limit);
+    if (!Number.isInteger(limitInput) || limitInput < 1 || limitInput > 100) {
+      throw new ApiError(400, 'VALIDATION_ERROR', 'limit 需为 1-100 的整数');
+    }
+    const queued = (store.read().subscribeMessages || []).filter((item) => item.status === 'QUEUED');
+    const batch = queued.slice(0, limitInput);
+    if (!batch.length) return { sent: 0, failed: 0, remaining: 0 };
+
+    const identityByUserId = new Map();
+    const openIdData = store.read().userOpenIds || {};
+    for (const [key, value] of Object.entries(openIdData)) identityByUserId.set(key, value);
+    for (const [key, value] of userWeChatIdentities) identityByUserId.set(key, value);
+    const settings = store.read().adminSettings || {};
+    const templateIdByKey = {
+      score_stage_warning: settings.scoreStageWarningTemplateId || '',
+      score_rectify_apply: settings.scoreRectifyApplyTemplateId || '',
+      score_rectify_result: settings.scoreRectifyResultTemplateId || '',
+      score_appeal_result: settings.scoreAppealResultTemplateId || ''
+      ,product_auto_delist: settings.productAutoDelistTemplateId || '',
+      product_compliance_restored: settings.productComplianceRestoredTemplateId || ''
+      ,stock_low_stock: settings.stockLowStockTemplateId || ''
+      ,sla_warning: settings.slaWarningTemplateId || ''
+      ,order_status: settings.orderStatusTemplateId || '',
+      favorite_price_notice: settings.favoritePriceNoticeTemplateId || '',
+      order_service: settings.orderServiceTemplateId || '',
+      restock_notice: settings.restockNoticeTemplateId || '',
+      after_sale: settings.afterSaleTemplateId || ''
+      ,lead_follow_up: settings.leadFollowUpTemplateId || ''
+    };
+
+    let sent = 0;
+    let failed = 0;
+    for (const message of batch) {
+      try {
+        const wechatIdentity = identityByUserId.get(message.userId);
+        if (!wechatIdentity) throw Object.assign(new Error('缺少微信身份'), { code: 'WECHAT_IDENTITY_MISSING' });
+        const merchantTemplate = scoreNotificationTemplates[Object.keys(scoreNotificationTemplates)
+          .find((key) => scoreNotificationTemplates[key].id === message.templateId) || ''];
+        if (merchantTemplate
+          && !(store.read().serviceMessageSubscribers || []).includes(message.userId)) {
+          throw Object.assign(new Error('商家未开启服务分提醒'), { code: 'MERCHANT_SUBSCRIPTION_MISSING' });
+        }
+        const templateId = templateIdByKey[message.templateId];
+        if (!templateId) throw Object.assign(new Error('订阅模板未配置'), { code: 'SUBSCRIBE_TEMPLATE_NOT_CONFIGURED' });
+        const payload = {
+          touser: wechatIdentity,
+          template_id: templateId,
+          page: message.page || (merchantTemplate ? 'pages/merchant/index' : 'pages/orders/orders'),
+          data: {
+            thing1: { value: (message.title || '').slice(0, 20) },
+            thing2: { value: (message.content || '').slice(0, 20) }
+          }
+        };
+        const result = await wechatSubscribeSend(payload);
+        if (result && Number(result.errcode || 0) !== 0) {
+          throw Object.assign(new Error(result.errmsg || '微信发送失败'), { code: `WECHAT_SEND_${result.errcode}` });
+        }
+        message.status = 'SENT';
+        message.sentAt = new Date().toISOString();
+        message.error = '';
+        sent += 1;
+      } catch (error) {
+        message.status = 'FAILED';
+        message.sentAt = '';
+        message.error = String(error.code || 'SEND_FAILED') + ': ' + String(error.message || '发送失败').slice(0, 200);
+        failed += 1;
+      }
+    }
+
+    store.update((data) => {
+      const queuedMessages = data.subscribeMessages || [];
+      for (const message of batch) {
+        const current = queuedMessages.find((item) => item.id === message.id);
+        if (current) Object.assign(current, message);
+      }
+      return true;
+    });
+    addAudit(store.read(), source === 'PATROL' ? '巡检自动派发订阅消息' : '派发微信订阅消息', `成功 ${sent} · 失败 ${failed}`);
+    const remaining = (store.read().subscribeMessages || []).filter((item) => item.status === 'QUEUED').length;
+    return { sent, failed, remaining };
+  }
+
   // 读接口顺带触发巡检，但按巡检间隔节流，避免每次请求都全量扫描。
   function sweepOperationsPatrol() {
     const snapshot = store.read();
@@ -7117,80 +7201,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         if (!Number.isInteger(limitInput) || limitInput < 1 || limitInput > 100) {
           throw new ApiError(400, 'VALIDATION_ERROR', 'limit 需为 1-100 的整数');
         }
-        const queued = (store.read().subscribeMessages || []).filter((item) => item.status === 'QUEUED');
-        const batch = queued.slice(0, limitInput);
-        if (!batch.length) return sendJson(response, 200, { data: { sent: 0, failed: 0, remaining: 0 }, requestId });
-        const identityByUserId = new Map();
-        const openIdData = store.read().userOpenIds || {};
-        for (const [key, value] of Object.entries(openIdData)) identityByUserId.set(key, value);
-        for (const [key, value] of userWeChatIdentities) identityByUserId.set(key, value);
-        const settings = store.read().adminSettings || {};
-        const templateIdByKey = {
-          score_stage_warning: settings.scoreStageWarningTemplateId || '',
-          score_rectify_apply: settings.scoreRectifyApplyTemplateId || '',
-          score_rectify_result: settings.scoreRectifyResultTemplateId || '',
-          score_appeal_result: settings.scoreAppealResultTemplateId || ''
-          ,product_auto_delist: settings.productAutoDelistTemplateId || '',
-          product_compliance_restored: settings.productComplianceRestoredTemplateId || ''
-          ,stock_low_stock: settings.stockLowStockTemplateId || ''
-          ,sla_warning: settings.slaWarningTemplateId || ''
-          ,order_status: settings.orderStatusTemplateId || '',
-          favorite_price_notice: settings.favoritePriceNoticeTemplateId || '',
-          order_service: settings.orderServiceTemplateId || '',
-          restock_notice: settings.restockNoticeTemplateId || '',
-          after_sale: settings.afterSaleTemplateId || ''
-          ,lead_follow_up: settings.leadFollowUpTemplateId || ''
-        };
-        let sent = 0;
-        let failed = 0;
-        for (const message of batch) {
-          try {
-            const wechatIdentity = identityByUserId.get(message.userId);
-            if (!wechatIdentity) throw Object.assign(new Error('缺少微信身份'), { code: 'WECHAT_IDENTITY_MISSING' });
-            const merchantTemplate = scoreNotificationTemplates[Object.keys(scoreNotificationTemplates)
-              .find((key) => scoreNotificationTemplates[key].id === message.templateId) || ''];
-            if (merchantTemplate
-              && !(store.read().serviceMessageSubscribers || []).includes(message.userId)) {
-              throw Object.assign(new Error('商家未开启服务分提醒'), { code: 'MERCHANT_SUBSCRIPTION_MISSING' });
-            }
-            const templateId = templateIdByKey[message.templateId];
-            if (!templateId) throw Object.assign(new Error('订阅模板未配置'), { code: 'SUBSCRIBE_TEMPLATE_NOT_CONFIGURED' });
-            const payload = {
-              touser: wechatIdentity,
-              template_id: templateId,
-              page: message.page || (merchantTemplate ? 'pages/merchant/index' : 'pages/orders/orders'),
-              data: {
-                thing1: { value: (message.title || '').slice(0, 20) },
-                thing2: { value: (message.content || '').slice(0, 20) }
-              }
-            };
-            const result = await wechatSubscribeSend(payload);
-            if (result && Number(result.errcode || 0) !== 0) {
-              throw Object.assign(new Error(result.errmsg || '微信发送失败'), { code: `WECHAT_SEND_${result.errcode}` });
-            }
-            message.status = 'SENT';
-            message.sentAt = new Date().toISOString();
-            message.error = '';
-            sent += 1;
-          } catch (error) {
-            message.status = 'FAILED';
-            message.sentAt = '';
-            message.error = String(error.code || 'SEND_FAILED') + ': ' + String(error.message || '发送失败').slice(0, 200);
-            failed += 1;
-          }
-        }
-        store.update((data) => {
-          const queuedMessages = data.subscribeMessages || [];
-          for (const message of batch) {
-            const current = queuedMessages.find((item) => item.id === message.id);
-            if (current) Object.assign(current, message);
-          }
-          return true;
-        });
-        addAudit(store.read(), '派发微信订阅消息', `成功 ${sent} · 失败 ${failed}`);
-      const remaining = (store.read().subscribeMessages || []).filter((item) => item.status === 'QUEUED').length;
-      return sendJson(response, 200, { data: { sent, failed, remaining }, requestId });
-    }
+        const result = await dispatchSubscribeMessages({ limit: limitInput, source: 'ADMIN' });
+        return sendJson(response, 200, { data: result, requestId });
+      }
 
       const subscribeRetryMatch = pathname.match(/^\/api\/admin\/subscribe-messages\/([^/]+)\/retry$/);
       if (request.method === 'POST' && subscribeRetryMatch) {
@@ -7893,7 +7906,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
     const tick = async () => {
       try {
         const result = await patrolOnce();
-        if (typeof onRun === 'function') onRun(result);
+        // 后台巡检负责业务推进，订阅消息派发只跟随部署进程，不影响管理端巡检结果。
+        let subscribeDispatch = { sent: 0, failed: 0, remaining: 0 };
+        try {
+          subscribeDispatch = await dispatchSubscribeMessages({ limit: 20, source: 'PATROL' });
+        } catch (error) {
+          console.error('[subscribe-dispatch] run failed:', error.message);
+        }
+        if (typeof onRun === 'function') onRun({ ...result, subscribeDispatch });
       } catch (error) {
         console.error('[patrol] run failed:', error.message);
       }
