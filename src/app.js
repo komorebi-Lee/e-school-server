@@ -6558,9 +6558,20 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             && (data.products||[]).find(product=>product.id===order.items?.[0]?.productId)?.category === 'E_BIKE_NEW'
             && !(data.plateApplications||[]).some(item => (item.relatedIds?.platformOrderIds||[]).includes(order.id))
           );
-          const existingLinkedApplication = order
-            ? (data.plateApplications||[]).find(item => (item.relatedIds?.platformOrderIds||[]).includes(order.id))
+          const linkedApplications = order
+            ? (data.plateApplications||[]).filter(item => item.userId === userId
+              && (item.relatedIds?.platformOrderIds||[]).includes(order.id))
             : null;
+          const requestedPlateId = body.plateId ? String(body.plateId) : '';
+          let existingLinkedApplication = null;
+          if (order && requestedPlateId) {
+            existingLinkedApplication = linkedApplications.find(item => item.id === requestedPlateId);
+            if (!existingLinkedApplication) throw new ApiError(404,'PLATE_APPLICATION_NOT_FOUND','牌照辅助申请不存在');
+            if (existingLinkedApplication.status === 'COMPLETED') throw new ApiError(409,'PLATE_APPLICATION_COMPLETED','该车辆牌照辅助已完成');
+          } else if (order && linkedApplications.length) {
+            existingLinkedApplication = linkedApplications.find(item => item.status !== 'COMPLETED');
+            if (!existingLinkedApplication) throw new ApiError(409,'PLATE_APPLICATION_COMPLETED','该购车订单的免费牌照辅助已全部完成');
+          }
           if (existingLinkedApplication) {
             if (existingLinkedApplication.status !== 'COMPLETED') {
               existingLinkedApplication.customerName = customerName;

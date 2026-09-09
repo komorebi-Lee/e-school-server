@@ -4958,7 +4958,7 @@ test('free plate assistance waits until the linked bike order is paid', async ()
       category: 'E_BIKE_NEW',
       description: '验证未支付订单不能领取免费牌照',
       priceInCents: 100000,
-      stock: 1,
+      stock: 2,
       campusIds: ['campus_demo'],
       imageUrl: '',
       merchantId: 'merchant_001',
@@ -4968,7 +4968,7 @@ test('free plate assistance waits until the linked bike order is paid', async ()
   const order = await api('/api/orders', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
     body: JSON.stringify({
-      items: [{ productId: 'prod_free_plate_guard_001', quantity: 1 }],
+      items: [{ productId: 'prod_free_plate_guard_001', quantity: 2 }],
       fulfillment: { type: 'DELIVERY', contactName: '牌同学', contactPhone: '15527111901', address: '荟园免费牌楼栋', date: new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 10), timeSlot: '今天 12:00-14:00' }
     })
   });
@@ -5007,6 +5007,25 @@ test('free plate assistance waits until the linked bike order is paid', async ()
   assert.equal(paidPlate.body.data.source, 'PLATFORM_ORDER');
   assert.equal(paidPlate.body.data.feeInCents, 0);
   assert.equal(paidPlate.body.data.status, 'MATERIAL_PENDING');
+
+  store.update((data) => {
+    const paidRecord = data.plateApplications.find((item) => item.id === paidPlate.body.data.id);
+    paidRecord.status = 'COMPLETED';
+  });
+  const secondPlate = await api('/api/plate-applications', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      customerName: '牌同学',
+      customerPhone: '15527111901',
+      studentNo: '202610900001',
+      vehicleModel: order.body.data.items[0].name,
+      orderId: order.body.data.id
+    })
+  });
+  assert.equal(secondPlate.response.status, 201);
+  assert.equal(secondPlate.body.data.source, 'PLATFORM_ORDER');
+  assert.notEqual(secondPlate.body.data.id, paidPlate.body.data.id);
+  assert.equal(secondPlate.body.data.status, 'MATERIAL_PENDING');
 });
 
 test('recharge activation stays linked to the paid phone card journey', async () => {
