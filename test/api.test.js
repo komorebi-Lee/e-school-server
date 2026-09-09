@@ -1970,6 +1970,25 @@ test('admin urges pending negative review and tracks reply rate', async () => {
   assert.ok(operations.openCount >= 1);
   assert.ok(operations.replyRate >= 0 && operations.replyRate <= 100);
 
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantOverview = await api('/api/merchant/overview', {
+    headers: { authorization: `Bearer ${merchantLogin.body.data.token}` }
+  });
+  assert.equal(merchantOverview.response.status, 200);
+  const merchantReview = merchantOverview.body.data.reviews.find((item) => item.id === 'review_urge_pending');
+  assert.equal(merchantReview?.lastUrge?.operator, process.env.ADMIN_USERNAME);
+  const merchantRiskTask = merchantOverview.body.data.riskTasks.find((item) => (
+    item.type === 'NEGATIVE_REVIEW' && item.reference === 'review_urge_pending'
+  ));
+  assert.equal(merchantRiskTask?.urged, true);
+  assert.ok(merchantRiskTask.detail.startsWith('平台已催办'));
+
   // 催办用例只验证指标与提醒，不把测试差评留在共享商品上影响后续风控测试。
   store.update((data) => {
     data.productReviews = data.productReviews.filter((item) => item.id !== 'review_urge_pending');

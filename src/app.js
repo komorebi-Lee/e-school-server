@@ -3473,7 +3473,8 @@ function createApp({
         type: 'NEGATIVE_REVIEW',
         priority: overdue ? 'URGENT' : 'HIGH',
         title: `差评待回复 · ${review.rating} 分`,
-        detail: review.content || '',
+        detail: review.lastUrge ? `平台已催办 · ${review.content || ''}` : review.content || '',
+        urged: Boolean(review.lastUrge),
         reference: review.id,
         dueAt: review.replyDueAt || '',
         action: '去回复差评'
@@ -4922,6 +4923,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             images: Array.isArray(review.images) ? review.images.slice(0, 3) : [],
             reply: review.reply || null,
             replyDueAt: review.replyDueAt || '',
+            lastUrge: review.lastUrge || null,
             createdAt: review.createdAt
           },
           requestId
@@ -5314,6 +5316,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             images: Array.isArray(review.images) ? review.images.slice(0, 3) : [],
             reply: review.reply || null,
             replyDueAt: review.replyDueAt || '',
+            lastUrge: review.lastUrge || null,
             createdAt: review.createdAt
           }));
             const orders = data.orders
