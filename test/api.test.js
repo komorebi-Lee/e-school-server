@@ -4573,6 +4573,61 @@ test('order notifications queue and dispatch to subscribed users', async () => {
     && message.page === `/pages/orders/orders?focusId=${encodeURIComponent(created.body.data.id)}`));
 });
 
+test('order subscribe messages require explicit user consent', async () => {
+  const adminHeaders = await loginAdmin();
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ orderStatusTemplateId: 'wx_test_order_consent' })
+  });
+  const session = await loginWeChat('order_consent_user');
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_rent_001');
+    product.stock = 5;
+    product.reservedStock = 0;
+    data.orderMessageSubscribers = (data.orderMessageSubscribers || []).filter((item) => item !== session.userId);
+  });
+
+  const beforeOrder = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_001', quantity: 1 }] })
+  });
+  assert.equal(beforeOrder.response.status, 201);
+  await confirmPayment(beforeOrder.body.paymentOrder.id, session.token);
+  assert.ok(!(store.read().subscribeMessages || []).some((item) => (
+    item.userId === session.userId && item.templateId === 'order_status' && item.status === 'QUEUED'
+  )), 'unsubscribed users must not have order subscribe messages queued');
+
+  await api('/api/order-message-subscriptions', {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ accepted: true })
+  });
+  const afterOrder = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_001', quantity: 1 }] })
+  });
+  assert.equal(afterOrder.response.status, 201);
+  await confirmPayment(afterOrder.body.paymentOrder.id, session.token);
+  const queued = (store.read().subscribeMessages || []).find((item) => (
+    item.userId === session.userId && item.templateId === 'order_status' && item.status === 'QUEUED'
+  ));
+  assert.ok(queued, 'explicitly subscribed users should receive the order reminder');
+
+  store.update((data) => {
+    const orderIds = [beforeOrder.body.data.id, afterOrder.body.data.id];
+    data.orders = data.orders.filter((item) => !orderIds.includes(item.id));
+    data.paymentOrders = (data.paymentOrders || []).filter((item) => !orderIds.includes(item.businessId));
+    data.financeEvents = (data.financeEvents || []).filter((item) => (
+      item.orderNo !== beforeOrder.body.data.orderNo && item.orderNo !== afterOrder.body.data.orderNo
+    ));
+    data.notifications = (data.notifications || []).filter((item) => !(item.userId === session.userId
+      && orderIds.includes(item.metadata?.focusId)));
+    data.subscribeMessages = (data.subscribeMessages || []).filter((item) => item.userId !== session.userId);
+    const product = data.products.find((item) => item.id === 'prod_ebike_rent_001');
+    product.stock += 2;
+    product.reservedStock = 0;
+  });
+});
+
 test('user notification center supports history filters and per-item read state', async () => {
   const session = await loginWeChat('notice_center_user');
   const order = await api('/api/orders', {
@@ -4615,6 +4670,10 @@ test('user notification center supports history filters and per-item read state'
 test('failed subscribe messages can be retried after template configuration', async () => {
   const adminHeaders = await loginAdmin();
   const session = await loginWeChat('retry_user');
+  await api('/api/order-message-subscriptions', {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ accepted: true })
+  });
   store.update((data) => {
     const product = data.products.find((item) => item.id === 'prod_ebike_rent_001');
     product.stock = 5;

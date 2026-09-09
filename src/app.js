@@ -1682,6 +1682,7 @@ function createApp({
   function sendOrderNotification(data, userId, templateKey, title, content, now = new Date().toISOString(), metadata = null) {
     const notification = addNotification(data, userId, templateKey === 'AFTER_SALE' ? 'AFTER_SALE' : 'ORDER', title, content, metadata);
     if (!notification) return null;
+    if (!(data.orderMessageSubscribers || []).includes(userId)) return { notification, subscribeMessage: null };
     if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
     data.subscribeMessages.unshift({
       id: `sub_${randomUUID()}`,
