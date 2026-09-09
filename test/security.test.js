@@ -398,6 +398,14 @@ test('admin payment UI exposes pending refunds and result refresh', () => {
   assert.ok(adminScript.includes('/refund/refresh'));
 });
 
+test('admin review table exposes image evidence and merchant replies', () => {
+  const adminScript = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8');
+
+  assert.ok(adminScript.includes('review-gallery'), 'review table should render image evidence');
+  assert.ok(adminScript.includes('review.reply?.content'), 'review table should show merchant replies');
+  assert.ok(adminScript.includes('内容 / 图片证据'), 'review table should label image evidence');
+});
+
 test('disabling an admin revokes active sessions immediately', async () => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-disable-'));
   const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));
