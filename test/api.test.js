@@ -5256,6 +5256,62 @@ test('unreplied order message creates merchant SLA alert and resolves after repl
   assert.equal(alert.status, 'RESOLVED');
 });
 
+test('service record messages track platform response SLA', async () => {
+  const userSession = await loginWeChat('service_message_user');
+  const recharge = await api('/api/recharge-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ phone: '15527111396', promoId: 'promo_recharge_100' })
+  });
+  assert.equal(recharge.response.status, 201);
+
+  const messaged = await api('/api/order-collab', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ role: 'USER', action: 'NOTE', orderId: recharge.body.data.id, note: '请帮我校对充值到账进度。' })
+  });
+  assert.equal(messaged.response.status, 200);
+  assert.ok(messaged.body.data.collaboration.unrepliedMessage);
+
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { authorization: `Bearer ${adminLogin.body.data.token}` };
+  await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.ok(!(store.read().slaAlerts || []).some((alert) => (
+    alert.ruleKey === 'SERVICE_USER_MESSAGE' && alert.businessId === recharge.body.data.id && alert.status !== 'RESOLVED'
+  )), 'future service message SLA should not alert yet');
+
+  store.update((data) => {
+    const record = data.rechargeOrders.find((item) => item.id === recharge.body.data.id);
+    record.collaboration.unrepliedMessage.createdAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    data.patrolState = { ...data.patrolState, lastRunAt: '' };
+  });
+  await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  let alert = (store.read().slaAlerts || []).find((item) => (
+    item.ruleKey === 'SERVICE_USER_MESSAGE' && item.businessId === recharge.body.data.id
+  ));
+  assert.ok(alert);
+  assert.equal(alert.ownerRole, 'PLATFORM');
+  assert.equal(alert.status, 'OPEN');
+  assert.equal(alert.level, 'OVERDUE');
+
+  const replied = await api('/api/order-collab', {
+    method: 'POST', headers: { 'content-type': 'application/json', ...adminHeaders },
+    body: JSON.stringify({ role: 'PLATFORM', action: 'NOTE', orderId: recharge.body.data.id, note: '已确认到账安排，预计 12 小时内完成。' })
+  });
+  assert.equal(replied.response.status, 200);
+  assert.equal(replied.body.data.collaboration.unrepliedMessage, null);
+
+  store.update((data) => {
+    data.patrolState = { ...data.patrolState, lastRunAt: '' };
+  });
+  await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  alert = (store.read().slaAlerts || []).find((item) => (
+    item.ruleKey === 'SERVICE_USER_MESSAGE' && item.businessId === recharge.body.data.id
+  ));
+  assert.equal(alert.status, 'RESOLVED');
+});
+
 test('free plate assistance waits until the linked bike order is paid', async () => {
   const session = await loginWeChat('unpaid_plate_user');
   store.update((data) => {

@@ -1008,6 +1008,11 @@ function appendServiceRecordEvent(record, role, action, note) {
   record.collaboration.handoffs.unshift({ role, action, note, createdAt: time });
   record.collaboration.messages.unshift({ id: `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`, role, text: note, createdAt: time });
   record.collaboration.intervention.updatedAt = time;
+  if (role === 'USER') {
+    record.collaboration.unrepliedMessage = { action, text: note, createdAt: time };
+  } else if (role === 'PLATFORM' && record.collaboration.unrepliedMessage) {
+    record.collaboration.unrepliedMessage = null;
+  }
 }
 
 const scoreComplaintTypeLabels = {
@@ -2584,6 +2589,35 @@ function createApp({
         dueAt: addHours(order.paidAt || order.updatedAt || order.createdAt, slaHours(data, 'deliveryResponseHours', 24)),
         detail: `${order.status === 'PAID' ? '已支付待接单' : '配送中待交付核验'} · ${(order.items || []).map((item) => item.name).join('、') || '订单商品'}`
       });
+    }
+
+    const serviceMessageCollections = [
+      { key: 'phoneCardOrders', label: '电话卡' },
+      { key: 'rechargeOrders', label: '话费权益' },
+      { key: 'broadbandApplications', label: '宽带资格' },
+      { key: 'plateApplications', label: '校园牌照' }
+    ];
+    for (const collection of serviceMessageCollections) {
+      for (const record of data[collection.key] || []) {
+        if (record.status === 'CANCELLED') continue;
+        const unrepliedMessage = record.collaboration?.unrepliedMessage;
+        if (!unrepliedMessage?.createdAt) continue;
+        targets.push({
+          ruleKey: 'SERVICE_USER_MESSAGE',
+          ruleLabel: '服务单留言回复',
+          businessType: 'SERVICE_MESSAGE',
+          businessId: record.id,
+          businessNo: record.id,
+          ownerRole: 'PLATFORM',
+          merchantId: '',
+          merchantName: '',
+          ownerId: record.assigneeId || '',
+          ownerName: record.assignee || '',
+          userId: record.userId || '',
+          dueAt: addHours(unrepliedMessage.createdAt, slaHours(data, 'leadResponseHours', 24)),
+          detail: `${collection.label} · ${record.customerName || record.phone || record.ownerPhone || '用户'} · ${(unrepliedMessage.text || '').slice(0, 80)}`
+        });
+      }
     }
 
     for (const record of data.phoneCardOrders || []) {
@@ -4905,6 +4939,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           sendOrderNotification(data, item.userId, 'ORDER_SERVICE', '平台已回复服务单', note, item.updatedAt, { focusId: item.id });
               addAudit(data, '平台回复服务单', item.id);
             } else {
+              addNotification(data, 'PLATFORM', 'SERVICE_MESSAGE', `${match.label}留言`, note, { focusId: item.id });
               addAudit(data, '用户提交服务单咨询', item.id);
             }
             return item;
