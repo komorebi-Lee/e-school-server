@@ -717,6 +717,10 @@ function patrolView() {
   </div>
   <div class="page-actions"><p>上次巡检 ${patrol.lastRunAt ? fmtDate(patrol.lastRunAt) : '尚未执行'} · 累计 ${patrol.runCount || 0} 次 · 本次新增 ${patrol.lastCreated || 0} / 关闭 ${patrol.lastResolved || 0} · 服务分变化 ${patrol.lastScoreChanges || 0}</p><div><button id="runPatrol" class="primary">立即巡检</button></div></div>`;
   const rows = alerts.map((alert) => {
+    const operators = (state.data.adminUsers || []).filter((item) => item.status === 'ACTIVE');
+    const assignControl = alert.ownerRole === 'PLATFORM' && alert.status !== 'RESOLVED' && operators.length
+      ? `<select class="assign-alert" data-id="${esc(alert.id)}" aria-label="分配负责人"><option value="" ${alert.ownerId ? '' : 'selected'}>${alert.ownerId ? '更换负责人' : '分配负责人'}</option>${operators.map((item) => `<option value="${esc(item.id)}" ${alert.ownerId === item.id ? 'selected' : ''}>${esc(item.displayName || item.username)}</option>`).join('')}</select>`
+      : '';
     const actions = alert.status === 'OPEN'
       ? `<button class="text-button ack-alert" data-id="${esc(alert.id)}">认领处理</button>`
       : (alert.status === 'ACKNOWLEDGED' ? '<span class="muted-empty">已认领</span>' : '<span class="muted-empty">已关闭</span>');
@@ -729,7 +733,7 @@ function patrolView() {
       <td>${esc(slaOwnerLabels[alert.ownerRole] || alert.ownerRole)}<small>${esc(alert.ownerName || alert.acknowledgedBy || alert.merchantName || '平台内部')}</small></td>
       <td>${fmtDate(alert.dueAt)}<small>${slaCountdown(alert)}</small></td>
       <td><span class="badge ${slaLevelBadge(alert)}">${label(alert.status === 'RESOLVED' ? 'RESOLVED' : alert.level)}</span><small>${esc(alert.acknowledgeNote || alert.resolvedReason || label(alert.status))}</small></td>
-      <td><div class="row-actions">${actions}${jump}</div></td>
+      <td><div class="row-actions">${assignControl}${actions}${jump}</div></td>
     </tr>`;
   });
   return cards + ownerFilterBar
@@ -747,6 +751,16 @@ bindView = function () {
   document.querySelectorAll('.owner-task-panel .owner-task').forEach((button) => button.addEventListener('click', () => {
     state.ownerFilter = button.dataset.owner || 'ALL';
     goView('patrol');
+  }));
+  document.querySelectorAll('.assign-alert').forEach((select) => select.addEventListener('change', async (event) => {
+    const ownerId = event.target.value;
+    if (!ownerId) return;
+    await api(`/api/admin/sla-alerts/${select.dataset.id}/assign`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ownerId })
+    });
+    showToast('预警已分配，负责人已收到提醒');
+    await load();
   }));
   document.querySelector('#runPatrol')?.addEventListener('click', async () => {
     const result = await api('/api/admin/patrol/run', { method: 'POST' });

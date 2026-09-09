@@ -5751,6 +5751,36 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: alert, requestId });
       }
 
+      const slaAssignMatch = pathname.match(/^\/api\/admin\/sla-alerts\/([^/]+)\/assign$/);
+      if (request.method === 'POST' && slaAssignMatch) {
+        const actor = requireAdmin(request, 'ORDER_MANAGE');
+        const body = await readJson(request);
+        const ownerId = requireString(body.ownerId, 'ownerId', { maxLength: 80 });
+        const alert = store.update((data) => {
+          const item = (data.slaAlerts || []).find((row) => row.id === slaAssignMatch[1]);
+          if (!item) throw new ApiError(404, 'SLA_ALERT_NOT_FOUND', '预警记录不存在');
+          if (item.status === 'RESOLVED') throw new ApiError(409, 'SLA_ALERT_RESOLVED', '该预警已自动关闭，不能再分配');
+          if (item.ownerRole === 'MERCHANT') throw new ApiError(409, 'SLA_ALERT_MERCHANT_OWNED', '商家责任预警不能转派给平台负责人');
+          const owner = (data.adminUsers || []).find((row) => row.id === ownerId);
+          if (!owner) throw new ApiError(404, 'ADMIN_NOT_FOUND', '负责人不存在');
+          if (owner.status !== 'ACTIVE') throw new ApiError(409, 'ADMIN_NOT_ACTIVE', '负责人已停用，不能接收预警');
+          const now = new Date().toISOString();
+          const previousOwnerName = item.ownerName;
+          item.ownerId = owner.id;
+          item.ownerName = owner.displayName || owner.username;
+          item.assignedAt = now;
+          item.assignedById = actor.id;
+          item.assignedBy = actor.displayName || actor.username;
+          item.updatedAt = now;
+          addNotification(data, owner.id, 'SLA', '预警已分配给你',
+            `${item.ruleLabel}：${item.businessNo} 已分配给你，请尽快跟进处理。`, { focusId: item.businessId });
+          addAudit(data, '分配超时预警', `${item.ruleLabel} ${item.businessNo}`,
+            `${owner.displayName || owner.username}（由 ${actor.displayName || actor.username} 分配）`);
+          return { ...item, previousOwnerName };
+        });
+        return sendJson(response, 200, { data: alert, requestId });
+      }
+
       const adminPaymentRefundRefreshMatch = pathname.match(/^\/api\/admin\/payment-orders\/([^/]+)\/refund\/refresh$/);
       if (request.method === 'POST' && adminPaymentRefundRefreshMatch) {
         const currentPayment = store.read().paymentOrders.find((item) => item.id === adminPaymentRefundRefreshMatch[1]);

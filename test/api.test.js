@@ -3659,19 +3659,61 @@ test('sla alerts aggregate owner workload and claim platform items', async () =>
   assert.ok(merchantTask.overdueCount >= 1);
   assert.ok(platformTask.openCount >= 1);
 
+  const operator = await api('/api/admin/admins', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({
+      username: 'sla-owner-admin', displayName: '履约跟进员',
+      password: 'sla-owner-password-2026', role: 'SUPPORT'
+    })
+  });
+  assert.equal(operator.response.status, 201);
+  const operatorLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'sla-owner-admin', password: 'sla-owner-password-2026' })
+  });
+  assert.equal(operatorLogin.response.status, 200);
+  const operatorHeaders = { 'content-type': 'application/json', authorization: `Bearer ${operatorLogin.body.data.token}` };
+
+  const unauthorized = await api(`/api/admin/sla-alerts/${cardAlert.id}/assign`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ownerId: 'not-logged-in' })
+  });
+  assert.equal(unauthorized.response.status, 401);
+
+  const merchantAssignment = await api(`/api/admin/sla-alerts/${deliveryAlert.id}/assign`, {
+    method: 'POST', headers: operatorHeaders,
+    body: JSON.stringify({ ownerId: operator.body.data.id })
+  });
+  assert.equal(merchantAssignment.response.status, 409);
+  assert.equal(merchantAssignment.body.error.code, 'SLA_ALERT_MERCHANT_OWNED');
+
+  const assigned = await api(`/api/admin/sla-alerts/${cardAlert.id}/assign`, {
+    method: 'POST', headers: operatorHeaders,
+    body: JSON.stringify({ ownerId: operator.body.data.id })
+  });
+  assert.equal(assigned.response.status, 200);
+  assert.equal(assigned.body.data.ownerId, operator.body.data.id);
+  assert.equal(assigned.body.data.ownerName, '履约跟进员');
+  assert.equal(assigned.body.data.assignedById, operator.body.data.id);
+  const assignedNotices = await api('/api/admin/notifications', { headers: operatorHeaders });
+  assert.ok(assignedNotices.body.data.some((item) => item.userId === operator.body.data.id
+    && item.type === 'SLA'
+    && item.title === '预警已分配给你'
+    && item.content.includes(cardAlert.businessNo)));
+
   const claimed = await api(`/api/admin/sla-alerts/${cardAlert.id}/acknowledge`, {
     method: 'POST', headers: adminHeaders, body: JSON.stringify({ note: '已联系运营商跟进' })
   });
   assert.equal(claimed.response.status, 200);
   assert.equal(claimed.body.data.status, 'ACKNOWLEDGED');
-  const adminId = store.read().adminUsers.find((item) => item.username === process.env.ADMIN_USERNAME).id;
+  const adminId = operator.body.data.id;
   assert.equal(claimed.body.data.ownerId, adminId);
-  assert.equal(claimed.body.data.ownerName, '运营管理员');
+  assert.equal(claimed.body.data.ownerName, '履约跟进员');
 
   const afterClaim = await api('/api/admin/overview', { headers: adminHeaders });
   const claimedTask = afterClaim.body.data.slaOwnerTasks.find((item) => item.key === `PLATFORM:${adminId}`);
   assert.ok(claimedTask);
-  assert.equal(claimedTask.ownerName, '运营管理员');
+  assert.equal(claimedTask.ownerName, '履约跟进员');
   assert.ok(claimedTask.acknowledgedCount >= 1);
 
   store.update((data) => {
