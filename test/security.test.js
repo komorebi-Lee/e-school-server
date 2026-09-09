@@ -389,6 +389,14 @@ test('admin settings UI exposes configuration change history', () => {
   assert.ok(adminScript.includes('renderSettingChangeText'));
 });
 
+test('admin settings expose overdue after-sale auto delist threshold', () => {
+  const adminScript = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8');
+
+  assert.ok(adminScript.includes('settingOverdueAfterSaleLimit'), 'settings form should expose the threshold input');
+  assert.ok(adminScript.includes('productComplianceOverdueAfterSaleThreshold'), 'settings save should send the threshold');
+  assert.ok(adminScript.includes('售后超时下架阈值'), 'settings label should use business wording');
+});
+
 test('admin payment UI exposes pending refunds and result refresh', () => {
   const adminScript = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8');
 
