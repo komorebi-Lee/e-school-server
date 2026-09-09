@@ -774,6 +774,43 @@ test('order total is server-calculated and idempotency prevents duplicate orders
   assert.ok(confirmedLinked.body.data.serviceRecords.some((item) => item.type === 'PLATE' && item.amountInCents === 0));
 });
 
+test('multi-bike orders create one free plate assistance per purchased vehicle', async () => {
+  const session = await loginWeChat('multi_plate_user');
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_001');
+    product.stock = 10;
+    product.reservedStock = 0;
+  });
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 3 }] })
+  });
+  assert.equal(created.response.status, 201);
+  const payment = await confirmPayment(created.body.paymentOrder.id, session.token);
+  assert.equal(payment.response.status, 200);
+
+  const linked = await api('/api/my/orders', { headers: { authorization: `Bearer ${session.token}` } });
+  const plateRecords = linked.body.data.serviceRecords.filter((item) => (
+    item.type === 'PLATE' && (item.relatedIds?.platformOrderIds || []).includes(created.body.data.id)
+  ));
+  assert.equal(plateRecords.length, 3);
+  assert.ok(plateRecords.every((item) => item.amountInCents === 0 && item.status === 'MATERIAL_PENDING'));
+
+  // 共享测试库：移除本用例业务记录，避免多辆订单改变后续库存与服务分基线。
+  store.update((data) => {
+    const orderId = created.body.data.id;
+    data.orders = data.orders.filter((item) => item.id !== orderId);
+    data.plateApplications = (data.plateApplications || []).filter((item) => item.relatedOrderId !== orderId);
+    data.paymentOrders = (data.paymentOrders || []).filter((item) => item.businessId !== orderId);
+    data.financeEvents = (data.financeEvents || []).filter((item) => item.orderNo !== created.body.data.orderNo);
+    data.notifications = (data.notifications || []).filter((item) => item.metadata?.focusId !== orderId
+      && item.metadata?.focusId !== (created.body.data.plateApplicationId || ''));
+    const product = data.products.find((item) => item.id === 'prod_ebike_001');
+    product.stock = 8;
+    product.reservedStock = 0;
+  });
+});
+
 test('after-sale request checks order ownership and prevents duplicates', async () => {
   const session = await loginWeChat('u1');
   const orders = await api('/api/orders', { headers: { authorization: `Bearer ${session.token}` } });

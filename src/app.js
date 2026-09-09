@@ -1369,25 +1369,28 @@ function createApp({
       order.paidAt = order.paidAt || now;
       issueDeliveryCode(order, now);
       consumeOrderStock(data, order);
-      const bikeItem = order.items.find((item) => (data.products || []).find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
+      const bikeItem = quantityAwarePlateItem(order, data);
       if (bikeItem) {
-        const plateApplication = {
-          id: `plate_${randomUUID()}`,
-          userId: paymentOrder.userId,
-          customerName: order.fulfillment?.contactName || '平台购车用户',
-          phone: order.fulfillment?.contactPhone || '',
-          vehicleModel: bikeItem.name,
-          source: 'PLATFORM_ORDER',
-          feeInCents: 0,
-          relatedOrderId: order.id,
-          status: 'MATERIAL_PENDING',
-          relatedIds: { platformOrderIds: [order.id] },
-          createdAt: now,
-          updatedAt: now
-        };
-        (data.plateApplications = data.plateApplications || []).unshift(plateApplication);
-        addAudit(data, source === 'PROVIDER_CALLBACK' ? '购车支付回调后自动创建免费牌照辅助' : '购车支付后自动创建免费牌照辅助', order.orderNo);
-        addNotification(data, paymentOrder.userId, 'PLATE', '免费牌照辅助已发起', '平台购车后可享受免费校园牌照辅助。', { focusId: plateApplication.id });
+        const bikeQuantity = Math.max(1, Number(bikeItem.quantity || 1));
+        for (let index = 0; index < bikeQuantity; index += 1) {
+          const plateApplication = {
+            id: `plate_${randomUUID()}`,
+            userId: paymentOrder.userId,
+            customerName: order.fulfillment?.contactName || '平台购车用户',
+            phone: order.fulfillment?.contactPhone || '',
+            vehicleModel: bikeItem.name,
+            source: 'PLATFORM_ORDER',
+            feeInCents: 0,
+            relatedOrderId: order.id,
+            status: 'MATERIAL_PENDING',
+            relatedIds: { platformOrderIds: [order.id] },
+            createdAt: now,
+            updatedAt: now
+          };
+          (data.plateApplications = data.plateApplications || []).unshift(plateApplication);
+        }
+        addAudit(data, source === 'PROVIDER_CALLBACK' ? '购车支付回调后自动创建免费牌照辅助' : '购车支付后自动创建免费牌照辅助', `${order.orderNo} × ${bikeQuantity}`);
+        addNotification(data, paymentOrder.userId, 'PLATE', '免费牌照辅助已发起', `本单已发起 ${bikeQuantity} 项免费校园牌照辅助，请分别补充车辆与身份材料。`, { focusId: (data.plateApplications || [])[0]?.id });
       }
       order.collaboration ||= createCollaboration(order, order.items[0]?.merchantId || '');
       createSettlements(data, order, now);
@@ -1828,6 +1831,12 @@ function createApp({
       data.settlements.unshift(settlement);
     }
     return created;
+  }
+
+  // 平台购车免费牌照按商品件数生成，避免一单多车只发起一个牌照辅助。
+  function quantityAwarePlateItem(order, data) {
+    return (order?.items || []).find((item) => (data.products || [])
+      .find((product) => product.id === item.productId)?.category === 'E_BIKE_NEW');
   }
 
   function settlementPeriodDays(data) {
