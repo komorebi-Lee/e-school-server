@@ -2449,6 +2449,77 @@ test('admin after-sale closure refunds paid orders and notifies users', async ()
   assert.ok(notifications.body.data.some((item) => item.type === 'ORDER' && item.title === '订单已退款'));
 });
 
+test('multi-quantity orders support partial after-sale refunds', async () => {
+  const baseline = await api('/api/products/prod_ebike_001');
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  const session = await loginWeChat('partial_refund_user');
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 3 }] })
+  });
+  assert.equal(created.response.status, 201);
+  await confirmPayment(created.body.paymentOrder.id, session.token);
+  const order = await api(`/api/orders/${created.body.data.id}`, { headers: { authorization: `Bearer ${session.token}` } });
+  assert.equal(order.response.status, 200);
+
+  const firstAfterSale = await api('/api/after-sales', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ orderId: created.body.data.id, type: 'REFUND', quantity: 1, reason: '其中一辆不想要了' })
+  });
+  assert.equal(firstAfterSale.response.status, 201);
+  assert.equal(firstAfterSale.body.data.quantity, 1);
+  assert.equal(firstAfterSale.body.data.refundAmountInCents, Math.round(order.body.data.totalInCents / 3));
+
+  const firstClosed = await api(`/api/admin/after-sales/${firstAfterSale.body.data.id}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'CLOSED', resolutionNote: '按用户申请退回其中一辆' })
+  });
+  assert.equal(firstClosed.response.status, 200);
+
+  const firstSnapshot = await api(`/api/orders/${created.body.data.id}`, { headers: { authorization: `Bearer ${session.token}` } });
+  assert.equal(firstSnapshot.body.data.status, 'PAID');
+  assert.equal(firstSnapshot.body.data.paymentStatus, 'PARTIALLY_REFUNDED');
+  const afterStock = await api('/api/products/prod_ebike_001');
+  assert.equal(afterStock.body.data.stock, baseline.body.data.stock - 2);
+  const overview = await api('/api/admin/overview', { headers: adminHeaders });
+  const settlement = overview.body.data.settlements.find((item) => item.orderId === created.body.data.id);
+  assert.ok(['PENDING_SETTLE', 'IN_ACCOUNT_PERIOD'].includes(settlement.settlementStatus));
+  assert.equal(settlement.refundedInCents, Math.round(order.body.data.totalInCents / 3));
+  assert.ok(settlement.amountInCents > 0);
+
+  const secondAfterSale = await api('/api/after-sales', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ orderId: created.body.data.id, type: 'REFUND', quantity: 2, reason: '剩余车辆也退掉' })
+  });
+  assert.equal(secondAfterSale.response.status, 201);
+  assert.equal(secondAfterSale.body.data.quantity, 2);
+  const secondClosed = await api(`/api/admin/after-sales/${secondAfterSale.body.data.id}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'CLOSED', resolutionNote: '剩余车辆全额退款' })
+  });
+  assert.equal(secondClosed.response.status, 200);
+  const finalSnapshot = await api(`/api/orders/${created.body.data.id}`, { headers: { authorization: `Bearer ${session.token}` } });
+  assert.equal(finalSnapshot.body.data.status, 'CANCELLED');
+  assert.equal(finalSnapshot.body.data.paymentStatus, 'REFUNDED');
+
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_001');
+    product.stock = baseline.body.data.stock;
+    product.reservedStock = 0;
+    data.orders = data.orders.filter((item) => item.id !== created.body.data.id);
+    data.afterSales = data.afterSales.filter((item) => item.orderId !== created.body.data.id);
+    data.paymentOrders = data.paymentOrders.filter((item) => item.orderId !== created.body.data.id);
+    data.settlements = data.settlements.filter((item) => item.orderId !== created.body.data.id);
+    data.financeEvents = data.financeEvents.filter((item) => item.orderNo !== order.body.data.orderNo);
+    data.plateApplications = data.plateApplications.filter((item) => item.relatedOrderId !== created.body.data.id);
+    data.notifications = data.notifications.filter((item) => !(item.userId === session.userId && item.metadata?.focusId === created.body.data.id));
+  });
+});
+
 test('admin overview includes a seven day operations report', async () => {
   const adminLogin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },

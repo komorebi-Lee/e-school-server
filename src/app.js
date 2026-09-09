@@ -31,7 +31,7 @@ const adminOrderStatuses = {
   'plate-applications': new Set(['PENDING_PAYMENT', 'MATERIAL_PENDING', 'REVIEWING', 'COMPLETED', 'REJECTED']),
   'after-sales': new Set(['SUBMITTED', 'REVIEWING', 'CLOSED'])
 };
-const allowedPaymentStatuses = new Set(['PENDING', 'PAID', 'CANCELLED', 'REFUNDED']);
+const allowedPaymentStatuses = new Set(['PENDING', 'PAID', 'CANCELLED', 'PARTIALLY_REFUNDED', 'REFUNDED']);
 const identityVerifications = new Map();
 let weChatAccessToken = { token: '', expiresAt: 0 };
 
@@ -434,15 +434,18 @@ function consumeOrderStock(data, order) {
 function restoreOrderStock(data, order) {
   if (order.stockReservation === 'HELD') return releaseOrderStock(data, order);
   if (order.stockReservation !== 'CONSUMED') return false;
+  const restoredByProduct = order.stockRestoredByProduct || {};
   const affectedProducts = [];
   for (const orderItem of order.items || []) {
+    const outstandingQuantity = Math.max(0, Number(orderItem.quantity || 0) - Number(restoredByProduct[orderItem.productId] || 0));
+    if (outstandingQuantity <= 0) continue;
     const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
     if (product) {
       const stockBefore = Number(product.stock || 0);
-      product.stock = Number(product.stock || 0) + Number(orderItem.quantity || 0);
+      product.stock = Number(product.stock || 0) + outstandingQuantity;
       recordStockMovement(data, product, {
         movementType: 'RESTORE',
-        quantity: orderItem.quantity,
+        quantity: outstandingQuantity,
         stockBefore,
         stockAfter: Number(product.stock || 0),
         reservedBefore: Number(product.reservedStock || 0),
@@ -452,12 +455,45 @@ function restoreOrderStock(data, order) {
         operator: 'ORDER_FLOW',
         note: '退款/退货回补库存'
       });
+      restoredByProduct[orderItem.productId] = Number(orderItem.quantity || 0);
       affectedProducts.push(product);
     }
   }
+  order.stockRestoredByProduct = restoredByProduct;
   order.stockReservation = 'RESTORED';
   affectedProducts.forEach((product) => evaluateLowStockAlert(data, product, new Date().toISOString()));
   return true;
+}
+
+function restoreOrderStockQuantity(data, order, refundItems = []) {
+  const restoredByProduct = order.stockRestoredByProduct || {};
+  const affectedProducts = [];
+  for (const refundItem of refundItems) {
+    const quantity = Math.max(0, Number(refundItem.quantity || 0));
+    if (!quantity) continue;
+    const product = (data.products || []).find((candidate) => candidate.id === refundItem.productId);
+    if (!product) continue;
+    const orderQuantity = Math.max(0, Number((order.items || []).find((item) => item.productId === refundItem.productId)?.quantity || 0));
+    const stockBefore = Number(product.stock || 0);
+    product.stock = Number(product.stock || 0) + quantity;
+    restoredByProduct[refundItem.productId] = Math.min(orderQuantity, Number(restoredByProduct[refundItem.productId] || 0) + quantity);
+    recordStockMovement(data, product, {
+      movementType: 'RESTORE',
+      quantity,
+      stockBefore,
+      stockAfter: Number(product.stock || 0),
+      reservedBefore: Number(product.reservedStock || 0),
+      reservedAfter: Number(product.reservedStock || 0),
+      referenceId: order.id,
+      referenceNo: order.orderNo,
+      operator: 'ORDER_FLOW',
+      note: '部分售后按数量回补库存'
+    });
+    affectedProducts.push(product);
+  }
+  order.stockRestoredByProduct = restoredByProduct;
+  affectedProducts.forEach((product) => evaluateLowStockAlert(data, product, new Date().toISOString()));
+  return Boolean(affectedProducts.length);
 }
 
 function sanitizeOrderForMerchant(order) {
@@ -1566,6 +1602,7 @@ function createApp({
   const statusLabels = {
     PENDING_PAYMENT:'\u5f85\u652f\u4ed8',
     PAID:'已支付，待配送', FULFILLING:'配送中', COMPLETED:'已完成', CANCELLED:'已取消', AFTER_SALE:'售后中',
+    PARTIALLY_REFUNDED:'部分退款',
     PENDING_REALNAME:'待实名激活', ACTIVATED:'已激活', REJECTED:'未通过',
     PENDING_CREDIT:'待到账', CREDITED:'已到账',
     PENDING_VERIFY:'待核验', APPROVED:'可预约安装',
@@ -2169,6 +2206,40 @@ function createApp({
     }
   }
 
+  function markSettlementsPartiallyRefunded(data, orderId, refundInCents, now) {
+    if (!orderId || !Array.isArray(data.settlements) || !refundInCents) return [];
+    const settledTargets = data.settlements.filter((item) => item.orderId === orderId && ['SETTLED', 'REFUNDED'].includes(item.settlementStatus));
+    const availableTargets = data.settlements.filter((item) => item.orderId === orderId && !['SETTLED', 'REFUNDED'].includes(item.settlementStatus));
+    let remainingInCents = refundInCents;
+    const touched = [];
+    const reduceTarget = (settlement, targetInCents) => {
+      if (!settlement || !targetInCents) return;
+      const appliedInCents = Math.min(targetInCents, settlement.amountInCents || 0);
+      if (appliedInCents <= 0) return;
+      settlement.amountInCents = Math.max(0, (settlement.amountInCents || 0) - appliedInCents);
+      settlement.platformFeeInCents = Math.max(0, (settlement.platformFeeInCents || 0) - Math.round(appliedInCents * (settlement.commissionRatePercent ?? 2) / 100));
+      settlement.payableAmountInCents = Math.max(0, settlement.amountInCents - (settlement.platformFeeInCents || 0));
+      settlement.refundedInCents = (settlement.refundedInCents || 0) + appliedInCents;
+      if (!settlement.amountInCents && settlement.settlementStatus !== 'SETTLED') {
+        settlement.settlementStatus = 'REFUNDED';
+        settlement.refundedAt = now;
+      }
+      settlement.updatedAt = now;
+      touched.push(settlement);
+    };
+    for (const settlement of settledTargets) {
+      if (remainingInCents <= 0) break;
+      reduceTarget(settlement, remainingInCents);
+      remainingInCents -= Math.min(remainingInCents, settlement.amountInCents || 0);
+    }
+    for (const settlement of availableTargets) {
+      if (remainingInCents <= 0) break;
+      reduceTarget(settlement, remainingInCents);
+      remainingInCents -= Math.min(remainingInCents, settlement.amountInCents || 0);
+    }
+    return touched;
+  }
+
   function settleMerchant(data, merchantId, now, reference) {
     if (!Array.isArray(data.settlements)) throw new ApiError(404, 'SETTLEMENT_NOT_FOUND', 'Settlement record not found');
     releaseMaturedSettlements(data, now);
@@ -2231,7 +2302,7 @@ function createApp({
 
   function applyOrderRefund(data, order, now) {
     const paymentOrder = (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId);
-    if (paymentOrder && paymentOrder.status === 'PAID') {
+    if (paymentOrder && ['PAID', 'PARTIALLY_REFUNDED'].includes(paymentOrder.status)) {
       paymentOrder.status = 'REFUNDED';
       paymentOrder.refundedAt = now;
       paymentOrder.updatedAt = now;
@@ -2249,6 +2320,64 @@ function createApp({
     addAudit(data, '\u552e\u540e\u9000\u6b3e\u5b8c\u6210', order.orderNo);
     addNotification(data, order.userId, 'ORDER', '\u8ba2\u5355\u5df2\u9000\u6b3e', `\u8ba2\u5355 ${order.orderNo} \u5df2\u5b8c\u6210\u9000\u6b3e\u3002`, { focusId: order.id });
     return paymentOrder;
+  }
+
+  function applyPartialOrderRefund(data, order, afterSale, now) {
+    const refundItems = (afterSale.refundItems || []).map((item) => ({
+      productId: item.productId,
+      quantity: Math.max(0, Number(item.quantity || 0))
+    }));
+    let refundInCents = Number(afterSale.refundAmountInCents || 0);
+    let totalQuantity = 0;
+    let refundQuantity = 0;
+    for (const orderItem of order.items || []) {
+      const itemQuantity = Number(orderItem.quantity || 0);
+      totalQuantity += itemQuantity;
+      refundQuantity += refundItems
+        .filter((item) => item.productId === orderItem.productId)
+        .reduce((sum, item) => sum + item.quantity, 0);
+    }
+    const previousRefundQuantity = Number(order.refundedQuantity || 0);
+    order.refundedQuantity = previousRefundQuantity + refundQuantity;
+    if (totalQuantity > 0 && previousRefundQuantity + refundQuantity >= totalQuantity) {
+      if (['PAID', 'PARTIALLY_REFUNDED'].includes(order.paymentStatus)) applyOrderRefund(data, order, now);
+      return { refundInCents, full: true };
+    }
+
+    const paymentOrder = (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId);
+    if (paymentOrder) {
+      paymentOrder.refundAmountInCents = Math.min(
+        Number(paymentOrder.amountInCents || 0),
+        (paymentOrder.refundAmountInCents || 0) + refundInCents
+      );
+      if (paymentOrder.status === 'PAID') paymentOrder.status = 'PARTIALLY_REFUNDED';
+      paymentOrder.refundedAt = paymentOrder.refundedAt || now;
+      paymentOrder.refund = {
+        ...(paymentOrder.refund || {}),
+        refundNo: paymentOrder.refund?.refundNo || `RF_${paymentOrder.paymentNo}`,
+        amountInCents: paymentOrder.refundAmountInCents,
+        status: 'REFUNDED',
+        requestedAt: paymentOrder.refund?.requestedAt || now,
+        updatedAt: now,
+        note: paymentOrder.refund?.note || '多数量订单部分退款'
+      };
+      paymentOrder.updatedAt = now;
+    }
+    order.paymentStatus = 'PARTIALLY_REFUNDED';
+    order.status = order.statusBeforeAfterSale || 'COMPLETED';
+    order.updatedAt = now;
+    restoreOrderStockQuantity(data, order, refundItems);
+    markSettlementsPartiallyRefunded(data, order.id, refundInCents, now);
+    unfreezeOrderSettlements(data, order, now);
+    activateOrderSettlements(data, order, now);
+    if (paymentOrder) {
+      addFinanceEvent(data, 'REFUND', `REFUND_${paymentOrder.id}_${afterSale.id}`, -refundInCents, {
+        userId: order.userId, paymentNo: paymentOrder.paymentNo, orderNo: order.orderNo, businessType: 'ORDER'
+      }, now);
+    }
+    addAudit(data, '售后部分退款完成', `${order.orderNo}：${refundQuantity} 件`);
+    addNotification(data, order.userId, 'ORDER', '订单部分退款成功', `订单 ${order.orderNo} 已按 ${refundQuantity} 件完成退款。`, { focusId: order.id });
+    return { refundInCents, full: false };
   }
 
   function requireMerchant(request) {
@@ -5581,8 +5710,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           item.updatedAt = new Date().toISOString();
           if (status === 'CLOSED') item.resolutionNote = resolutionNote;
           if (status === 'CLOSED' && item.type === 'REFUND') {
-            applyOrderRefund(data, order, item.updatedAt);
-            appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', `退款已完成，订单关闭：${resolutionNote}`);
+            const refundResult = item.refundItems?.length
+              ? applyPartialOrderRefund(data, order, item, item.updatedAt)
+              : applyOrderRefund(data, order, item.updatedAt);
+            appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', `${refundResult?.full === false ? '按数量部分退款完成' : '退款已完成，订单关闭'}：${resolutionNote}`);
           } else if (status === 'CLOSED') {
             order.status = 'COMPLETED';
             order.updatedAt = item.updatedAt;
@@ -6912,7 +7043,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           if (adminStatusMatch[1] === 'after-sales' && status === 'CLOSED') {
             const order = (data.orders || []).find((row) => row.id === item.orderId);
-            if (order && item.type === 'REFUND') applyOrderRefund(data, order, item.updatedAt);
+            if (order && item.type === 'REFUND' && item.refundItems?.length) applyPartialOrderRefund(data, order, item, item.updatedAt);
+            else if (order && item.type === 'REFUND') applyOrderRefund(data, order, item.updatedAt);
             else if (order) {
               order.status = 'COMPLETED';
               order.updatedAt = item.updatedAt;
@@ -7848,6 +7980,51 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           const duplicate = data.afterSales.find((item) => item.orderId === orderId && item.status !== 'CLOSED');
           if (duplicate) throw new ApiError(409, 'ACTIVE_AFTER_SALE_EXISTS', 'An active after-sale request already exists');
+          const refundableItems = (order.items || []).filter((item) => {
+            const product = (data.products || []).find((candidate) => candidate.id === item.productId);
+            return product?.category === 'E_BIKE_NEW';
+          });
+          const itemsForRefund = refundableItems.length ? refundableItems : (order.items || []);
+          const totalRefundableQuantity = itemsForRefund.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+          const closedRefundQuantity = data.afterSales
+            .filter((record) => record.orderId === orderId && record.type === 'REFUND' && record.status === 'CLOSED')
+            .reduce((sum, record) => sum + Number(record.quantity || (record.refundItems || []).reduce((quantitySum, refundItem) => quantitySum + Number(refundItem.quantity || 0), 0)), 0);
+          const availableRefundQuantity = Math.max(0, totalRefundableQuantity - closedRefundQuantity);
+          const refundQuantity = body.quantity === undefined || body.quantity === null || body.quantity === ''
+            ? availableRefundQuantity
+            : Number(body.quantity);
+          if (!Number.isInteger(refundQuantity) || refundQuantity < 1 || refundQuantity > availableRefundQuantity) {
+            throw new ApiError(400, 'VALIDATION_ERROR', `售后数量必须是 1 到 ${availableRefundQuantity} 件`);
+          }
+          const refundItems = [];
+          let remainingRefundQuantity = refundQuantity;
+          let refundAmountInCents = 0;
+          for (const orderItem of itemsForRefund) {
+            if (remainingRefundQuantity <= 0) break;
+            const itemQuantity = Number(orderItem.quantity || 0);
+            const alreadyRefundedQuantity = data.afterSales
+              .filter((record) => record.orderId === orderId && record.type === 'REFUND' && record.status === 'CLOSED')
+              .reduce((sum, record) => sum + (record.refundItems || [])
+                .filter((refundItem) => refundItem.productId === orderItem.productId)
+                .reduce((quantitySum, refundItem) => quantitySum + Number(refundItem.quantity || 0), 0), 0);
+            const itemAvailableQuantity = Math.max(0, itemQuantity - alreadyRefundedQuantity);
+            const quantityForItem = Math.min(remainingRefundQuantity, itemAvailableQuantity);
+            if (!quantityForItem) continue;
+            const unitPriceInCents = Math.round(Number(orderItem.subtotalInCents || (Number(orderItem.priceInCents || 0) * itemQuantity)) / itemQuantity);
+            const itemRefundInCents = quantityForItem === itemAvailableQuantity
+              ? Math.max(0, Number(orderItem.subtotalInCents || (Number(orderItem.priceInCents || 0) * itemQuantity)) - unitPriceInCents * alreadyRefundedQuantity)
+              : unitPriceInCents * quantityForItem;
+            refundItems.push({
+              productId: orderItem.productId,
+              name: orderItem.name,
+              merchantId: orderItem.merchantId || '',
+              quantity: quantityForItem,
+              unitPriceInCents,
+              refundAmountInCents: itemRefundInCents
+            });
+            refundAmountInCents += itemRefundInCents;
+            remainingRefundQuantity -= quantityForItem;
+          }
           const now = new Date().toISOString();
           const settings = publicSettings(data.adminSettings);
           const record = {
@@ -7856,6 +8033,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             orderId,
             type,
             typeLabel: { REFUND: '申请退款', RETURN: '退货', REPAIR: '维修' }[type] || type,
+            quantity: type === 'REFUND' ? refundQuantity : totalRefundableQuantity,
+            refundItems: type === 'REFUND' ? refundItems : [],
+            refundAmountInCents: type === 'REFUND' ? refundAmountInCents : 0,
             reason,
             images: normalizedImages,
             status: 'SUBMITTED',
@@ -7865,6 +8045,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             updatedAt: now
           };
           data.afterSales.push(record);
+          order.statusBeforeAfterSale ||= order.status;
           order.status = 'AFTER_SALE';
           order.updatedAt = now;
           freezeOrderSettlements(data, order, now, `${record.typeLabel}：${reason}`);
