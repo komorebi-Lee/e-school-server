@@ -2997,6 +2997,14 @@ function createApp({
     if (isMerchantOwner && merchant?.userId) {
       sendScoreNotification(data, merchant.userId, 'SLA_WARNING', title, message, alert.updatedAt || alert.createdAt, 'SLA',
         alert.businessType === 'ORDER' ? { orderId: alert.businessId } : {});
+      if (alert.businessType === 'AFTER_SALE' && alert.level === 'OVERDUE' && alert.userId) {
+        const record = (data.afterSales || []).find((item) => item.id === alert.businessId);
+        const order = (data.orders || []).find((item) => item.id === record?.orderId);
+        const userTitle = alert.ruleKey === 'AFTER_SALE_RESPONSE' ? '售后响应已超时' : '售后处理已超时';
+        const userContent = `订单 ${order?.orderNo || record?.orderId || ''} 的${alert.ruleLabel}已超过承诺时限，平台已督促商家优先处理。`;
+        sendOrderNotification(data, alert.userId, 'AFTER_SALE', userTitle, userContent,
+          alert.updatedAt || alert.createdAt, { focusId: record?.orderId || '' });
+      }
       return;
     }
     if (alert.ownerRole === 'PLATFORM' && !merchant?.userId) {

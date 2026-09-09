@@ -3781,6 +3781,43 @@ test('operations patrol raises overdue alerts and closes them when work moves on
   assert.equal(cardAlert.ownerRole, 'PLATFORM');
   assert.ok(alerts.body.summary.overdueCount >= 2);
 
+  // 用户自己也应知道售后承诺已失守，并收到平台催办说明。
+  const noticeBuyer = await loginWeChat('after_sale_notice_buyer');
+  const noticeOrder = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${noticeBuyer.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_001', quantity: 1 }] })
+  });
+  assert.equal(noticeOrder.response.status, 201);
+  await confirmPayment(noticeOrder.body.paymentOrder.id, noticeBuyer.token);
+  store.update((data) => {
+    data.afterSales.unshift({
+      id: 'after_sale_user_patrol', orderId: noticeOrder.body.data.id, userId: noticeBuyer.userId,
+      type: 'REPAIR', typeLabel: '维修', reason: '售后超时用户提醒测试',
+      status: 'SUBMITTED', responseDueAt: new Date(Date.now() - 3600 * 1000).toISOString(),
+      resolutionDueAt: new Date(Date.now() + 47 * 3600 * 1000).toISOString(),
+      createdAt: new Date(Date.now() - 25 * 3600 * 1000).toISOString(), updatedAt: new Date().toISOString(),
+      images: []
+    });
+    data.patrolState.lastRunAt = '';
+  });
+  const userPatrol = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(userPatrol.response.status, 200);
+  const userOverdueAlert = (store.read().slaAlerts || []).find((item) => (
+    item.ruleKey === 'AFTER_SALE_RESPONSE' && item.businessId === 'after_sale_user_patrol'
+  ));
+  assert.ok(userOverdueAlert, 'overdue after-sale should raise a merchant alert');
+  assert.equal(userOverdueAlert.level, 'OVERDUE');
+  assert.equal(userOverdueAlert.userId, noticeBuyer.userId);
+  const buyerNotifications = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${noticeBuyer.token}` }
+  });
+  const userNotice = buyerNotifications.body.data.find((item) => (
+    item.type === 'AFTER_SALE' && item.title === '售后响应已超时'
+  ));
+  assert.ok(userNotice, 'overdue after-sale should notify the buyer');
+  assert.ok(userNotice.content.includes('平台已督促商家优先处理'));
+  assert.equal(userNotice.metadata?.focusId, noticeOrder.body.data.id);
+
   // 责任商家应在自己的工作台看到属于自己的预警，且看不到平台内部事项。
   const merchantSession = await loginWeChat('merchant_demo');
   const merchantLogin = await api('/api/merchant/login', {
@@ -3879,6 +3916,19 @@ test('operations patrol raises overdue alerts and closes them when work moves on
   });
   const thirdRun = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
   assert.ok(thirdRun.body.data.resolved >= 2);
+
+  store.update((data) => {
+    data.afterSales = data.afterSales.filter((item) => item.id !== 'after_sale_user_patrol');
+    data.slaAlerts = (data.slaAlerts || []).filter((item) => item.businessId !== 'after_sale_user_patrol');
+    data.orders = data.orders.filter((item) => item.id !== noticeOrder.body.data.id);
+    data.paymentOrders = (data.paymentOrders || []).filter((item) => item.businessId !== noticeOrder.body.data.id);
+    data.financeEvents = (data.financeEvents || []).filter((item) => item.orderNo !== noticeOrder.body.data.orderNo);
+    data.notifications = (data.notifications || []).filter((item) => !(item.userId === noticeBuyer.userId
+      && item.metadata?.focusId === noticeOrder.body.data.id));
+    const rentProduct = data.products.find((item) => item.id === 'prod_ebike_rent_001');
+    rentProduct.stock += 1;
+    rentProduct.reservedStock = 0;
+  });
 
   const afterResolve = await api('/api/admin/sla-alerts', { headers: adminHeaders });
   const closedDelivery = afterResolve.body.data.find((item) => item.id === deliveryAlert.id);
