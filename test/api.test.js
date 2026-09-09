@@ -4768,6 +4768,99 @@ test('service score stage changes reach merchants, platform and patrol audit', a
   });
 });
 
+test('free plate assistance waits until the linked bike order is paid', async () => {
+  const session = await loginWeChat('unpaid_plate_user');
+  store.update((data) => {
+    data.products.unshift({
+      id: 'prod_free_plate_guard_001',
+      name: '免费牌照资格校验车',
+      category: 'E_BIKE_NEW',
+      description: '验证未支付订单不能领取免费牌照',
+      priceInCents: 100000,
+      stock: 1,
+      campusIds: ['campus_demo'],
+      imageUrl: '',
+      merchantId: 'merchant_001',
+      active: true
+    });
+  });
+  const order = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      items: [{ productId: 'prod_free_plate_guard_001', quantity: 1 }],
+      fulfillment: { type: 'DELIVERY', contactName: '牌同学', contactPhone: '15527111901', address: '荟园免费牌楼栋', date: new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 10), timeSlot: '今天 12:00-14:00' }
+    })
+  });
+  assert.equal(order.response.status, 201);
+
+  const unpaidPlate = await api('/api/plate-applications', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      customerName: '牌同学',
+      customerPhone: '15527111901',
+      studentNo: '202610900001',
+      vehicleModel: order.body.data.items[0].name,
+      orderId: order.body.data.id
+    })
+  });
+  assert.equal(unpaidPlate.response.status, 201);
+  assert.equal(unpaidPlate.body.data.source, 'EXTERNAL');
+  assert.equal(unpaidPlate.body.data.feeInCents, 4900);
+  assert.equal(unpaidPlate.body.data.status, 'PENDING_PAYMENT');
+
+  const confirmed = await confirmPayment(order.body.data.paymentOrderId, session.token);
+  assert.equal(confirmed.response.status, 200);
+  assert.equal(confirmed.body.data.order.status, 'PAID');
+
+  const paidPlate = await api('/api/plate-applications', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({
+      customerName: '牌同学',
+      customerPhone: '15527111901',
+      studentNo: '202610900001',
+      vehicleModel: order.body.data.items[0].name,
+      orderId: order.body.data.id
+    })
+  });
+  assert.equal(paidPlate.response.status, 201);
+  assert.equal(paidPlate.body.data.source, 'PLATFORM_ORDER');
+  assert.equal(paidPlate.body.data.feeInCents, 0);
+  assert.equal(paidPlate.body.data.status, 'MATERIAL_PENDING');
+});
+
+test('recharge activation stays linked to the paid phone card journey', async () => {
+  const session = await loginWeChat('linked_activation_user');
+  const card = await api('/api/phone-card-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ customerName: '联同学', phone: '15527111902', productId: 'prod_card_service_001' })
+  });
+  assert.equal(card.response.status, 201);
+
+  const recharge = await api('/api/recharge-orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ phone: '15527111902', promoId: 'promo_recharge_100' })
+  });
+  assert.equal(recharge.response.status, 201);
+  assert.equal(recharge.body.data.relatedIds.phoneCardOrderId, card.body.data.id);
+
+  const activation = await api(`/api/service-records/${recharge.body.data.id}/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ action: 'ACTIVATE_CARD' })
+  });
+  assert.equal(activation.response.status, 409);
+  assert.equal(activation.body.error.code, 'RECHARGE_STATUS_NOT_ALLOWED');
+
+  await confirmPayment(card.body.paymentOrder.id, session.token);
+  await confirmPayment(recharge.body.paymentOrder.id, session.token);
+
+  const paidActivation = await api(`/api/service-records/${recharge.body.data.id}/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ action: 'ACTIVATE_CARD' })
+  });
+  assert.equal(paidActivation.response.status, 200);
+  assert.equal(paidActivation.body.data.status, 'ACTIVATED');
+});
+
 test('rectification cases warn merchants before the review deadline', async () => {
   const adminLogin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },

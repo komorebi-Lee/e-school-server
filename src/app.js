@@ -6403,9 +6403,28 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const result = store.update(data=>{
           const order = body.orderId ? (data.orders||[]).find(item=>item.id===body.orderId && item.userId===userId) : null;
           if (body.orderId && !order) throw new ApiError(404,'ORDER_NOT_FOUND','Order not found');
-          const platformOrder = order && (data.products||[]).find(product=>product.id===order.items?.[0]?.productId)?.category === 'E_BIKE_NEW';
+          const platformOrder = Boolean(
+            order
+            && order.status === 'PAID'
+            && (data.products||[]).find(product=>product.id===order.items?.[0]?.productId)?.category === 'E_BIKE_NEW'
+            && !(data.plateApplications||[]).some(item => (item.relatedIds?.platformOrderIds||[]).includes(order.id))
+          );
+          const existingLinkedApplication = order
+            ? (data.plateApplications||[]).find(item => (item.relatedIds?.platformOrderIds||[]).includes(order.id))
+            : null;
+          if (existingLinkedApplication) {
+            if (existingLinkedApplication.status !== 'COMPLETED') {
+              existingLinkedApplication.customerName = customerName;
+              existingLinkedApplication.phone = customerPhone;
+              existingLinkedApplication.studentNo = studentNo;
+              existingLinkedApplication.vehicleModel = vehicleModel;
+              existingLinkedApplication.updatedAt = now;
+              addAudit(data,'用户补充校园牌照办理信息', existingLinkedApplication.id);
+            }
+            return { application: existingLinkedApplication, paymentOrder: null, reused: true };
+          }
           const feeInCents = platformOrder ? 0 : ((data.adminSettings||{}).externalPlateFeeInCents ?? 4900);
-          const application = { id:`plate_${randomUUID()}`, userId, customerName, phone:customerPhone, studentNo, vehicleModel, source:platformOrder?'PLATFORM_ORDER':'EXTERNAL', feeInCents, relatedOrderId:order?.id || '', status:platformOrder?'MATERIAL_PENDING':'PENDING_PAYMENT', paymentStatus:platformOrder?'PAID':'UNPAID', paymentExpiresAt:platformOrder?'':new Date(new Date(now).getTime() + paymentTimeoutMinutes * 60 * 1000).toISOString(), relatedIds:order?{ platformOrderIds:[order.id] }:{}, createdAt:now, updatedAt:now };
+          const application = { id:`plate_${randomUUID()}`, userId, customerName, phone:customerPhone, studentNo, vehicleModel, source:platformOrder?'PLATFORM_ORDER':'EXTERNAL', feeInCents, relatedOrderId:order?.id || '', status:platformOrder?'MATERIAL_PENDING':'PENDING_PAYMENT', paymentStatus:platformOrder?'PAID':'UNPAID', paymentExpiresAt:platformOrder?'':new Date(new Date(now).getTime() + paymentTimeoutMinutes * 60 * 1000).toISOString(), relatedIds:platformOrder?{ platformOrderIds:[order.id] }:{}, createdAt:now, updatedAt:now };
           if (!platformOrder) {
             const paymentOrder = {
               id:`pay_${randomUUID()}`,
@@ -6493,8 +6512,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             }
             if (collection.type === 'RECHARGE' && action === 'ACTIVATE_CARD') {
               if (!item.relatedIds?.phoneCardOrderId) throw new ApiError(409,'ACTION_NOT_ALLOWED','请先关联电话卡订单');
+              if (!['PENDING_CREDIT', 'CREDITED'].includes(item.status)) throw new ApiError(409,'RECHARGE_STATUS_NOT_ALLOWED','话费支付后才能激活电话卡');
               const cardOrder = (data.phoneCardOrders || []).find(row => row.id === item.relatedIds.phoneCardOrderId && row.userId === userId);
               if (!cardOrder) throw new ApiError(404,'RELATED_ORDER_NOT_FOUND','未找到关联电话卡订单');
+              if (cardOrder.status !== 'PENDING_REALNAME') throw new ApiError(409,'PHONE_CARD_STATUS_NOT_ALLOWED','电话卡支付并待实名后才能激活');
               if (cardOrder.status === 'ACTIVATED') throw new ApiError(409,'ACTION_ALREADY_DONE','电话卡已激活');
               cardOrder.status = 'ACTIVATED';
               cardOrder.updatedAt = new Date().toISOString();
