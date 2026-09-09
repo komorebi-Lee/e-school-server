@@ -981,6 +981,11 @@ function appendCollaborationEvent(order, role, action, note) {
   };
   order.collaboration.intervention.status = role === 'PLATFORM' ? 'RESOLVED' : order.collaboration.intervention.status;
   order.collaboration.intervention.updatedAt = time;
+  if (role === 'USER' && action === 'NOTE') {
+    order.collaboration.unrepliedMessage = { text: note, createdAt: time };
+  } else if (['MERCHANT', 'PLATFORM'].includes(role) && order.collaboration.unrepliedMessage) {
+    order.collaboration.unrepliedMessage = null;
+  }
 }
 
 function serviceRecordOwner(data, recordId) {
@@ -2550,6 +2555,22 @@ function createApp({
     for (const order of data.orders || []) {
       if (!['PAID', 'FULFILLING'].includes(order.status)) continue;
       const merchantId = orderMerchantId(order);
+      const unrepliedMessage = order.collaboration?.unrepliedMessage;
+      if (unrepliedMessage?.createdAt) {
+        targets.push({
+          ruleKey: 'ORDER_USER_MESSAGE',
+          ruleLabel: '订单留言回复',
+          businessType: 'ORDER_MESSAGE',
+          businessId: order.id,
+          businessNo: order.orderNo || order.id,
+          ownerRole: merchantId ? 'MERCHANT' : 'PLATFORM',
+          merchantId,
+          merchantName: merchantName(merchantId),
+          userId: order.userId || '',
+          dueAt: addHours(unrepliedMessage.createdAt, slaHours(data, 'leadResponseHours', 24)),
+          detail: `${order.orderNo || order.id} · ${(unrepliedMessage.text || '').slice(0, 80)}`
+        });
+      }
       targets.push({
         ruleKey: 'ORDER_DELIVERY',
         ruleLabel: '电瓶车订单履约',

@@ -5186,6 +5186,70 @@ test('service score stage changes reach merchants, platform and patrol audit', a
   });
 });
 
+test('unreplied order message creates merchant SLA alert and resolves after reply', async () => {
+  const userSession = await loginWeChat('order_message_user');
+  const merchantSession = await loginWeChat('merchant_demo');
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { authorization: `Bearer ${adminLogin.body.data.token}` };
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': 'order-message-001', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ userId: 'order_message_user', items: [{ productId: 'prod_ebike_001', quantity: 1 }] })
+  });
+  assert.equal(created.response.status, 201);
+  await confirmPayment(created.body.paymentOrder.id, userSession.token);
+
+  const messaged = await api('/api/order-collab', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ role: 'USER', action: 'NOTE', orderId: created.body.data.id, note: '配送前请提前电话联系我。' })
+  });
+  assert.equal(messaged.response.status, 200);
+  assert.ok(messaged.body.data.collaboration.unrepliedMessage);
+
+  await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.ok(!(store.read().slaAlerts || []).some((alert) => (
+    alert.ruleKey === 'ORDER_USER_MESSAGE' && alert.businessId === created.body.data.id && alert.status !== 'RESOLVED'
+  )), 'future message SLA should not alert yet');
+
+  store.update((data) => {
+    const order = data.orders.find((item) => item.id === created.body.data.id);
+    order.collaboration.unrepliedMessage.createdAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    data.patrolState = { ...data.patrolState, lastRunAt: '' };
+  });
+  await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  let alert = (store.read().slaAlerts || []).find((item) => (
+    item.ruleKey === 'ORDER_USER_MESSAGE' && item.businessId === created.body.data.id
+  ));
+  assert.ok(alert);
+  assert.equal(alert.ownerRole, 'MERCHANT');
+  assert.equal(alert.status, 'OPEN');
+  assert.equal(alert.level, 'OVERDUE');
+
+  const replied = await api('/api/order-collab', {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ role: 'MERCHANT', action: 'NOTE', orderId: created.body.data.id, note: '已安排配送员出发前联系您。' })
+  });
+  assert.equal(replied.response.status, 200);
+  assert.equal(replied.body.data.collaboration.unrepliedMessage, null);
+
+  store.update((data) => {
+    data.patrolState = { ...data.patrolState, lastRunAt: '' };
+  });
+  await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  alert = (store.read().slaAlerts || []).find((item) => (
+    item.ruleKey === 'ORDER_USER_MESSAGE' && item.businessId === created.body.data.id
+  ));
+  assert.equal(alert.status, 'RESOLVED');
+});
+
 test('free plate assistance waits until the linked bike order is paid', async () => {
   const session = await loginWeChat('unpaid_plate_user');
   store.update((data) => {
