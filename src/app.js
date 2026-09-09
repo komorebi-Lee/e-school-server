@@ -3207,7 +3207,7 @@ function createApp({
     // 低质商品自动下架要直接影响商家服务分：不是只把单件商品藏起来，而是让商家重视整改。
     const complianceWindowStart = new Date(new Date(now).getTime() - 30 * 24 * 3600 * 1000).toISOString();
     const merchantComplianceProducts = (data.products || []).filter((item) => item.merchantId === merchant.id
-      && item.autoDelistRule === 'LOW_QUALITY'
+      && ['LOW_QUALITY', 'SERVICE_RISK'].includes(item.autoDelistRule)
       && item.autoDelistAt
       && String(item.autoDelistAt) >= complianceWindowStart);
     const activeAutoDelistCount = merchantComplianceProducts.filter((item) => item.active === false).length;
@@ -3850,32 +3850,52 @@ function createApp({
     const averageRating = reviews.length
       ? reviews.reduce((sum, review) => sum + Number(review.rating || 0), 0) / reviews.length
       : 0;
-    const violationCount = lowRatingCount;
     const lowReviewLimit = Math.max(1, Number(data?.adminSettings?.productComplianceLowReviewThreshold ?? 3));
     const reviewSampleLimit = Math.max(2, Number(data?.adminSettings?.productComplianceReviewSampleThreshold ?? 3));
     const averageLimit = Math.max(1, Math.min(4.5, Number(data?.adminSettings?.productComplianceAverageRatingThreshold ?? 3.5)));
-    const violation = violationCount >= lowReviewLimit
+    const overdueAfterSaleLimit = Math.max(1, Number(data?.adminSettings?.productComplianceOverdueAfterSaleThreshold ?? 2));
+    const orderById = new Map((data.orders || []).map((order) => [order.id, order]));
+    const overdueAfterSales = (data.afterSales || []).filter((record) => {
+      if (record.status === 'CLOSED') return false;
+      const order = orderById.get(record.orderId);
+      if (!order || !(order.items || []).some((item) => item.productId === product.id)) return false;
+      const now = Date.now();
+      const responseOverdue = record.responseDueAt && new Date(record.responseDueAt).getTime() < now;
+      const resolutionOverdue = record.resolutionDueAt && new Date(record.resolutionDueAt).getTime() < now;
+      return responseOverdue || resolutionOverdue;
+    });
+    const overdueAfterSaleCount = overdueAfterSales.length;
+    const reviewViolation = lowRatingCount >= lowReviewLimit
       || (reviews.length >= reviewSampleLimit && averageRating > 0 && averageRating < averageLimit);
+    const serviceViolation = overdueAfterSaleCount >= overdueAfterSaleLimit;
+    const violation = reviewViolation || serviceViolation;
+    const rule = serviceViolation ? 'SERVICE_RISK' : 'LOW_QUALITY';
+    const reason = serviceViolation
+      ? `售后超时达到 ${overdueAfterSaleCount} 单，超过 ${overdueAfterSaleLimit} 单阈值`
+      : (lowRatingCount >= lowReviewLimit
+        ? `低分评价达到 ${lowRatingCount} 条`
+        : `${reviews.length} 条已购评价均分 ${Math.round(averageRating * 10) / 10}，低于 ${averageLimit} 分`);
     return {
       reviewCount: reviews.length,
       lowRatingCount,
+      overdueAfterSaleCount,
       thresholds: {
         lowReviewLimit,
         reviewSampleLimit,
-        averageLimit
+        averageLimit,
+        overdueAfterSaleLimit
       },
       averageRating: Math.round(averageRating * 10) / 10,
-      violationCount,
+      reviewViolation,
+      serviceViolation,
+      rule,
+      reason,
       violation
     };
   }
 
   function productComplianceReason(metrics) {
-    const thresholds = metrics.thresholds || {};
-    if (metrics.lowRatingCount >= (thresholds.lowReviewLimit || 3)) {
-      return `低分评价达到 ${metrics.lowRatingCount} 条`;
-    }
-    return `${metrics.reviewCount} 条已购评价均分 ${metrics.averageRating}，低于 ${thresholds.averageLimit || 3.5} 分`;
+    return metrics.reason || '触发商品风控规则';
   }
 
   function enforceProductCompliance(data, now = new Date().toISOString()) {
@@ -3885,7 +3905,7 @@ function createApp({
       const metrics = productComplianceMetrics(product, data);
       if (metrics.violation && product.active) {
         product.active = false;
-        product.autoDelistRule = 'LOW_QUALITY';
+        product.autoDelistRule = metrics.rule;
         product.autoDelistReason = productComplianceReason(metrics);
         product.autoDelistEvidence = metrics;
         product.autoDelistAt = now;
@@ -3898,13 +3918,13 @@ function createApp({
         }
         addMerchantScoreLog(data, { id: product.merchantId, name: '' }, {
           type: 'AUTO_DELIST',
-          note: `商品「${product.name}」触发低质自动下架：${product.autoDelistReason}`
+          note: `商品「${product.name}」触发风控自动下架：${product.autoDelistReason}`
         }, now);
         addAudit(data, '商品自动下架', product.name);
         notifyMerchantScore(data, product.merchantId, 'PRODUCT_AUTO_DELIST', '商品已自动下架',
-          `商品「${product.name}」触发低质规则：${product.autoDelistReason}。请完成整改后联系平台复核。`, now);
+          `商品「${product.name}」触发风控规则：${product.autoDelistReason}。请完成整改后联系平台复核。`, now);
         actions.push({ productId: product.id, action: 'DELIST', metrics });
-      } else if (!metrics.violation && product.autoDelistRule === 'LOW_QUALITY') {
+      } else if (!metrics.violation && ['LOW_QUALITY', 'SERVICE_RISK'].includes(product.autoDelistRule)) {
         product.active = true;
         product.autoDelistRestoredAt = now;
         product.autoDelistStatus = 'AUTO_RESTORED';
@@ -5247,7 +5267,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 favoriteCount,
                 favoriteDemandText: favoriteDemandText(favoriteCount),
                 restockHint: productRestockHint(product, salesCount, stockThreshold, favoriteCount),
-                complianceCase: product.autoDelistRule === 'LOW_QUALITY' && complianceCase ? {
+                complianceCase: ['LOW_QUALITY', 'SERVICE_RISK'].includes(product.autoDelistRule) && complianceCase ? {
                   id: complianceCase.id,
                   caseNo: complianceCase.caseNo,
                   status: complianceCase.status,
@@ -5475,7 +5495,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const productId = requireString(body.productId, 'productId', { maxLength: 80 });
             const product = data.products.find((item) => item.id === productId
               && item.merchantId === merchant.id
-              && item.autoDelistRule === 'LOW_QUALITY'
+              && ['LOW_QUALITY', 'SERVICE_RISK'].includes(item.autoDelistRule)
               && item.active === false);
             if (!product) throw new ApiError(404, 'DELISTED_PRODUCT_NOT_FOUND', '未找到待整改的自动下架商品');
           }
@@ -6301,7 +6321,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             settingChangeLogs: (data.settingChangeLogs || []).slice(0, 20),
             serviceScoreCases: (data.serviceScoreCases || []).slice(0, 80),
             autoDelistedProducts: (data.products || [])
-              .filter((product) => product.autoDelistRule === 'LOW_QUALITY' && !product.active)
+              .filter((product) => ['LOW_QUALITY', 'SERVICE_RISK'].includes(product.autoDelistRule) && !product.active)
               .map((product) => ({
                 id: product.id,
                 name: product.name,
@@ -6310,6 +6330,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 reason: product.autoDelistReason || '',
                 metrics: product.autoDelistEvidence || {},
                 status: product.autoDelistStatus || 'DELISTED',
+                autoDelistRule: product.autoDelistRule || '',
                 caseNo: product.autoDelistCaseNo || '',
                 reviewNote: product.autoDelistReviewNote || '',
                 restoredAt: product.autoDelistRestoredAt || ''
@@ -7287,7 +7308,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           if (decision === 'APPROVE' && caseRecord.type === 'RECTIFY') {
             const restoredProducts = (data.products || []).filter((item) => item.merchantId === merchant.id
-              && item.autoDelistRule === 'LOW_QUALITY' && item.active === false
+              && ['LOW_QUALITY', 'SERVICE_RISK'].includes(item.autoDelistRule) && item.active === false
               && (!caseRecord.productId || item.id === caseRecord.productId))
               .map((product) => restoreAutoDelistedProduct(data, product, merchant, caseRecord, note.trim(), now));
             caseRecord.restoredProductIds = restoredProducts;
@@ -7409,8 +7430,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const result = store.update((data) => {
           const product = data.products.find((item) => item.id === adminProductComplianceMatch[1]);
           if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
-          if (product.autoDelistRule !== 'LOW_QUALITY') {
-            throw new ApiError(409, 'PRODUCT_NOT_AUTO_DELISTED', '仅低质规则自动下架的商品可以人工恢复');
+          if (!['LOW_QUALITY', 'SERVICE_RISK'].includes(product.autoDelistRule)) {
+            throw new ApiError(409, 'PRODUCT_NOT_AUTO_DELISTED', '仅风控自动下架的商品可以人工恢复');
           }
           const now = new Date().toISOString();
           const merchant = (data.merchants || []).find((item) => item.id === product.merchantId);
@@ -7542,6 +7563,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const value = Number(body.productComplianceAverageRatingThreshold);
             if (!Number.isFinite(value) || value < 1 || value > 4.5) throw new ApiError(400, 'VALIDATION_ERROR', '均分下架阈值需为 1-4.5 分');
             current.productComplianceAverageRatingThreshold = Math.round(value * 10) / 10;
+          }
+          if (body.productComplianceOverdueAfterSaleThreshold !== undefined) {
+            const value = Number(body.productComplianceOverdueAfterSaleThreshold);
+            if (!Number.isInteger(value) || value < 1 || value > 20) throw new ApiError(400, 'VALIDATION_ERROR', '售后超时下架阈值需为 1-20 单');
+            current.productComplianceOverdueAfterSaleThreshold = value;
           }
           for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'slaWarningTemplateId', 'favoritePriceNoticeTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'restockNoticeTemplateId', 'afterSaleTemplateId', 'leadFollowUpTemplateId']) {
             if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);

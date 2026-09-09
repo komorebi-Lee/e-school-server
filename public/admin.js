@@ -842,10 +842,10 @@ function scoresView() {
       <td><span class="badge ${item.status === 'COMPLETED' ? 'green' : item.status === 'REJECTED' ? 'red' : 'orange'}">${esc(label(item.status))}</span>${item.appliedAdjustment ? `<small>补分 +${item.appliedAdjustment}</small>` : ''}${item.adminNote ? `<small>${esc(item.adminNote)}</small>` : ''}</td>
       <td>${item.status === 'SUBMITTED' ? `<div class="row-actions"><button class="text-button review-score-case" data-id="${esc(item.id)}" data-decision="APPROVE">通过</button><button class="text-button review-score-case" data-id="${esc(item.id)}" data-decision="REJECT">驳回</button></div>` : '已处理'}</td>
     </tr>`).join('') || `<tr><td colspan="6" class="empty">暂无申诉或整改工单</td></tr>`}</tbody></table></div></section>`;
-  const autoDelistPanel = `<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>低质自动下架</h2><span>复核后可恢复展示</span></div><div class="table-wrap"><table><thead><tr><th>商品</th><th>商家</th><th>触发依据</th><th>整改状态</th><th>操作</th></tr></thead><tbody>${autoDelisted.map((item) => `<tr>
+  const autoDelistPanel = `<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>风控自动下架</h2><span>复核后可恢复展示</span></div><div class="table-wrap"><table><thead><tr><th>商品</th><th>商家</th><th>触发依据</th><th>整改状态</th><th>操作</th></tr></thead><tbody>${autoDelisted.map((item) => `<tr>
       <td><strong>${esc(item.name)}</strong><small>${esc(item.id)}</small></td>
       <td>${esc(item.merchantName || '')}</td>
-      <td>${esc(item.reason)}<small>低分 ${item.metrics?.lowRatingCount || 0} 条 · 均分 ${item.metrics?.averageRating || 0}</small></td>
+      <td>${esc(item.reason)}<small>${item.autoDelistRule === 'SERVICE_RISK' ? `售后超时 ${item.metrics?.overdueAfterSaleCount || 0} 单` : `低分 ${item.metrics?.lowRatingCount || 0} 条 · 均分 ${item.metrics?.averageRating || 0}`}</small></td>
       <td><span class="badge orange">${esc({ DELISTED: '待整改', REVIEW_PENDING: '整改待复核', REVIEW_REJECTED: '整改未通过' }[item.status] || '处理中')}</span>${item.caseNo ? `<small>工单 ${esc(item.caseNo)}</small>` : ''}<small>${esc(item.reviewNote || '待商家提交整改')}</small></td>
       <td><button class="text-button restore-compliance" data-id="${esc(item.id)}">复核恢复</button></td>
     </tr>`).join('') || `<tr><td colspan="5" class="empty">暂无自动下架商品</td></tr>`}</tbody></table></div></section>`;

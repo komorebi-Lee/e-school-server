@@ -4242,6 +4242,83 @@ test('low quality products are auto delisted and can be restored after complianc
   assert.ok(refreshed.body.data.some((item) => item.id === 'prod_ebike_001'));
 });
 
+test('service risk overdue after-sales trigger product auto delist and restore', async () => {
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ productComplianceOverdueAfterSaleThreshold: 1 })
+  });
+
+  store.update((data) => {
+    data.products.unshift({
+      id: 'prod_service_risk_001', name: '售后超时风控测试车', category: 'E_BIKE_NEW',
+      description: '验证售后超时会触发服务风险下架', priceInCents: 99000, stock: 3,
+      campusIds: ['campus_demo'], imageUrl: '', merchantId: 'merchant_001', active: true
+    });
+  });
+
+  const buyer = await loginWeChat('service_risk_buyer');
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_service_risk_001', quantity: 1 }] })
+  });
+  assert.equal(created.response.status, 201);
+  const paid = await confirmPayment(created.body.paymentOrder.id, buyer.token);
+  assert.equal(paid.response.status, 200);
+  const orderId = created.body.data.id;
+
+  const afterSale = await api('/api/after-sales', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${buyer.token}` },
+    body: JSON.stringify({ orderId, type: 'REPAIR', reason: '电池仓异响，需要上门检查。' })
+  });
+  assert.equal(afterSale.response.status, 201);
+  const afterSaleId = afterSale.body.data.id;
+  store.update((data) => {
+    const record = data.afterSales.find((item) => item.id === afterSaleId);
+    record.responseDueAt = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+    record.resolutionDueAt = new Date(Date.now() - 1 * 3600 * 1000).toISOString();
+    data.patrolState = { ...data.patrolState, lastRunAt: '' };
+  });
+
+  const patrol = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(patrol.response.status, 200);
+  const riskOverview = await api('/api/admin/overview', { headers: adminHeaders });
+  const riskProduct = riskOverview.body.data.autoDelistedProducts.find((item) => item.id === 'prod_service_risk_001');
+  assert.ok(riskProduct, 'overdue after-sales should auto delist the linked product');
+  assert.equal(riskProduct.autoDelistRule, 'SERVICE_RISK');
+  assert.equal(riskProduct.metrics.overdueAfterSaleCount, 1);
+
+  store.update((data) => {
+    const record = data.afterSales.find((item) => item.id === afterSaleId);
+    record.status = 'CLOSED';
+    record.updatedAt = new Date().toISOString();
+    const order = data.orders.find((item) => item.id === orderId);
+    order.status = 'COMPLETED';
+    order.updatedAt = new Date().toISOString();
+  });
+
+  const restored = await api('/api/products?category=E_BIKE_NEW');
+  assert.equal(restored.response.status, 200);
+  assert.ok(restored.body.data.some((item) => item.id === 'prod_service_risk_001'));
+  const productState = store.read().products.find((item) => item.id === 'prod_service_risk_001');
+  assert.equal(productState.active, true);
+  assert.equal(productState.autoDelistStatus, 'AUTO_RESTORED');
+
+  store.update((data) => {
+    data.products = data.products.filter((item) => item.id !== 'prod_service_risk_001');
+    data.orders = data.orders.filter((item) => item.id !== orderId);
+    data.afterSales = data.afterSales.filter((item) => item.id !== afterSaleId);
+  });
+  await api('/api/admin/settings', {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ productComplianceOverdueAfterSaleThreshold: 2 })
+  });
+});
+
 test('order notifications queue and dispatch to subscribed users', async () => {
   const session = await loginWeChat('message_user');
   const subscription = await api('/api/order-message-subscriptions', {
