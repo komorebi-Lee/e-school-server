@@ -843,6 +843,73 @@ test('after-sale request checks order ownership and prevents duplicates', async 
   assert.equal(duplicate.response.status, 409);
 });
 
+test('merchants can reject after-sales and users can appeal to the platform', async () => {
+  const session = await loginWeChat('after_sale_reject_buyer');
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  const merchantHeaders = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  store.update((data) => {
+    data.products.unshift({
+      id: 'prod_after_sale_reject_001', name: '售后拒绝流程车', category: 'E_BIKE_NEW',
+      description: '验证售后拒绝后订单恢复与平台协助', priceInCents: 88000, stock: 2,
+      campusIds: ['campus_demo'], imageUrl: '', merchantId: 'merchant_001', active: true
+    });
+  });
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ items: [{ productId: 'prod_after_sale_reject_001', quantity: 1 }] })
+  });
+  assert.equal(created.response.status, 201);
+  const orderId = created.body.data.id;
+  await confirmPayment(created.body.paymentOrder.id, session.token);
+
+  const afterSale = await api('/api/after-sales', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ orderId, type: 'REPAIR', reason: '车辆灯不亮，希望检修。' })
+  });
+  assert.equal(afterSale.response.status, 201);
+  const afterSaleId = afterSale.body.data.id;
+  assert.equal(afterSale.body.data.status, 'SUBMITTED');
+
+  const invalidReject = await api(`/api/merchant/after-sales/${afterSaleId}/status`, {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ status: 'REJECTED' })
+  });
+  assert.equal(invalidReject.response.status, 400);
+
+  const rejected = await api(`/api/merchant/after-sales/${afterSaleId}/status`, {
+    method: 'POST', headers: merchantHeaders,
+    body: JSON.stringify({ status: 'REJECTED', resolutionNote: '车灯开关未开启，现场可正常使用。' })
+  });
+  assert.equal(rejected.response.status, 200);
+  assert.equal(rejected.body.data.status, 'REJECTED');
+  assert.equal(rejected.body.data.resolutionNote, '车灯开关未开启，现场可正常使用。');
+
+  const orderDetail = await api(`/api/orders/${orderId}`, { headers: { authorization: `Bearer ${session.token}` } });
+  assert.equal(orderDetail.body.data.status, 'PAID');
+  const notices = await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } });
+  assert.ok(notices.body.data.some((item) => item.type === 'AFTER_SALE' && item.title === '售后申请未通过'));
+
+  const appealed = await api('/api/order-collab', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ role: 'USER', action: 'APPEAL', orderId, note: '我已确认灯泡损坏，请平台协助。' })
+  });
+  assert.equal(appealed.response.status, 200);
+  assert.equal(appealed.body.data.collaboration.intervention.status, 'REQUESTED');
+
+  store.update((data) => {
+    data.orders = data.orders.filter((item) => item.id !== orderId);
+    data.afterSales = data.afterSales.filter((item) => item.id !== afterSaleId);
+    data.products = data.products.filter((item) => item.id !== 'prod_after_sale_reject_001');
+    data.paymentOrders = data.paymentOrders.filter((item) => item.businessId !== orderId);
+    data.notifications = (data.notifications || []).filter((item) => item.metadata?.focusId !== orderId);
+  });
+});
+
 test('delivery orders require valid campus fulfillment details', async () => {
   const session = await loginWeChat('delivery_user');
   const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);

@@ -29,7 +29,7 @@ const adminOrderStatuses = {
   'recharge-orders': new Set(['PENDING_PAYMENT', 'PENDING_CREDIT', 'CREDITED', 'CANCELLED', 'REJECTED']),
   'broadband-applications': new Set(['PENDING_VERIFY', 'APPROVED', 'REJECTED']),
   'plate-applications': new Set(['PENDING_PAYMENT', 'MATERIAL_PENDING', 'REVIEWING', 'COMPLETED', 'REJECTED']),
-  'after-sales': new Set(['SUBMITTED', 'REVIEWING', 'CLOSED'])
+  'after-sales': new Set(['SUBMITTED', 'REVIEWING', 'CLOSED', 'REJECTED'])
 };
 const allowedPaymentStatuses = new Set(['PENDING', 'PAID', 'CANCELLED', 'PARTIALLY_REFUNDED', 'REFUNDED']);
 const identityVerifications = new Map();
@@ -5718,8 +5718,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && merchantAfterSaleMatch) {
         const body = await readJson(request);
         const status = requireString(body.status, 'status', { maxLength: 30 });
-        if (!['SUBMITTED', 'REVIEWING', 'CLOSED'].includes(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant after-sale status');
-        const resolutionNote = status === 'CLOSED' ? requireString(body.resolutionNote, 'resolutionNote', { maxLength: 500 }) : '';
+        if (!['SUBMITTED', 'REVIEWING', 'CLOSED', 'REJECTED'].includes(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant after-sale status');
+        const resolutionNote = ['CLOSED', 'REJECTED'].includes(status) ? requireString(body.resolutionNote, 'resolutionNote', { maxLength: 500 }) : '';
         const afterSale = store.update((data) => {
           const item = (data.afterSales || []).find((record) => record.id === merchantAfterSaleMatch[1]);
           if (!item) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', 'After-sale record not found');
@@ -5730,7 +5730,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!order) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', 'After-sale record not found');
           item.status = status;
           item.updatedAt = new Date().toISOString();
-          if (status === 'CLOSED') item.resolutionNote = resolutionNote;
+          if (['CLOSED', 'REJECTED'].includes(status)) item.resolutionNote = resolutionNote;
           if (status === 'CLOSED' && item.type === 'REFUND') {
             const refundResult = item.refundItems?.length
               ? applyPartialOrderRefund(data, order, item, item.updatedAt)
@@ -5745,6 +5745,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             addNotification(data, order.userId, 'AFTER_SALE', '售后处理完成', resolutionNote, { focusId: order.id });
           }
           if (status === 'REVIEWING') addNotification(data, order.userId, 'AFTER_SALE', '售后正在处理', '商家已开始处理您的售后申请。', { focusId: order.id });
+          if (status === 'REJECTED') {
+            order.status = order.statusBeforeAfterSale || order.status;
+            order.updatedAt = item.updatedAt;
+            unfreezeOrderSettlements(data, order, item.updatedAt);
+            item.rejectedAt = item.updatedAt;
+            appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_REJECTED', `商家未通过本次售后申请：${resolutionNote}`);
+            addNotification(data, order.userId, 'AFTER_SALE', '售后申请未通过', `${item.typeLabel}：${resolutionNote}`, { focusId: order.id });
+          }
           addAudit(data, '商家更新售后状态', item.id);
           return item;
         });
@@ -6496,7 +6504,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const data = store.read();
         const merchants = data.merchants || [];
           const userAfterSales = (data.afterSales || []).filter(item => item.userId === userId);
-          const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, statusLabel:order.paymentStatus === 'PARTIALLY_REFUNDED' ? '部分退款' : (statusLabels[order.status]||order.status), collaboration:order.collaboration || createCollaboration(order, order.items?.[0]?.merchantId || ''), merchantName:merchants.find(merchant=>merchant.id===order.collaboration?.merchantId)?.name || '平台自营', plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '', afterSales:userAfterSales.filter(item=>item.orderId===order.id).sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt))).map(({userId,...record})=>({ ...record, statusLabel:{SUBMITTED:'待处理',REVIEWING:'处理中',CLOSED:'已完成'}[record.status]||record.status })) }));
+          const ebikeOrders = (data.orders || []).filter(item => item.userId === userId).map(order => ({ ...order, statusLabel:order.paymentStatus === 'PARTIALLY_REFUNDED' ? '部分退款' : (statusLabels[order.status]||order.status), collaboration:order.collaboration || createCollaboration(order, order.items?.[0]?.merchantId || ''), merchantName:merchants.find(merchant=>merchant.id===order.collaboration?.merchantId)?.name || '平台自营', plateApplicationId:((data.plateApplications||[]).find(plate=>(plate.relatedIds?.platformOrderIds||[]).includes(order.id))||{}).id || '', afterSales:userAfterSales.filter(item=>item.orderId===order.id).sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt))).map(({userId,...record})=>({ ...record, statusLabel:{SUBMITTED:'待处理',REVIEWING:'处理中',CLOSED:'已完成',REJECTED:'未通过'}[record.status]||record.status })) }));
         const serviceRecords = (() => {
           const phoneCardOrders=(data.phoneCardOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'PHONE_PLAN', typeLabel:'电话卡', title:item.planName, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.amountInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', paymentExpiresAt:item.paymentExpiresAt || '', cancelReason:item.cancelReason || '', relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
           const rechargeOrders=(data.rechargeOrders||[]).filter(item=>item.userId===userId).map(item=>({ id:item.id, recordNo:item.id, type:'RECHARGE', typeLabel:'话费权益', title:`充${((item.paidInCents||0)/100).toFixed(0)}送${((item.receiveInCents||0)/100).toFixed(0)}`, status:item.status, statusLabel:statusLabels[item.status]||item.status, amountInCents:item.paidInCents||0, paymentOrderId:item.paymentOrderId || '', paymentStatus:item.paymentStatus || '', paymentExpiresAt:item.paymentExpiresAt || '', cancelReason:item.cancelReason || '', relatedIds:item.relatedIds||{}, collaboration:item.collaboration||null, createdAt:item.createdAt, updatedAt:item.updatedAt||item.createdAt }));
@@ -6965,7 +6973,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && adminStatusMatch) {
         const body = await readJson(request);
         const status = requireString(body.status, 'status', { maxLength: 50 });
-        const resolutionNote = adminStatusMatch[1] === 'after-sales' && status === 'CLOSED'
+        const resolutionNote = adminStatusMatch[1] === 'after-sales' && ['CLOSED', 'REJECTED'].includes(status)
           ? requireString(body.resolutionNote, 'resolutionNote', { maxLength: 500 })
           : '';
         const collectionMap = { orders: 'orders', 'phone-card-orders': 'phoneCardOrders', 'recharge-orders': 'rechargeOrders', 'broadband-applications': 'broadbandApplications', 'plate-applications': 'plateApplications', 'after-sales': 'afterSales' };
@@ -7007,7 +7015,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           'after-sales': {
             SUBMITTED:['AFTER_SALE','售后已受理','您的售后请求已受理，预计 24 小时内响应。'],
             REVIEWING:['AFTER_SALE','售后处理中','客服正在处理您的售后请求。'],
-            CLOSED:['AFTER_SALE','售后已关闭','您的售后工单已关闭。']
+            CLOSED:['AFTER_SALE','售后已关闭','您的售后工单已关闭。'],
+            REJECTED:['AFTER_SALE','售后申请未通过','商家未通过本次售后申请，您可申请平台协助。']
           }
         };
         if (!adminOrderStatuses[adminStatusMatch[1]].has(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported status');
@@ -7064,6 +7073,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             );
             addAudit(data, providedCode ? '平台核验交付码完成订单' : '平台代履约完成订单', item.orderNo);
           }
+          if (adminStatusMatch[1] === 'after-sales' && status === 'REJECTED') {
+            const order = (data.orders || []).find((row) => row.id === item.orderId);
+            if (order) {
+              order.status = order.statusBeforeAfterSale || order.status;
+              order.updatedAt = item.updatedAt;
+              unfreezeOrderSettlements(data, order, item.updatedAt);
+              appendCollaborationEvent(order, 'PLATFORM', 'AFTER_SALE_REJECTED', `平台未通过本次售后申请：${resolutionNote}`);
+            }
+            item.rejectedAt = item.updatedAt;
+            item.resolutionNote = resolutionNote;
+          }
           if (adminStatusMatch[1] === 'after-sales' && status === 'CLOSED') {
             const order = (data.orders || []).find((row) => row.id === item.orderId);
             if (order && item.type === 'REFUND' && item.refundItems?.length) applyPartialOrderRefund(data, order, item, item.updatedAt);
@@ -7082,11 +7102,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (adminStatusMatch[1] === 'orders' && status === 'AFTER_SALE') {
             freezeOrderSettlements(data, item, item.updatedAt, '平台已将订单转入售后');
           }
-          const template = adminStatusMatch[1] === 'after-sales' && status === 'CLOSED'
+          const template = adminStatusMatch[1] === 'after-sales' && ['CLOSED', 'REJECTED'].includes(status)
             ? null
             : notificationTemplates[adminStatusMatch[1]]?.[status];
           if (adminStatusMatch[1] === 'after-sales' && status === 'CLOSED' && item.userId) {
             sendOrderNotification(data, item.userId, 'AFTER_SALE', '售后处理完成', resolutionNote, item.updatedAt, { focusId: item.orderId || item.id });
+          }
+          if (adminStatusMatch[1] === 'after-sales' && status === 'REJECTED' && item.userId) {
+            sendOrderNotification(data, item.userId, 'AFTER_SALE', '售后申请未通过', `${item.typeLabel}：${resolutionNote}`, item.updatedAt, { focusId: item.orderId || item.id });
           }
           if (template && item.userId) {
             const detail = item.planName || item.vehicleModel || item.reason || item.orderNo || item.id;

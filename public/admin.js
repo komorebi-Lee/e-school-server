@@ -3,14 +3,14 @@ const state={data:null,view:'dashboard',query:'',status:'ALL',ownerFilter:'ALL',
 const lowStockThreshold=Number((state.data.settings||{}).lowStockThreshold??10);
 const titles={dashboard:'经营概览',merchants:'商家入驻',qualification:'资质复审',products:'商品中心',stock:'库存流水',promos:'话费活动',reviews:'商品评价',orders:'电瓶车订单',payments:'支付单',phones:'电话卡订单',recharges:'话费权益',finance:'财务流水',broadband:'宽带资格',plates:'牌照辅助',afterSales:'售后工单',notifications:'站内通知',logs:'操作日志',settings:'运营设置',settlements:'商家结算',payouts:'商家提现',patrol:'超时预警',scores:'商家服务分'};
 titles.serviceCollabs='服务单协同';
-const statuses={PENDING_PAYMENT:'待支付',PAID:'已支付',FULFILLING:'配送中',COMPLETED:'已完成',CANCELLED:'已取消',PENDING:'待支付',EXPIRED:'支付超时',PARTIALLY_REFUNDED:'部分退款',REFUNDED:'已退款',PENDING_REALNAME:'待实名',ACTIVATED:'已激活',PENDING_CREDIT:'待到账',CREDITED:'已到账',PENDING_VERIFY:'待核验',APPROVED:'已通过',REJECTED:'未通过',MATERIAL_PENDING:'待材料',REVIEWING:'处理中',SUBMITTED:'待审核',CLOSED:'已关闭',AFTER_SALE:'售后中',PUBLISHED:'已展示',HIDDEN:'已隐藏',PENDING_SETTLE:'可结算',SETTLED:'已结算',PENDING_DELIVERY:'待交付核验',IN_ACCOUNT_PERIOD:'账期中',FROZEN:'售后冻结',PAYOUT_REQUESTED:'提现待审核',PENDING_REVIEW:'待审核',OPEN:'待认领',ACKNOWLEDGED:'已认领',RESOLVED:'已关闭',OVERDUE:'已超时',WARNING:'即将超时',NORMAL:'正常经营',LIMITED:'限流整改',RESTRICTED:'暂停上新',EXCELLENT:'优秀',GOOD:'良好',WATCH:'观察',RISK:'高风险',AUTO:'自动上架',MATCHED:'账实相符',DIFFERENCES:'存在差异'};
+const statuses={PENDING_PAYMENT:'待支付',PAID:'已支付',FULFILLING:'配送中',COMPLETED:'已完成',CANCELLED:'已取消',PENDING:'待支付',EXPIRED:'支付超时',PARTIALLY_REFUNDED:'部分退款',REFUNDED:'已退款',PENDING_REALNAME:'待实名',ACTIVATED:'已激活',PENDING_CREDIT:'待到账',CREDITED:'已到账',PENDING_VERIFY:'待核验',APPROVED:'已通过',REJECTED:'未通过',MATERIAL_PENDING:'待材料',REVIEWING:'处理中',SUBMITTED:'待审核',CLOSED:'已关闭',AFTER_SALE:'售后中',REJECTED:'未通过',PUBLISHED:'已展示',HIDDEN:'已隐藏',PENDING_SETTLE:'可结算',SETTLED:'已结算',PENDING_DELIVERY:'待交付核验',IN_ACCOUNT_PERIOD:'账期中',FROZEN:'售后冻结',PAYOUT_REQUESTED:'提现待审核',PENDING_REVIEW:'待审核',OPEN:'待认领',ACKNOWLEDGED:'已认领',RESOLVED:'已关闭',OVERDUE:'已超时',WARNING:'即将超时',NORMAL:'正常经营',LIMITED:'限流整改',RESTRICTED:'暂停上新',EXCELLENT:'优秀',GOOD:'良好',WATCH:'观察',RISK:'高风险',AUTO:'自动上架',MATCHED:'账实相符',DIFFERENCES:'存在差异'};
 const endpointTypes={orders:'orders',phones:'phone-card-orders',recharges:'recharge-orders',broadband:'broadband-applications',plates:'plate-applications',afterSales:'after-sales'};
 const collections={orders:'orders',payments:'paymentOrders',phones:'phoneCardOrders',recharges:'rechargeOrders',broadband:'broadbandApplications',plates:'plateApplications',afterSales:'afterSales',finance:'financeEvents',settlements:'settlements',payouts:'payoutRequests',patrol:'slaAlerts',scores:'merchantScores'};
 const financeTypeLabels={PAYMENT:'支付收入',REFUND:'退款支出',PAYOUT:'商家打款'};
 const merchantCategoryLabels={E_BIKE:'电动车/维修',DIGITAL:'数码配件',FOOD:'食品生鲜',LIFE_SERVICE:'生活服务'};
 const productCategoryLabels={E_BIKE_NEW:'电瓶车',PHONE_PLAN:'电话套餐',RECHARGE_PROMO:'话费权益',SERVICE:'服务'};
 const merchantTypeLabels={INDIVIDUAL:'个体工商户',ENTERPRISE:'企业/公司',PERSONAL:'个人身份'};
-const options={orders:['PENDING_PAYMENT','PAID','FULFILLING','COMPLETED','CANCELLED','AFTER_SALE'],phones:['PENDING_PAYMENT','PENDING_REALNAME','ACTIVATED','CANCELLED','REJECTED'],recharges:['PENDING_PAYMENT','PENDING_CREDIT','CREDITED','CANCELLED','REJECTED'],broadband:['PENDING_VERIFY','APPROVED','REJECTED'],plates:['PENDING_PAYMENT','MATERIAL_PENDING','REVIEWING','COMPLETED','REJECTED'],afterSales:['SUBMITTED','REVIEWING','CLOSED']};
+const options={orders:['PENDING_PAYMENT','PAID','FULFILLING','COMPLETED','CANCELLED','AFTER_SALE'],phones:['PENDING_PAYMENT','PENDING_REALNAME','ACTIVATED','CANCELLED','REJECTED'],recharges:['PENDING_PAYMENT','PENDING_CREDIT','CREDITED','CANCELLED','REJECTED'],broadband:['PENDING_VERIFY','APPROVED','REJECTED'],plates:['PENDING_PAYMENT','MATERIAL_PENDING','REVIEWING','COMPLETED','REJECTED'],afterSales:['SUBMITTED','REVIEWING','CLOSED','REJECTED']};
 const money=c=>`¥${((c||0)/100).toLocaleString('zh-CN',{minimumFractionDigits:2})}`;const fmtDate=v=>v?new Date(v).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):'—';const label=v=>statuses[v]||v||'—';const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 function badgeClass(v){return/COMPLETED|ACTIVATED|CREDITED|APPROVED/.test(v)?'green':/PENDING|MATERIAL|SUBMITTED/.test(v)?'orange':/PAID|FULFILLING|REVIEWING/.test(v)?'blue':/CANCELLED|REJECTED/.test(v)?'red':''}
 function authHeaders(extra={}){return{...extra,authorization:`Bearer ${state.token}`}}
@@ -317,7 +317,7 @@ async function saveStatus(button){
       payload.deliveryCode=deliveryCode.trim();
     }
   }
-  if(button.dataset.view==='afterSales'&&select.value==='CLOSED'){
+  if(button.dataset.view==='afterSales'&&['CLOSED','REJECTED'].includes(select.value)){
     const resolutionNote=prompt('请填写售后处理结论（必填）','已与用户确认并完成处理');
     if(!resolutionNote?.trim())return showToast('请先填写处理结论');
     payload.resolutionNote=resolutionNote.trim();
