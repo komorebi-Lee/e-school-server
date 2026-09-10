@@ -1604,6 +1604,12 @@ test('phone card service record can apply for broadband once', async () => {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminActivate.body.data.token}` },
     body: JSON.stringify({ status: 'ACTIVATED' })
   });
+  const activatedNotices = await api('/api/my/notifications', {
+    headers: { authorization: `Bearer ${session.token}` }
+  });
+  const activatedNotice = activatedNotices.body.data.find((item) => item.type === 'PHONE_PLAN' && item.title === '电话卡已激活');
+  assert.ok(activatedNotice, 'admin status change should keep the business notification type');
+  assert.equal(activatedNotice.link.includes('recordType=PHONE_PLAN'), true);
   const platformReply = await api('/api/order-collab', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminActivate.body.data.token}` },
     body: JSON.stringify({ role: 'PLATFORM', orderId: recordId, action: 'NOTE', note: '实名审核一般 24 小时内完成。' })

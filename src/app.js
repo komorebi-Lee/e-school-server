@@ -1685,8 +1685,8 @@ function createApp({
     return '';
   }
 
-  function sendOrderNotification(data, userId, templateKey, title, content, now = new Date().toISOString(), metadata = null) {
-    const notification = addNotification(data, userId, templateKey === 'AFTER_SALE' ? 'AFTER_SALE' : 'ORDER', title, content, metadata);
+  function sendOrderNotification(data, userId, templateKey, title, content, now = new Date().toISOString(), metadata = null, notificationType = null) {
+    const notification = addNotification(data, userId, notificationType || (templateKey === 'AFTER_SALE' ? 'AFTER_SALE' : 'ORDER'), title, content, metadata);
     if (!notification) return null;
     if (!(data.orderMessageSubscribers || []).includes(userId)) return { notification, subscribeMessage: null };
     if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
@@ -7448,7 +7448,16 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const message = adminStatusMatch[1] === 'after-sales' && status === 'SUBMITTED'
               ? `您的售后请求已受理，预计 ${publicSettings(data.adminSettings).afterSaleResponseHours} 小时内响应。`
               : template[2];
-            sendOrderNotification(data, item.userId, adminStatusMatch[1] === 'after-sales' ? 'AFTER_SALE' : 'ORDER_STATUS', template[1], `${detail}：${message}`, item.updatedAt, { focusId: item.id, recordType });
+            sendOrderNotification(
+              data,
+              item.userId,
+              adminStatusMatch[1] === 'after-sales' ? 'AFTER_SALE' : 'ORDER_STATUS',
+              template[1],
+              `${detail}：${message}`,
+              item.updatedAt,
+              { focusId: item.id, recordType },
+              adminStatusMatch[1] === 'after-sales' ? 'AFTER_SALE' : template[0]
+            );
           }
           return item;
         });
