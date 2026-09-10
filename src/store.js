@@ -159,6 +159,7 @@ function initialData() {
     patrolState: { lastRunAt: '', runCount: 0, lastCreated: 0, lastResolved: 0, lastOpen: 0 },
     merchantScoreLogs: [],
     merchantScoreSnapshots: [],
+    serviceRiskFollowUps: [],
     settingChangeLogs: [],
     afterSales: [],
     productReviews: seedProductReviews,
@@ -235,7 +236,7 @@ class JsonStore {
       if (!data || !Array.isArray(data.products)) throw new Error('invalid database');
       const defaults = initialData();
       let changed = false;
-      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'addresses', 'productRestockAlerts', 'productFavorites', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'paymentReconciliations', 'financeTasks', 'notifications', 'slaAlerts', 'merchantScoreLogs', 'merchantScoreSnapshots', 'settingChangeLogs', 'adminUsers', 'adminSessions', 'adminLoginFailures']) {
+      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'addresses', 'productRestockAlerts', 'productFavorites', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'paymentReconciliations', 'financeTasks', 'notifications', 'slaAlerts', 'merchantScoreLogs', 'merchantScoreSnapshots', 'serviceRiskFollowUps', 'settingChangeLogs', 'adminUsers', 'adminSessions', 'adminLoginFailures']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) {

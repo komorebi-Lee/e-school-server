@@ -492,12 +492,46 @@ test('admin overview aggregates merchant service risk handling', async () => {
     assert.ok(adminScript.includes('服务风控总览'));
     assert.ok(adminScript.includes('serviceRiskSummary'));
     assert.ok(adminScript.includes("view: 'reviews'"), 'risk panel should jump to review handling');
+    assert.ok(adminScript.includes('urge-service-risk'), 'risk panel should expose one-click merchant urging');
+    assert.ok(adminScript.includes('/api/admin/service-risk/'), 'risk panel should call the follow-up API');
+
+    const urgeNote = `风险催办闭环测试 ${caseId}`;
+    const urge = await fetch(`${riskBaseUrl}/api/admin/service-risk/merchant_001/urge`, {
+      method: 'POST', headers: { ...adminHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ note: urgeNote })
+    });
+    assert.equal(urge.status, 200);
+    const urgeResult = (await urge.json()).data;
+    assert.equal(urgeResult.merchantId, 'merchant_001');
+    assert.equal(urgeResult.urgeCount, 1);
+    assert.equal(urgeResult.lastUrge.note, urgeNote);
+
+    const overviewAfterUrge = await fetch(`${riskBaseUrl}/api/admin/overview`, { headers: adminHeaders });
+    const merchantAfterUrge = (await overviewAfterUrge.json()).data.serviceRiskSummary.merchants
+      .find((item) => item.merchantId === 'merchant_001');
+    assert.equal(merchantAfterUrge.urgeCount, 1);
+    assert.equal(merchantAfterUrge.lastUrge.note, urgeNote);
+
+    const riskState = store.read();
+    assert.ok(riskState.serviceRiskFollowUps.some((item) => item.note === urgeNote));
+    assert.ok(riskState.notifications.some((item) => item.userId === 'wx_merchant_demo'
+      && item.content.includes(urgeNote)));
+    assert.ok(riskState.auditLogs.some((item) => item.action === '催办商家服务风险'
+      && item.target.includes('merchant_001')));
+
+    const duplicateUrge = await fetch(`${riskBaseUrl}/api/admin/service-risk/merchant_001/urge`, {
+      method: 'POST', headers: { ...adminHeaders, 'content-type': 'application/json' },
+      body: JSON.stringify({ note: `${urgeNote} 重复` })
+    });
+    assert.equal(duplicateUrge.status, 409);
   } finally {
     await new Promise((resolve) => riskServer.close(resolve));
     store.update((data) => {
     data.productReviews = data.productReviews.filter((item) => !item.id.startsWith(reviewPrefix));
       data.products = data.products.filter((item) => item.id !== 'prod_service_risk_summary_001');
       data.serviceScoreCases = (data.serviceScoreCases || []).filter((item) => item.id !== caseId);
+      data.serviceRiskFollowUps = (data.serviceRiskFollowUps || [])
+        .filter((item) => item.note !== `风险催办闭环测试 ${caseId}`);
     });
   }
 });

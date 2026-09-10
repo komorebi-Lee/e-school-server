@@ -814,6 +814,17 @@ bindView = function () {
     await load();
   }));
   document.querySelectorAll('.goto-alert').forEach((button) => button.addEventListener('click', () => goView(button.dataset.view)));
+  document.querySelectorAll('.urge-service-risk').forEach((button) => button.addEventListener('click', async () => {
+    const note = prompt('填写催办说明（会同步给商家）', '请在 24 小时内处理超时工单、差评回复或整改事项');
+    if (note === null) return;
+    if (!note.trim()) return showToast('请填写催办说明');
+    await api(`/api/admin/service-risk/${button.dataset.id}/urge`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ note: note.trim() })
+    });
+    showToast('已催办商家');
+    await load();
+  }));
 };
 
 // ===== 商家服务分 =====
@@ -850,10 +861,10 @@ function serviceRiskOverview() {
     return `<article class="risk-card">
       <div class="risk-card-head">
         <div><strong>${esc(item.merchantName)}</strong><small>服务分 ${item.score} · 处置优先级 ${item.riskScore}</small></div>
-        <div class="row-actions"><button class="text-button" data-goto="${action.view}">${action.label}</button><button class="text-button" data-goto="scores">服务分明细</button></div>
+        <div class="row-actions"><button class="text-button" data-goto="${action.view}">${action.label}</button><button class="text-button urge-service-risk" data-id="${esc(item.merchantId)}">催办商家</button><button class="text-button" data-goto="scores">服务分明细</button></div>
       </div>
       <div class="risk-chip-row">${chips}</div>
-      <p>${esc(scoreStageConsequences[item.stage] || '按平台规则持续监控')}</p>
+      <p>${esc(scoreStageConsequences[item.stage] || '按平台规则持续监控')}${item.lastUrge ? `<small>最近催办：${fmtDate(item.lastUrge.createdAt)} · ${esc(item.lastUrge.note)}</small>` : ''}</p>
     </article>`;
   }).join('');
 

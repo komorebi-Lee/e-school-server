@@ -1083,6 +1083,7 @@ function adminPermissionForRequest(pathname) {
   if (pathname.startsWith('/api/admin/merchants')
     || pathname.startsWith('/api/admin/qualification-renewals')
     || pathname.startsWith('/api/admin/merchant-scores')
+    || pathname.startsWith('/api/admin/service-risk')
     || pathname.startsWith('/api/admin/score-cases')) return 'MERCHANT_MANAGE';
   if (pathname.startsWith('/api/admin/orders')
     || pathname.startsWith('/api/admin/phone-card-orders')
@@ -4021,6 +4022,17 @@ function createApp({
       caseGroups.set(item.merchantId, (caseGroups.get(item.merchantId) || 0) + 1);
     }
 
+    const followUpGroups = new Map();
+    for (const item of data.serviceRiskFollowUps || []) {
+      if (!item.merchantId) continue;
+      const group = followUpGroups.get(item.merchantId) || { count: 0, latest: null };
+      group.count += 1;
+      if (!group.latest || String(item.createdAt || '').localeCompare(String(group.latest.createdAt || '')) > 0) {
+        group.latest = item;
+      }
+      followUpGroups.set(item.merchantId, group);
+    }
+
     const delistGroups = new Map();
     for (const product of data.products || []) {
       if (!['LOW_QUALITY', 'SERVICE_RISK'].includes(product.autoDelistRule) || product.active !== false) continue;
@@ -4033,6 +4045,7 @@ function createApp({
         const review = reviewGroups.get(merchant.id) || { open: 0, overdue: 0, dueSoon: 0 };
         const autoDelistedProducts = delistGroups.get(merchant.id) || 0;
         const openScoreCases = caseGroups.get(merchant.id) || 0;
+        const followUps = followUpGroups.get(merchant.id) || { count: 0, latest: null };
         const riskScore = review.overdue * 5 + review.open * 2 + autoDelistedProducts * 4
           + openScoreCases * 3
           + (merchant.serviceScore.stage === 'RESTRICTED' ? 6 : merchant.serviceScore.stage === 'LIMITED' ? 3 : 0);
@@ -4047,6 +4060,14 @@ function createApp({
           review,
           autoDelistedProducts,
           openScoreCases,
+          urgeCount: followUps.count,
+          lastUrge: followUps.latest
+            ? {
+              note: followUps.latest.note || '',
+              operator: followUps.latest.operator || '',
+              createdAt: followUps.latest.createdAt || ''
+            }
+            : null,
           riskScore
         };
       })
@@ -7623,6 +7644,45 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             '服务分工单已处理', outcome, now);
           addAudit(data, '处理服务分工单', `${merchant.name} ${caseRecord.caseNo}`);
           return caseRecord;
+        });
+        return sendJson(response, 200, { data: result, requestId });
+      }
+
+      const serviceRiskUrgeMatch = pathname.match(/^\/api\/admin\/service-risk\/([^/]+)\/urge$/);
+      if (request.method === 'POST' && serviceRiskUrgeMatch) {
+        const actor = requireAdmin(request, 'MERCHANT_MANAGE');
+        const body = await readJson(request);
+        const note = requireString(body.note, 'note', { maxLength: 300 });
+        const result = store.update((data) => {
+          const merchant = (data.merchants || []).find((item) => item.id === serviceRiskUrgeMatch[1]);
+          if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          const now = new Date().toISOString();
+          if (!Array.isArray(data.serviceRiskFollowUps)) data.serviceRiskFollowUps = [];
+          const recent = data.serviceRiskFollowUps.find((item) => item.merchantId === merchant.id
+            && new Date(item.createdAt).getTime() > new Date(now).getTime() - 3600 * 1000);
+          if (recent) {
+            throw new ApiError(409, 'SERVICE_RISK_URGE_RECENT', '该商家 1 小时内已催办，请等待商家处理');
+          }
+          const followUp = {
+            id: `risk_urge_${randomUUID()}`,
+            merchantId: merchant.id,
+            merchantName: merchant.name,
+            note: note.trim(),
+            operator: actor.displayName || actor.username,
+            createdAt: now
+          };
+          data.serviceRiskFollowUps.unshift(followUp);
+          data.serviceRiskFollowUps = data.serviceRiskFollowUps.slice(0, 300);
+          notifyMerchantScore(data, merchant.id, 'SCORE_STAGE_WARNING', '平台催办服务风险',
+            `${merchant.name}：${followUp.note}。请在 24 小时内处理差评、超时工单和整改事项。`, now, 'SCORE',
+            { focusId: 'merchant-score' });
+          addAudit(data, '催办商家服务风险', `${merchant.name} · ${merchant.id}`, actor.displayName || actor.username);
+          return {
+            merchantId: merchant.id,
+            merchantName: merchant.name,
+            urgeCount: data.serviceRiskFollowUps.filter((item) => item.merchantId === merchant.id).length,
+            lastUrge: followUp
+          };
         });
         return sendJson(response, 200, { data: result, requestId });
       }
