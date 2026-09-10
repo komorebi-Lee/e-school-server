@@ -4174,11 +4174,26 @@ function createApp({
     return metrics.reason || '触发商品风控规则';
   }
 
+  function productComplianceWatchUntil(product) {
+    if (!['SCORE_CASE_RESTORED', 'MANUAL_RESTORED', 'AUTO_RESTORED'].includes(product.autoDelistStatus)) return '';
+    const baseAt = product.autoDelistReviewUpdatedAt || product.autoDelistRestoredAt || '';
+    const baseMs = baseAt ? new Date(baseAt).getTime() : 0;
+    if (!Number.isFinite(baseMs) || baseMs <= 0) return '';
+    return new Date(baseMs + 7 * 24 * 3600 * 1000).toISOString();
+  }
+
   function enforceProductCompliance(data, now = new Date().toISOString()) {
     const actions = [];
     for (const product of data.products || []) {
       if (!product.merchantId) continue;
       const metrics = productComplianceMetrics(product, data);
+      const watchUntil = productComplianceWatchUntil(product);
+      if (metrics.violation && product.active && watchUntil && watchUntil > now) {
+        product.autoDelistReviewNote = `平台人工复核通过，观察期至 ${watchUntil.slice(0, 16).replace('T', ' ')}`;
+        product.autoDelistReviewUpdatedAt = product.autoDelistReviewUpdatedAt || now;
+        actions.push({ productId: product.id, action: 'WATCH', metrics });
+        continue;
+      }
       if (metrics.violation && product.active) {
         product.active = false;
         product.autoDelistRule = metrics.rule;
@@ -5560,6 +5575,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                     : complianceCase.status === 'REJECTED' ? '整改未通过' : '处理中',
                   adminNote: complianceCase.adminNote || '',
                   dueAt: complianceCase.dueAt || '',
+                  watchUntil: productComplianceWatchUntil(product) || '',
                   updatedAt: complianceCase.updatedAt
                 } : null
               });
@@ -6634,7 +6650,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 autoDelistRule: product.autoDelistRule || '',
                 caseNo: product.autoDelistCaseNo || '',
                 reviewNote: product.autoDelistReviewNote || '',
-                restoredAt: product.autoDelistRestoredAt || ''
+                restoredAt: product.autoDelistRestoredAt || '',
+                reviewDueAt: productComplianceWatchUntil(product) || ''
               })),
             pendingPublishProducts: (data.products || [])
               .filter((product) => product.publishReviewStatus === 'PENDING_REVIEW')

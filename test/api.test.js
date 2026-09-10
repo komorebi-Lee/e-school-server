@@ -4408,6 +4408,8 @@ test('low quality products are auto delisted and can be restored after complianc
     const product = data.products.find((item) => item.id === 'prod_ebike_001');
     product.active = true;
     delete product.autoDelistRule;
+    delete product.autoDelistRestoredAt;
+    delete product.autoDelistReviewUpdatedAt;
     delete product.autoDelistRestoredBy;
     delete product.autoDelistRestoredCaseId;
     for (let index = 0; index < 2; index += 1) {
@@ -4475,7 +4477,22 @@ test('low quality products are auto delisted and can be restored after complianc
   assert.ok((store.read().subscribeMessages || []).some((item) => item.templateId === 'product_compliance_restored' && item.status === 'QUEUED'));
 
   store.update((data) => {
-    data.productReviews = data.productReviews.filter((item) => item.id !== 'review_auto_delist_hold');
+    data.productReviews = data.productReviews.filter((item) => item.id !== 'review_auto_delist_watch');
+    data.productReviews.unshift({
+      id: 'review_auto_delist_watch', productId: 'prod_ebike_001', rating: 1,
+      content: '人工复核后观察期回归测试差评', customerName: '观察期同学', purchaseVerified: true,
+      visibility: 'PUBLISHED', reply: null, createdAt: new Date().toISOString()
+    });
+  });
+  const watchPatrol = await api('/api/admin/patrol/run', { method: 'POST', headers: adminHeaders });
+  assert.equal(watchPatrol.response.status, 200);
+  const watchProduct = store.read().products.find((item) => item.id === 'prod_ebike_001');
+  assert.equal(watchProduct.active, true, 'manually restored products must not be redelisted during the observation window');
+  assert.ok(watchProduct.autoDelistReviewNote.includes('观察期至'));
+  assert.ok(watchProduct.autoDelistReviewNote.includes('平台人工复核通过'));
+
+  store.update((data) => {
+    data.productReviews = data.productReviews.filter((item) => !item.id.startsWith('review_auto_delist_'));
   });
 
   await api('/api/admin/settings', {
@@ -5419,6 +5436,11 @@ test('service score stage changes reach merchants, platform and patrol audit', a
   store.update((data) => {
     data.afterSales = (data.afterSales || []).map((item) => ({ ...item, status: 'CLOSED' }));
     data.slaAlerts = (data.slaAlerts || []).map((item) => ({ ...item, status: 'RESOLVED' }));
+    const activeProduct = data.products.find((item) => item.id === 'prod_ebike_001');
+    if (activeProduct) delete activeProduct.autoDelistReviewUpdatedAt;
+    for (const product of data.products || []) {
+      if (product.autoDelistRestoredAt) delete product.autoDelistReviewUpdatedAt;
+    }
     const merchant = data.merchants.find((item) => item.id === 'merchant_001');
     merchant.serviceScore = null;
     data.serviceMessageSubscribers = [...new Set([...(data.serviceMessageSubscribers || []), merchant.userId])];

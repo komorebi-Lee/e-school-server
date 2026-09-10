@@ -937,7 +937,7 @@ function scoresView() {
       <td><strong>${esc(item.name)}</strong><small>${esc(item.id)}</small></td>
       <td>${esc(item.merchantName || '')}</td>
       <td>${esc(item.reason)}<small>${item.autoDelistRule === 'SERVICE_RISK' ? `售后超时 ${item.metrics?.overdueAfterSaleCount || 0} 单` : `低分 ${item.metrics?.lowRatingCount || 0} 条 · 均分 ${item.metrics?.averageRating || 0}`}</small></td>
-      <td><span class="badge orange">${esc({ DELISTED: '待整改', REVIEW_PENDING: '整改待复核', REVIEW_REJECTED: '整改未通过' }[item.status] || '处理中')}</span>${item.caseNo ? `<small>工单 ${esc(item.caseNo)}</small>` : ''}<small>${esc(item.reviewNote || '待商家提交整改')}</small></td>
+      <td><span class="badge orange">${esc({ DELISTED: '待整改', REVIEW_PENDING: '整改待复核', REVIEW_REJECTED: '整改未通过' }[item.status] || '处理中')}</span>${item.caseNo ? `<small>工单 ${esc(item.caseNo)}</small>` : ''}${item.reviewDueAt ? `<small class="${new Date(item.reviewDueAt).getTime() < Date.now() ? 'text-red' : 'muted'}">${new Date(item.reviewDueAt).getTime() < Date.now() ? '复核超时' : '复核截止'} ${fmtDate(item.reviewDueAt)}</small>` : ''}<small>${esc(item.reviewNote || '待商家提交整改')}</small></td>
       <td><button class="text-button restore-compliance" data-id="${esc(item.id)}">复核恢复</button></td>
     </tr>`).join('') || `<tr><td colspan="5" class="empty">暂无自动下架商品</td></tr>`}</tbody></table></div></section>`;
   const rows = items.map((item) => `<tr>
