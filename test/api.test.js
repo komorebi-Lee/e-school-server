@@ -329,6 +329,11 @@ test('product list supports commerce sorting and sales metrics', async () => {
     delete product.saleEndsAt;
   });
 
+  const sales = await api('/api/products?campusId=campus_demo&sort=sales');
+  assert.equal(sales.response.status, 200);
+  const salesCounts = sales.body.data.map((item) => item.salesCount);
+  assert.deepEqual(salesCounts, [...salesCounts].sort((a, b) => b - a));
+
   const invalid = await api('/api/products?campusId=campus_demo&sort=bad_sort');
   assert.equal(invalid.response.status, 400);
   assert.equal(invalid.body.error.code, 'VALIDATION_ERROR');

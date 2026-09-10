@@ -3953,6 +3953,7 @@ function createApp({
     });
     const sorters = {
       rating: (a, b) => b.ratingWeight - a.ratingWeight || a.index - b.index,
+      sales: (a, b) => b.salesCount - a.salesCount || a.index - b.index,
       price_asc: (a, b) => a.effectivePriceInCents - b.effectivePriceInCents || a.index - b.index,
       price_desc: (a, b) => b.effectivePriceInCents - a.effectivePriceInCents || a.index - b.index,
       stock: (a, b) => availableStock(a.product) - availableStock(b.product) || a.index - b.index
@@ -4823,7 +4824,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .filter((product) => !query || `${product.name} ${product.description}`.toLowerCase().includes(query));
         // 服务分低的商家整体后置，让好服务真的能换到曝光。
         const sort = url.searchParams.get('sort') || 'recommend';
-        if (!['recommend', 'rating', 'price_asc', 'price_desc', 'stock'].includes(sort)) {
+        if (!['recommend', 'rating', 'sales', 'price_asc', 'price_desc', 'stock'].includes(sort)) {
           throw new ApiError(400, 'VALIDATION_ERROR', '排序方式不支持');
         }
         const summarized = items.map((product) => withProductReviewSummary(
