@@ -5486,6 +5486,9 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             merchant: merchantPublic(merchant),
             serviceScore: merchant.serviceScore || null,
             scoreTrend: merchantScoreTrend(data, merchant.id),
+            latestRiskUrge: (data.serviceRiskFollowUps || [])
+              .filter((item) => item.merchantId === merchant.id)
+              .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] || null,
             riskTasks: merchantRiskTasks(afterSales, slaAlerts, reviews, products, stockThreshold, data.serviceScoreCases || []),
             lowStockThreshold: stockThreshold,
             scoreCases: (data.serviceScoreCases || []).filter((item) => item.merchantId === merchant.id),

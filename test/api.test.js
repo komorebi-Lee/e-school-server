@@ -4599,6 +4599,43 @@ test('order notifications queue and dispatch to subscribed users', async () => {
     && message.page === `/pages/orders/orders?focusId=${encodeURIComponent(created.body.data.id)}`));
 });
 
+test('merchant workspace surfaces latest platform risk urging', async () => {
+  const urgeNote = `平台风险催办 ${Date.now()}`;
+  store.update((data) => {
+    data.serviceRiskFollowUps = (data.serviceRiskFollowUps || [])
+      .filter((item) => item.merchantId !== 'merchant_001');
+  });
+  const admin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(admin.response.status, 200);
+  const adminAuth = { 'content-type': 'application/json', authorization: `Bearer ${admin.body.data.token}` };
+
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const urge = await api('/api/admin/service-risk/merchant_001/urge', {
+    method: 'POST', headers: adminAuth,
+    body: JSON.stringify({ note: urgeNote })
+  });
+  assert.equal(urge.response.status, 200);
+
+  const overview = await api('/api/merchant/overview', { headers: merchantAuth });
+  assert.equal(overview.response.status, 200);
+  assert.equal(overview.body.data.latestRiskUrge?.note, urgeNote);
+  assert.equal(overview.body.data.latestRiskUrge?.operator, '运营管理员');
+  store.update((data) => {
+    data.serviceRiskFollowUps = (data.serviceRiskFollowUps || [])
+      .filter((item) => item.note !== urgeNote);
+  });
+});
+
 test('order subscribe messages require explicit user consent', async () => {
   const adminHeaders = await loginAdmin();
   await api('/api/admin/settings', {
