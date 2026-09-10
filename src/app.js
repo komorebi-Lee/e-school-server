@@ -798,7 +798,8 @@ function publicStorefrontReviews(data, merchantId) {
 function userNotificationLink(notification, data = null) {
   const metadata = notification?.metadata || {};
   if (metadata.focusId) {
-    return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.focusId))}`;
+    const recordType = metadata.recordType ? `&recordType=${encodeURIComponent(String(metadata.recordType))}` : '';
+    return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.focusId))}${recordType}`;
   }
   if (metadata.productId) {
     return `/pages/detail/detail?id=${encodeURIComponent(String(metadata.productId))}`;
@@ -1678,7 +1679,8 @@ function createApp({
       return `/pages/detail/detail?id=${encodeURIComponent(String(metadata.productId))}`;
     }
     if (metadata?.focusId) {
-      return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.focusId))}`;
+      const recordType = metadata.recordType ? `&recordType=${encodeURIComponent(String(metadata.recordType))}` : '';
+      return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.focusId))}${recordType}`;
     }
     return '';
   }
