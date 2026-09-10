@@ -1493,6 +1493,10 @@ test('approved merchants can renew qualifications for platform review', async ()
   const refreshed = await api('/api/merchant/overview', { headers: merchantHeaders });
   assert.equal(refreshed.body.data.merchant.licenseExpireDate, '2028-12-31');
   assert.equal(refreshed.body.data.qualificationRenewals[0].status, 'APPROVED');
+  const merchantNotices = await api('/api/merchant/notifications', { headers: merchantHeaders });
+  const renewalNotice = merchantNotices.body.data.find((item) => item.title === '资质复审通过');
+  assert.ok(renewalNotice, 'qualification review should notify the merchant');
+  assert.equal(renewalNotice.link, '/pages/merchant/index?focusId=merchant-qualification');
 });
 
 test('qualification expiry enters operations patrol before the license lapses', async () => {
@@ -4316,6 +4320,9 @@ test('service score cases support appeal review, rectification and subscription 
   const productAfterSubmission = store.read().products.find((item) => item.id === 'prod_ebike_001');
   assert.equal(productAfterSubmission.autoDelistStatus, 'REVIEW_PENDING');
   assert.equal(productAfterSubmission.autoDelistCaseId, rectify.body.data.id);
+  const applyNotice = (store.read().notifications || [])
+    .find((item) => item.metadata?.caseId === rectify.body.data.id && item.title === '整改申请已提交');
+  assert.ok(applyNotice, 'rectification submission should carry the case id');
 
   const rectifyReviewed = await api(`/api/admin/score-cases/${rectify.body.data.id}/review`, {
     method: 'POST', headers: adminHeaders,
@@ -4328,6 +4335,9 @@ test('service score cases support appeal review, rectification and subscription 
   assert.equal(productAfterReview.autoDelistStatus, 'SCORE_CASE_RESTORED');
   assert.equal(productAfterReview.autoDelistRestoredCaseId, rectify.body.data.id);
   assert.ok(productAfterReview.autoDelistReviewNote.includes(rectify.body.data.caseNo));
+  const caseResultNotice = (store.read().notifications || [])
+    .find((item) => item.metadata?.caseId === rectify.body.data.id && item.title === '服务分工单已处理');
+  assert.ok(caseResultNotice, 'case review should notify with a case link');
 
   const overviewAfterReview = await api('/api/merchant/overview', { headers: merchantHeaders });
   const complianceCase = overviewAfterReview.body.data.products.find((item) => item.id === 'prod_ebike_001').complianceCase;
@@ -5029,7 +5039,7 @@ test('merchant score notifications require a persisted subscription', async () =
   assert.equal(sentMessage.status, 'SENT');
   assert.ok(sentSubscribeMessages.some((message) => message.template_id === 'wx_test_rectify_gate'
     && message.touser === 'openid_merchant_demo'
-    && message.page === 'pages/merchant/index'));
+    && message.page === `/pages/merchant/index?focusId=${encodeURIComponent(caseAfterGate.body.data.id)}`));
 });
 
 test('saved delivery addresses are scoped to the logged-in user', async () => {

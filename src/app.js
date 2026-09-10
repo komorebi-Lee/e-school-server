@@ -3605,6 +3605,18 @@ function createApp({
     if (metadata.focusId === 'merchant-score') {
       return '/pages/merchant/index?focusId=merchant-score';
     }
+    if (metadata.focusId === 'merchant-qualification') {
+      return '/pages/merchant/index?focusId=merchant-qualification';
+    }
+    if (metadata.focusId === 'merchant-delist' && metadata.productId) {
+      return `/pages/merchant/index?focusId=merchant-delist-${encodeURIComponent(String(metadata.productId))}`;
+    }
+    if (metadata.caseId) {
+      return `/pages/merchant/index?focusId=${encodeURIComponent(String(metadata.caseId))}`;
+    }
+    if (metadata.focusId === 'merchant-product' && metadata.productId) {
+      return `/pages/merchant/products?focusId=${encodeURIComponent(String(metadata.productId))}${metadata.reviewDecision === 'REJECTED' ? '&filter=OFF' : ''}`;
+    }
     if (metadata.reviewId) {
       return `/pages/merchant/reviews?focusId=${encodeURIComponent(String(metadata.reviewId))}`;
     }
@@ -3634,7 +3646,7 @@ function createApp({
             ? '商品曝光已降权，新增商品需平台复核后才会上架'
             : '商品曝光与上新已恢复正常';
         notifyMerchantScore(data, merchant.id, toStage === 'NORMAL' ? 'SCORE_RECTIFY_RESULT' : 'SCORE_STAGE_WARNING',
-          improved ? '服务分已恢复' : '服务分下降', `${note}。${consequence}。`, now);
+          improved ? '服务分已恢复' : '服务分下降', `${note}。${consequence}。`, now, 'SCORE', { focusId: 'merchant-score' });
         addNotification(data, 'PLATFORM', 'SCORE', improved ? '服务分已恢复' : '服务分下降',
           `${merchant.name}：${note}。${consequence}。`, now);
       }
@@ -4176,7 +4188,7 @@ function createApp({
         }, now);
         addAudit(data, '商品自动下架', product.name);
         notifyMerchantScore(data, product.merchantId, 'PRODUCT_AUTO_DELIST', '商品已自动下架',
-          `商品「${product.name}」触发风控规则：${product.autoDelistReason}。请完成整改后联系平台复核。`, now);
+          `商品「${product.name}」触发风控规则：${product.autoDelistReason}。请完成整改后联系平台复核。`, now, 'SCORE', { productId: product.id, focusId: 'merchant-delist' });
         actions.push({ productId: product.id, action: 'DELIST', metrics });
       } else if (!metrics.violation && ['LOW_QUALITY', 'SERVICE_RISK'].includes(product.autoDelistRule)) {
         product.active = true;
@@ -4194,7 +4206,7 @@ function createApp({
         }, now);
         addAudit(data, '低质商品自动恢复', product.name);
         notifyMerchantScore(data, product.merchantId, 'PRODUCT_COMPLIANCE_RESTORED', '商品已恢复上架',
-          `商品「${product.name}」整改数据达标，已自动恢复展示。`, now);
+          `商品「${product.name}」整改数据达标，已自动恢复展示。`, now, 'SCORE', { focusId: 'merchant-score' });
         actions.push({ productId: product.id, action: 'RESTORE', metrics });
       }
     }
@@ -4236,7 +4248,7 @@ function createApp({
     addAudit(data, '收到服务分申诉或整改申请', `${merchant.name} ${caseRecord.caseNo}`);
     if (payload.type === 'RECTIFY') {
       notifyMerchantScore(data, merchant.id, 'SCORE_RECTIFY_APPLY', '整改申请已提交',
-        `${caseRecord.caseNo} 已进入平台审核，处理时限 48 小时。请同步准备整改过程材料。`);
+        `${caseRecord.caseNo} 已进入平台审核，处理时限 48 小时。请同步准备整改过程材料。`, now, 'SCORE', { caseId: caseRecord.id });
     }
     return caseRecord;
   }
@@ -5405,7 +5417,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           };
           data.qualificationRenewals.unshift(record);
           addAudit(data, '商家提交资质复审', `${merchant.name} ${licenseExpireDate}`);
-          notifyMerchant(data, merchant.id, 'SCORE', '资质复审已提交', `新执照有效期 ${licenseExpireDate}，平台审核通过后会更新店铺资质。`);
+          notifyMerchant(data, merchant.id, 'SCORE', '资质复审已提交', `新执照有效期 ${licenseExpireDate}，平台审核通过后会更新店铺资质。`, { focusId: 'merchant-qualification' });
           return record;
         });
         return sendJson(response, 201, { data: renewal, requestId });
@@ -7485,7 +7497,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           notifyMerchant(data, merchant.id, 'SCORE', decision === 'APPROVE' ? '资质复审通过' : '资质复审未通过',
             decision === 'APPROVE'
               ? `新资质有效期 ${item.licenseExpireDate} 已生效。`
-              : `复审未通过：${reviewNote}。请补充材料后重新提交。`);
+              : `复审未通过：${reviewNote}。请补充材料后重新提交。`, { focusId: 'merchant-qualification' });
           return item;
         });
         return sendJson(response, 200, { data: renewal, requestId });
@@ -7512,7 +7524,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           product.updatedAt = now;
           addAudit(data, decision === 'APPROVED' ? '复核通过商家商品' : '复核驳回商家商品', product.name);
           notifyMerchant(data, product.merchantId, 'SCORE', decision === 'APPROVED' ? '商品复核通过' : '商品复核未通过',
-            `${product.name}${decision === 'APPROVED' ? ' 已上架。' : ` 未通过复核：${note}`}`);
+            `${product.name}${decision === 'APPROVED' ? ' 已上架。' : ` 未通过复核：${note}`}`, { productId: product.id, focusId: 'merchant-product', reviewDecision: decision });
           return product;
         });
         return sendJson(response, 200, { data: updated, requestId });
@@ -7581,7 +7593,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }, now);
           addAudit(data, '调整商家服务分', `${merchant.name} ${adjustment > 0 ? '+' : ''}${adjustment}`);
           notifyMerchant(data, merchant.id, 'SCORE', '服务分已人工调整',
-            `平台调整 ${adjustment > 0 ? '+' : ''}${adjustment} 分：${reason}。当前 ${merchant.serviceScore.score} 分（${merchant.serviceScore.stageLabel}）。`);
+            `平台调整 ${adjustment > 0 ? '+' : ''}${adjustment} 分：${reason}。当前 ${merchant.serviceScore.score} 分（${merchant.serviceScore.stageLabel}）。`, { focusId: 'merchant-score' });
           return { merchantId: merchant.id, merchantName: merchant.name, serviceScore: merchant.serviceScore };
         });
         return sendJson(response, 200, { data: result, requestId });
@@ -7647,7 +7659,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             : `${caseRecord.typeLabel}未通过：${note}`;
           notifyMerchantScore(data, merchant.id,
             caseRecord.type === 'APPEAL' ? 'SCORE_APPEAL_RESULT' : 'SCORE_RECTIFY_RESULT',
-            '服务分工单已处理', outcome, now);
+            '服务分工单已处理', outcome, now, 'SCORE', { caseId: caseRecord.id });
           addAudit(data, '处理服务分工单', `${merchant.name} ${caseRecord.caseNo}`);
           return caseRecord;
         });
@@ -7801,7 +7813,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const merchant = (data.merchants || []).find((item) => item.id === product.merchantId);
           restoreAutoDelistedProduct(data, product, merchant || { id: product.merchantId, name: '' }, null, note, now);
           notifyMerchantScore(data, product.merchantId, 'PRODUCT_COMPLIANCE_RESTORED', '商品已恢复上架',
-            product.autoDelistReviewNote, now);
+            product.autoDelistReviewNote, now, 'SCORE', { focusId: 'merchant-score' });
           return product;
         });
         return sendJson(response, 200, { data: result, requestId });
