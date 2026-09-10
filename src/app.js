@@ -2135,7 +2135,7 @@ function createApp({
     };
     data.payoutRequests.unshift(payoutRequest);
     addAudit(data, '商家提交提现申请', `${merchant.name} ${payoutRequest.requestNo}`);
-    notifyMerchant(data, merchant.id, 'SETTLEMENT', '提现申请已提交', `提现单 ${payoutRequest.requestNo} 合计 ¥${(amountInCents / 100).toFixed(2)}，平台审核通过后打款到 ${payoutRequest.accountBank} ${payoutRequest.accountMasked}。`);
+    notifyMerchant(data, merchant.id, 'SETTLEMENT', '提现申请已提交', `提现单 ${payoutRequest.requestNo} 合计 ¥${(amountInCents / 100).toFixed(2)}，平台审核通过后打款到 ${payoutRequest.accountBank} ${payoutRequest.accountMasked}。`, { focusId: 'merchant-payout', payoutId: payoutRequest.id });
     return payoutRequest;
   }
 
@@ -2161,7 +2161,7 @@ function createApp({
     payoutRequest.reviewedAt = now;
     payoutRequest.updatedAt = now;
     addAudit(data, '提现申请自动关闭', `${payoutRequest.merchantName} ${payoutRequest.requestNo}`);
-    notifyMerchant(data, payoutRequest.merchantId, 'SETTLEMENT', '提现申请已关闭', `提现单 ${payoutRequest.requestNo} ${reason}，未受影响的金额已退回可结算余额，可重新申请。`);
+    notifyMerchant(data, payoutRequest.merchantId, 'SETTLEMENT', '提现申请已关闭', `提现单 ${payoutRequest.requestNo} ${reason}，未受影响的金额已退回可结算余额，可重新申请。`, { focusId: 'merchant-payout', payoutId: payoutRequest.id });
     return payoutRequest;
   }
 
@@ -2186,7 +2186,7 @@ function createApp({
       receiptUrl: payoutRequest.receiptUrl
     }, now);
     addAudit(data, '平台确认提现打款', `${payoutRequest.merchantName} ${payoutRequest.requestNo}`);
-    notifyMerchant(data, payoutRequest.merchantId, 'SETTLEMENT', '提现已打款', `提现单 ${payoutRequest.requestNo} 已打款 ¥${(totalInCents / 100).toFixed(2)}，凭证 ${reference}。`);
+    notifyMerchant(data, payoutRequest.merchantId, 'SETTLEMENT', '提现已打款', `提现单 ${payoutRequest.requestNo} 已打款 ¥${(totalInCents / 100).toFixed(2)}，凭证 ${reference}。`, { focusId: 'merchant-payout', payoutId: payoutRequest.id });
     return totalInCents;
   }
 
@@ -2202,7 +2202,7 @@ function createApp({
     payoutRequest.reviewedAt = now;
     payoutRequest.updatedAt = now;
     addAudit(data, '平台驳回提现申请', `${payoutRequest.merchantName} ${payoutRequest.requestNo}`);
-    notifyMerchant(data, payoutRequest.merchantId, 'SETTLEMENT', '提现申请被驳回', `提现单 ${payoutRequest.requestNo} 未通过审核：${reviewNote}。金额已退回可结算余额。`);
+    notifyMerchant(data, payoutRequest.merchantId, 'SETTLEMENT', '提现申请被驳回', `提现单 ${payoutRequest.requestNo} 未通过审核：${reviewNote}。金额已退回可结算余额。`, { focusId: 'merchant-payout', payoutId: payoutRequest.id });
     return settlements.length;
   }
 
@@ -3595,7 +3595,7 @@ function createApp({
 
   function merchantNotificationLink(notification) {
     const metadata = notification?.metadata || {};
-    if ((notification.type === 'ORDER' || notification.type === 'AFTER_SALE') && metadata.orderId) {
+    if ((notification.type === 'ORDER' || notification.type === 'AFTER_SALE' || notification.type === 'SLA') && metadata.orderId) {
       const focusId = encodeURIComponent(String(metadata.orderId));
       return `/pages/merchant/orders?focusId=${focusId}${notification.type === 'AFTER_SALE' ? '&filter=AFTER_SALE' : ''}`;
     }
@@ -3607,6 +3607,9 @@ function createApp({
     }
     if (metadata.focusId === 'merchant-qualification') {
       return '/pages/merchant/index?focusId=merchant-qualification';
+    }
+    if (metadata.focusId === 'merchant-payout') {
+      return '/pages/merchant/index?focusId=merchant-payout';
     }
     if (metadata.focusId === 'merchant-delist' && metadata.productId) {
       return `/pages/merchant/index?focusId=merchant-delist-${encodeURIComponent(String(metadata.productId))}`;
@@ -5979,7 +5982,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             addNotification(data, item.userId, 'ORDER', '订单已完成', `订单 ${item.orderNo} 已通过交付码核验并完成。`, { focusId: item.id });
             if (released.length) {
               const days = settlementPeriodDays(data);
-              notifyMerchant(data, merchantSession.merchantId, 'SETTLEMENT', '分账已进入账期', `订单 ${item.orderNo} 交付核验通过，${days > 0 ? `${days} 天账期后可结算` : '可立即结算'}。`);
+              notifyMerchant(data, merchantSession.merchantId, 'SETTLEMENT', '分账已进入账期', `订单 ${item.orderNo} 交付核验通过，${days > 0 ? `${days} 天账期后可结算` : '可立即结算'}。`, { focusId: 'merchant-payout' });
             }
           }
           return item;
@@ -6313,7 +6316,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           item.updatedAt = now;
           addAudit(data, '认领超时预警', `${item.ruleLabel} ${item.businessNo}`, actor.displayName || actor.username);
           if (item.ownerRole === 'MERCHANT' && item.merchantId) {
-            notifyMerchant(data, item.merchantId, 'SLA', '平台已跟进超时事项', `${item.ruleLabel}：${item.businessNo} 平台处理意见：${note}`);
+            const slaNoticeMetadata = ['AFTER_SALE_RESPONSE', 'AFTER_SALE_RESOLUTION', 'ORDER_DELIVERY', 'ORDER_USER_MESSAGE'].includes(item.ruleKey)
+              ? { orderId: item.businessId }
+              : item.ruleKey === 'NEGATIVE_REVIEW_REPLY'
+                ? { reviewId: item.businessId }
+                : item.ruleKey.startsWith('SCORE_')
+                  ? { caseId: item.businessId }
+                  : item.ruleKey === 'PAYOUT_REVIEW' ? { focusId: 'merchant-payout' } : null;
+            notifyMerchant(data, item.merchantId, 'SLA', '平台已跟进超时事项', `${item.ruleLabel}：${item.businessNo} 平台处理意见：${note}`, slaNoticeMetadata);
           }
           return item;
         });

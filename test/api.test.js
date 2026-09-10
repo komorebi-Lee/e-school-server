@@ -3552,6 +3552,10 @@ test('merchant payouts require a request that the platform reviews', async () =>
   assert.equal(requestedOverview.body.data.metrics.settlementMetrics.payoutRequestedInCents, 78400);
   assert.equal(requestedOverview.body.data.metrics.settlementMetrics.pendingPayoutRequest.id, payoutRequestId);
   assert.equal(requestedOverview.body.data.payoutRequests[0].requestNo, requested.body.data.requestNo);
+  const payoutNotice = (await api('/api/merchant/notifications', { headers: merchantAuth }))
+    .body.data.find((item) => item.metadata?.payoutId === payoutRequestId);
+  assert.ok(payoutNotice, 'payout request should notify the merchant');
+  assert.equal(payoutNotice.link, '/pages/merchant/index?focusId=merchant-payout');
 
   const rejected = await api(`/api/admin/payout-requests/${payoutRequestId}/review`, {
     method: 'POST', headers: adminHeaders, body: JSON.stringify({ decision: 'REJECT', reviewNote: '收款账户需要核对' })
@@ -3929,6 +3933,11 @@ test('operations patrol raises overdue alerts and closes them when work moves on
   assert.equal(acknowledged.response.status, 200);
   assert.equal(acknowledged.body.data.status, 'ACKNOWLEDGED');
   assert.equal(acknowledged.body.data.acknowledgeNote, '已电话联系商家，今晚完成配送');
+  const slaNotice = (await api('/api/merchant/notifications', { headers: merchantHeaders }))
+    .body.data.find((item) => item.type === 'SLA' && item.title === '平台已跟进超时事项'
+      && item.metadata?.orderId === order.body.data.id);
+  assert.ok(slaNotice, 'sla acknowledge should notify the merchant with a link');
+  assert.ok(slaNotice.link.startsWith(`/pages/merchant/orders?focusId=${encodeURIComponent(order.body.data.id)}`));
 
   const emptyNote = await api(`/api/admin/sla-alerts/${cardAlert.id}/acknowledge`, {
     method: 'POST', headers: adminHeaders, body: JSON.stringify({ note: '' })
