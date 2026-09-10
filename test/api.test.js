@@ -3093,6 +3093,7 @@ test('external plate applications require paid service fee and support refunds',
   const plateNotice = (await api('/api/my/notifications', { headers: { authorization: `Bearer ${session.token}` } }))
     .body.data.find((item) => item.type === 'PLATE' && item.title === '牌照服务费支付成功');
   assert.equal(plateNotice?.link, `/pages/orders/orders?focusId=${encodeURIComponent(created.body.data.id)}`);
+  assert.equal(plateNotice?.metadata?.recordType, 'PLATE');
 
   const upload = await api('/api/uploads', {
     method: 'POST',

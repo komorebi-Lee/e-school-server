@@ -1411,7 +1411,7 @@ function createApp({
           businessType: 'PLATE'
         }, now);
         addAudit(data, source === 'PROVIDER_CALLBACK' ? '自带车上牌服务费支付回调成功' : '自带车上牌服务费支付成功', plateApplication.id);
-        addNotification(data, paymentOrder.userId, 'PLATE', '牌照服务费支付成功', `${plateApplication.vehicleModel} 已支付服务费，请按提示补充车辆和身份材料。`, { focusId: plateApplication.id });
+        addNotification(data, paymentOrder.userId, 'PLATE', '牌照服务费支付成功', `${plateApplication.vehicleModel} 已支付服务费，请按提示补充车辆和身份材料。`, { focusId: plateApplication.id, recordType: 'PLATE' });
         return { plateApplication, paymentOrder };
       }
 
@@ -7442,10 +7442,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           if (template && item.userId) {
             const detail = item.planName || item.vehicleModel || item.reason || item.orderNo || item.id;
+            const recordType = { 'phone-card-orders': 'PHONE_PLAN', 'recharge-orders': 'RECHARGE', 'broadband-applications': 'BROADBAND', 'plate-applications': 'PLATE' }[adminStatusMatch[1]] || 'E_BIKE';
             const message = adminStatusMatch[1] === 'after-sales' && status === 'SUBMITTED'
               ? `您的售后请求已受理，预计 ${publicSettings(data.adminSettings).afterSaleResponseHours} 小时内响应。`
               : template[2];
-            sendOrderNotification(data, item.userId, adminStatusMatch[1] === 'after-sales' ? 'AFTER_SALE' : 'ORDER_STATUS', template[1], `${detail}：${message}`, item.updatedAt, { focusId: item.id });
+            sendOrderNotification(data, item.userId, adminStatusMatch[1] === 'after-sales' ? 'AFTER_SALE' : 'ORDER_STATUS', template[1], `${detail}：${message}`, item.updatedAt, { focusId: item.id, recordType });
           }
           return item;
         });
