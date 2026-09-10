@@ -3937,7 +3937,7 @@ test('operations patrol raises overdue alerts and closes them when work moves on
     .body.data.find((item) => item.type === 'SLA' && item.title === '平台已跟进超时事项'
       && item.metadata?.orderId === order.body.data.id);
   assert.ok(slaNotice, 'sla acknowledge should notify the merchant with a link');
-  assert.ok(slaNotice.link.startsWith(`/pages/merchant/orders?focusId=${encodeURIComponent(order.body.data.id)}`));
+  assert.equal(slaNotice.link, `/pages/merchant/orders?focusId=${encodeURIComponent(order.body.data.id)}&filter=PENDING`);
 
   const emptyNote = await api(`/api/admin/sla-alerts/${cardAlert.id}/acknowledge`, {
     method: 'POST', headers: adminHeaders, body: JSON.stringify({ note: '' })

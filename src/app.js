@@ -3600,7 +3600,9 @@ function createApp({
     const metadata = notification?.metadata || {};
     if ((notification.type === 'ORDER' || notification.type === 'AFTER_SALE' || notification.type === 'SLA') && metadata.orderId) {
       const focusId = encodeURIComponent(String(metadata.orderId));
-      return `/pages/merchant/orders?focusId=${focusId}${notification.type === 'AFTER_SALE' ? '&filter=AFTER_SALE' : ''}`;
+      const filter = notification.type === 'AFTER_SALE' ? '&filter=AFTER_SALE'
+        : notification.type === 'SLA' && metadata.filter ? `&filter=${encodeURIComponent(String(metadata.filter))}` : '';
+      return `/pages/merchant/orders?focusId=${focusId}${filter}`;
     }
     if (notification.type === 'STOCK' && metadata.productId) {
       return `/pages/merchant/products?focusId=${encodeURIComponent(String(metadata.productId))}&filter=LOW`;
@@ -6319,13 +6321,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           item.updatedAt = now;
           addAudit(data, '认领超时预警', `${item.ruleLabel} ${item.businessNo}`, actor.displayName || actor.username);
           if (item.ownerRole === 'MERCHANT' && item.merchantId) {
-            const slaNoticeMetadata = ['AFTER_SALE_RESPONSE', 'AFTER_SALE_RESOLUTION', 'ORDER_DELIVERY', 'ORDER_USER_MESSAGE'].includes(item.ruleKey)
-              ? { orderId: item.businessId }
+            const slaNoticeMetadata = ['AFTER_SALE_RESPONSE', 'AFTER_SALE_RESOLUTION'].includes(item.ruleKey)
+              ? { orderId: item.businessId, filter: 'AFTER_SALE' }
               : item.ruleKey === 'NEGATIVE_REVIEW_REPLY'
                 ? { reviewId: item.businessId }
                 : item.ruleKey.startsWith('SCORE_')
                   ? { caseId: item.businessId }
-                  : item.ruleKey === 'PAYOUT_REVIEW' ? { focusId: 'merchant-payout' } : null;
+                  : item.ruleKey === 'PAYOUT_REVIEW' ? { focusId: 'merchant-payout' }
+                    : ['ORDER_DELIVERY', 'ORDER_USER_MESSAGE'].includes(item.ruleKey) ? { orderId: item.businessId, filter: 'PENDING' } : null;
             notifyMerchant(data, item.merchantId, 'SLA', '平台已跟进超时事项', `${item.ruleLabel}：${item.businessNo} 平台处理意见：${note}`, slaNoticeMetadata);
           }
           return item;
