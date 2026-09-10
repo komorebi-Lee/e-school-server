@@ -1674,6 +1674,9 @@ function createApp({
     if ((notificationType === 'ORDER' || notificationType === 'AFTER_SALE') && metadata?.orderId) {
       return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.orderId))}`;
     }
+    if (metadata?.productId) {
+      return `/pages/detail/detail?id=${encodeURIComponent(String(metadata.productId))}`;
+    }
     if (metadata?.focusId) {
       return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.focusId))}`;
     }
@@ -1734,7 +1737,7 @@ function createApp({
       id: `sub_${randomUUID()}`,
       userId,
       templateId: 'favorite_price_notice',
-      page: 'pages/detail/detail',
+      page: `/pages/detail/detail?id=${encodeURIComponent(String(product.id))}`,
       status: 'QUEUED',
       title,
       content,
@@ -1793,7 +1796,7 @@ function createApp({
         id: `sub_${randomUUID()}`,
         userId: favorite.userId,
         templateId: 'restock_notice',
-        page: 'pages/detail/detail',
+        page: `/pages/detail/detail?id=${encodeURIComponent(String(product.id))}`,
         status: 'QUEUED',
         title,
         content,

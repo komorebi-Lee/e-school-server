@@ -5132,6 +5132,10 @@ test('restock alerts notify waiting users after merchant restocking', async () =
     headers: { authorization: `Bearer ${userSession.token}` }
   });
   assert.equal(state.body.data.subscribed, true);
+  await api('/api/order-message-subscriptions', {
+    method: 'POST', headers: { authorization: `Bearer ${userSession.token}` },
+    body: JSON.stringify({ accepted: true })
+  });
 
   const restock = await api('/api/merchant/products/prod_ebike_001', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` },
@@ -5146,6 +5150,10 @@ test('restock alerts notify waiting users after merchant restocking', async () =
   assert.ok(notice);
   assert.ok(notice.content.includes('轻风 通勤版'));
   assert.equal((store.read().productRestockAlerts || []).find((item) => item.userId === 'wx_restock_user').status, 'NOTIFIED');
+  const restockMessage = (store.read().subscribeMessages || [])
+    .find((item) => item.userId === userSession.userId && item.templateId === 'restock_notice');
+  assert.ok(restockMessage, 'restock notice should queue a subscribe message');
+  assert.equal(restockMessage.page, '/pages/detail/detail?id=prod_ebike_001');
 
   const noticeCount = notifications.body.data.filter((item) => item.title === '你登记的商品已到货').length;
   await api('/api/merchant/products/prod_ebike_001', {
@@ -5199,7 +5207,8 @@ test('favorite users are notified once when a sold-out product is restocked', as
   assert.ok(notice.content.includes('收藏补货测试车'));
   assert.equal(notice.metadata.productId, productId);
   const queued = (store.read().subscribeMessages || []).find((item) => (
-    item.userId === userSession.userId && item.templateId === 'restock_notice' && item.page === 'pages/detail/detail'
+    item.userId === userSession.userId && item.templateId === 'restock_notice'
+    && item.page === `/pages/detail/detail?id=${encodeURIComponent(productId)}`
   ));
   assert.ok(queued);
 
@@ -5358,7 +5367,7 @@ test('favorite users receive a conversion notice when a product goes on sale', a
     item.userId === userSession.userId && item.templateId === 'favorite_price_notice'
   ));
   assert.ok(queued);
-  assert.equal(queued.page, 'pages/detail/detail');
+  assert.equal(queued.page, `/pages/detail/detail?id=${encodeURIComponent(productId)}`);
   assert.equal(notice.metadata.productId, productId);
 
   const noticeAction = await api(`/api/my/notifications/${notice.id}/action`, {
