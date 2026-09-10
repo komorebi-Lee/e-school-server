@@ -1649,7 +1649,7 @@ function createApp({
   }
 
   function sendScoreNotification(data, userId, templateKey, title, content, now = new Date().toISOString(), notificationType = 'SCORE', metadata = null) {
-    const notification = addNotification(data, userId, notificationType, title, content);
+    const notification = addNotification(data, userId, notificationType, title, content, metadata);
     if (!notification) return null;
     if (!(data.serviceMessageSubscribers || []).includes(userId)) return { notification, subscribeMessage: null };
     if (!Array.isArray(data.subscribeMessages)) data.subscribeMessages = [];
@@ -3601,6 +3601,9 @@ function createApp({
     }
     if (notification.type === 'STOCK' && metadata.productId) {
       return `/pages/merchant/products?focusId=${encodeURIComponent(String(metadata.productId))}&filter=LOW`;
+    }
+    if (metadata.focusId === 'merchant-score') {
+      return '/pages/merchant/index?focusId=merchant-score';
     }
     if (metadata.reviewId) {
       return `/pages/merchant/reviews?focusId=${encodeURIComponent(String(metadata.reviewId))}`;

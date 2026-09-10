@@ -4630,9 +4630,18 @@ test('merchant workspace surfaces latest platform risk urging', async () => {
   assert.equal(overview.response.status, 200);
   assert.equal(overview.body.data.latestRiskUrge?.note, urgeNote);
   assert.equal(overview.body.data.latestRiskUrge?.operator, '运营管理员');
+  const notifications = await api('/api/merchant/notifications', { headers: merchantAuth });
+  assert.equal(notifications.response.status, 200);
+  const urgeNotice = notifications.body.data.find((item) => (
+    item.metadata?.focusId === 'merchant-score' && item.content.includes(urgeNote)
+  ));
+  assert.ok(urgeNotice, 'urge should create a merchant notification');
+  assert.equal(urgeNotice.link, '/pages/merchant/index?focusId=merchant-score');
   store.update((data) => {
     data.serviceRiskFollowUps = (data.serviceRiskFollowUps || [])
       .filter((item) => item.note !== urgeNote);
+    data.notifications = (data.notifications || [])
+      .filter((item) => item.metadata?.focusId !== 'merchant-score');
   });
 });
 
