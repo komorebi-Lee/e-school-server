@@ -3942,17 +3942,19 @@ function createApp({
     const entries = products.map((product, index) => {
       const salesCount = salesCounts.get(product.id) || 0;
       const rating = product.ratingSummary?.average || 0.1;
+      const { effectivePriceInCents } = withProductSale(product);
       return {
         product,
         index,
         salesCount,
+        effectivePriceInCents,
         ratingWeight: rating * 100 + Math.min(salesCount, 50)
       };
     });
     const sorters = {
       rating: (a, b) => b.ratingWeight - a.ratingWeight || a.index - b.index,
-      price_asc: (a, b) => Number(a.product.priceInCents || 0) - Number(b.product.priceInCents || 0) || a.index - b.index,
-      price_desc: (a, b) => Number(b.product.priceInCents || 0) - Number(a.product.priceInCents || 0) || a.index - b.index,
+      price_asc: (a, b) => a.effectivePriceInCents - b.effectivePriceInCents || a.index - b.index,
+      price_desc: (a, b) => b.effectivePriceInCents - a.effectivePriceInCents || a.index - b.index,
       stock: (a, b) => availableStock(a.product) - availableStock(b.product) || a.index - b.index
     };
     const ranked = sorters[sort] ? entries.sort(sorters[sort]) : entries;

@@ -308,6 +308,27 @@ test('product list supports commerce sorting and sales metrics', async () => {
   const prices = price.body.data.map((item) => item.priceInCents);
   assert.deepEqual(prices, [...prices].sort((a, b) => a - b));
 
+  // 价格排序必须使用用户实际支付价，否则促销车会被原价错误后置。
+  const saleStart = new Date(Date.now() - 3600 * 1000).toISOString();
+  const saleEnd = new Date(Date.now() + 3600 * 1000).toISOString();
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_rent_001');
+    product.salePriceInCents = 199900;
+    product.saleStartsAt = saleStart;
+    product.saleEndsAt = saleEnd;
+  });
+  const promoted = await api('/api/products?category=E_BIKE_NEW&campusId=campus_demo&sort=price_asc');
+  assert.equal(promoted.response.status, 200);
+  const effectivePrices = promoted.body.data.map((item) => item.effectivePriceInCents);
+  assert.deepEqual(effectivePrices, [...effectivePrices].sort((a, b) => a - b));
+  assert.equal(promoted.body.data[0].id, 'prod_ebike_rent_001');
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_rent_001');
+    delete product.salePriceInCents;
+    delete product.saleStartsAt;
+    delete product.saleEndsAt;
+  });
+
   const invalid = await api('/api/products?campusId=campus_demo&sort=bad_sort');
   assert.equal(invalid.response.status, 400);
   assert.equal(invalid.body.error.code, 'VALIDATION_ERROR');
