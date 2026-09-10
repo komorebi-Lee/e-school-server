@@ -75,6 +75,11 @@ const scoreNotificationTemplates = {
     keywords: ['整改', '申请', '审核'],
     description: '商家提交服务分整改申请后提醒管理员审核'
   },
+  SCORE_APPEAL_APPLY: {
+    id: 'score_appeal_apply',
+    keywords: ['申诉', '提交', '审核'],
+    description: '商家提交差评记录申诉后确认回执并提醒平台审核'
+  },
   SCORE_RECTIFY_RESULT: {
     id: 'score_rectify_result',
     keywords: ['整改', '审核结果', '服务分'],
@@ -3049,6 +3054,7 @@ function createApp({
     const templateIdByKey = {
       score_stage_warning: settings.scoreStageWarningTemplateId || '',
       score_rectify_apply: settings.scoreRectifyApplyTemplateId || '',
+      score_appeal_apply: settings.scoreAppealApplyTemplateId || '',
       score_rectify_result: settings.scoreRectifyResultTemplateId || '',
       score_appeal_result: settings.scoreAppealResultTemplateId || ''
       ,product_auto_delist: settings.productAutoDelistTemplateId || '',
@@ -4274,6 +4280,9 @@ function createApp({
     if (payload.type === 'RECTIFY') {
       notifyMerchantScore(data, merchant.id, 'SCORE_RECTIFY_APPLY', '整改申请已提交',
         `${caseRecord.caseNo} 已进入平台审核，处理时限 48 小时。请同步准备整改过程材料。`, now, 'SCORE', { caseId: caseRecord.id });
+    } else {
+      notifyMerchantScore(data, merchant.id, 'SCORE_APPEAL_APPLY', '记录申诉已提交',
+        `${caseRecord.caseNo} 已进入平台审核，处理时限 48 小时。平台将通过工单回传结果。`, now, 'SCORE', { caseId: caseRecord.id });
     }
     return caseRecord;
   }
@@ -4922,6 +4931,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const configuredIds = {
           score_stage_warning: settings.scoreStageWarningTemplateId || '',
           score_rectify_apply: settings.scoreRectifyApplyTemplateId || '',
+          score_appeal_apply: settings.scoreAppealApplyTemplateId || '',
           score_rectify_result: settings.scoreRectifyResultTemplateId || '',
           score_appeal_result: settings.scoreAppealResultTemplateId || ''
           ,product_auto_delist: settings.productAutoDelistTemplateId || '',
@@ -5580,6 +5590,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
                 } : null
               });
             }),
+            watchingProducts: products
+              .filter((product) => ['LOW_QUALITY', 'SERVICE_RISK'].includes(product.autoDelistRule)
+                && product.active !== false && productComplianceWatchUntil(product))
+              .map((product) => ({
+                id: product.id,
+                name: product.name,
+                autoDelistRule: product.autoDelistRule,
+                autoDelistReason: product.autoDelistReason || '',
+                autoDelistReviewNote: product.autoDelistReviewNote || '',
+                watchUntil: productComplianceWatchUntil(product)
+              })),
             promotionSummary: products
               .filter((product) => Number(product.salePriceInCents || 0) > 0)
               .map((product) => ({
@@ -7762,6 +7783,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               configuredId: ({
                 score_stage_warning: data.adminSettings?.scoreStageWarningTemplateId || '',
                 score_rectify_apply: data.adminSettings?.scoreRectifyApplyTemplateId || '',
+                score_appeal_apply: data.adminSettings?.scoreAppealApplyTemplateId || '',
                 score_rectify_result: data.adminSettings?.scoreRectifyResultTemplateId || '',
                 score_appeal_result: data.adminSettings?.scoreAppealResultTemplateId || '',
                 product_auto_delist: data.adminSettings?.productAutoDelistTemplateId || '',
@@ -7990,7 +8012,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isInteger(value) || value < 1 || value > 20) throw new ApiError(400, 'VALIDATION_ERROR', '售后超时下架阈值需为 1-20 单');
             current.productComplianceOverdueAfterSaleThreshold = value;
           }
-          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'negativeReviewReplyTemplateId', 'slaWarningTemplateId', 'favoritePriceNoticeTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'restockNoticeTemplateId', 'afterSaleTemplateId', 'leadFollowUpTemplateId']) {
+          for (const field of ['scoreStageWarningTemplateId', 'scoreRectifyApplyTemplateId', 'scoreAppealApplyTemplateId', 'scoreRectifyResultTemplateId', 'scoreAppealResultTemplateId', 'productAutoDelistTemplateId', 'productComplianceRestoredTemplateId', 'stockLowStockTemplateId', 'negativeReviewReplyTemplateId', 'slaWarningTemplateId', 'favoritePriceNoticeTemplateId', 'orderStatusTemplateId', 'orderServiceTemplateId', 'restockNoticeTemplateId', 'afterSaleTemplateId', 'leadFollowUpTemplateId']) {
             if (body[field] !== undefined) current[field] = String(body[field]).trim().slice(0, 120);
           }
           if (body.paymentTimeoutMinutes !== undefined) {

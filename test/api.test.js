@@ -4238,6 +4238,13 @@ test('service score cases support appeal review, rectification and subscription 
   assert.equal(appeal.response.status, 201);
   assert.equal(appeal.body.data.status, 'SUBMITTED');
   assert.equal(appeal.body.data.reasonTypeLabel, '差评记录有误');
+  assert.ok((store.read().notifications || []).some((item) => (
+    item.metadata?.caseId === appeal.body.data.id
+    && item.title === '记录申诉已提交'
+  )), 'appeal submission should create an immediate merchant receipt');
+  assert.ok((store.read().subscribeMessages || []).some((item) => (
+    item.templateId === 'score_appeal_apply' && item.status === 'QUEUED'
+  )), 'appeal submission should queue the configured subscribe message');
 
   const duplicate = await api('/api/merchant/score-cases', {
     method: 'POST', headers: merchantHeaders,
@@ -4468,6 +4475,10 @@ test('low quality products are auto delisted and can be restored after complianc
   assert.equal(restored.body.data.active, true);
   assert.equal(restored.body.data.autoDelistStatus, 'MANUAL_RESTORED');
   assert.ok((store.read().subscribeMessages || []).some((item) => item.templateId === 'product_compliance_restored' && item.status === 'QUEUED'));
+  const watchOverview = await api('/api/merchant/overview', { headers: merchantHeaders });
+  const watchingProduct = watchOverview.body.data.watchingProducts.find((item) => item.id === 'prod_ebike_001');
+  assert.ok(watchingProduct, 'manually restored products should be visible in merchant watch list');
+  assert.ok(watchingProduct.watchUntil, 'merchant watch list should include the observation deadline');
 
   const riskOverview = await api('/api/admin/overview', { headers: adminHeaders });
   assert.ok(riskOverview.body.data.operationsReport.totals.autoDelists >= 1);

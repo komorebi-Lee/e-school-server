@@ -903,6 +903,7 @@ function scoresView() {
   const templatePanel = `<section class="panel"><div class="panel-head"><h2>微信订阅消息模板</h2><span>服务分与订单提醒</span></div><div class="form-grid" style="grid-template-columns:repeat(2,1fr)">
     <label>服务分下降模板 ID<input id="scoreStageTemplate" value="${esc(state.data.settings?.scoreStageWarningTemplateId || '')}"></label>
     <label>整改申请模板 ID<input id="scoreRectifyApplyTemplate" value="${esc(state.data.settings?.scoreRectifyApplyTemplateId || '')}"></label>
+    <label>申诉提交模板 ID<input id="scoreAppealApplyTemplate" value="${esc(state.data.settings?.scoreAppealApplyTemplateId || '')}"></label>
     <label>整改结果模板 ID<input id="scoreRectifyResultTemplate" value="${esc(state.data.settings?.scoreRectifyResultTemplateId || '')}"></label>
     <label>申诉结果模板 ID<input id="scoreAppealResultTemplate" value="${esc(state.data.settings?.scoreAppealResultTemplateId || '')}"></label>
     <label>商品下架提醒模板 ID<input id="productAutoDelistTemplate" value="${esc(state.data.settings?.productAutoDelistTemplateId || '')}"></label>
@@ -1038,6 +1039,7 @@ bindView = function () {
       body: JSON.stringify({
         scoreStageWarningTemplateId: document.querySelector('#scoreStageTemplate').value.trim(),
         scoreRectifyApplyTemplateId: document.querySelector('#scoreRectifyApplyTemplate').value.trim(),
+        scoreAppealApplyTemplateId: document.querySelector('#scoreAppealApplyTemplate').value.trim(),
         scoreRectifyResultTemplateId: document.querySelector('#scoreRectifyResultTemplate').value.trim(),
         scoreAppealResultTemplateId: document.querySelector('#scoreAppealResultTemplate').value.trim(),
         productAutoDelistTemplateId: document.querySelector('#productAutoDelistTemplate').value.trim(),
