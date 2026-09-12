@@ -5531,6 +5531,15 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .sort((a, b) => String(a.dueAt).localeCompare(String(b.dueAt)));
         const revenueInCents = orders.filter((order) => ['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(order.status))
           .reduce((sum, order) => sum + (order.totalInCents || 0), 0);
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        const todayOrders = orders.filter((order) => {
+          const createdAt = new Date(order.createdAt);
+          return !Number.isNaN(createdAt.getTime()) && createdAt.getTime() >= todayStart.getTime();
+        });
+        const todayRevenueInCents = todayOrders
+          .filter((order) => ['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(order.status))
+          .reduce((sum, order) => sum + (order.totalInCents || 0), 0);
         return sendJson(response, 200, {
           data: {
             merchant: merchantPublic(merchant),
@@ -5557,6 +5566,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               slaOverdueCount: slaAlerts.filter((alert) => alert.level === 'OVERDUE').length,
               favoriteCount: merchantFavoriteCount,
               favoriteDemandText: favoriteDemandText(merchantFavoriteCount),
+              today: { orderCount: todayOrders.length, revenueInCents: todayRevenueInCents },
               settlementMetrics
             },
             products: products.map((product) => {

@@ -274,6 +274,11 @@ test('merchant product campaigns use enforced sale pricing', async () => {
   assert.equal(merchantProduct.promotion.originalPriceInCents, 1800);
   assert.equal(merchantProduct.promotion.statusText, '限时直降');
 
+  const today = overview.body.data.metrics.today;
+  assert.ok(today, 'overview should expose today metrics');
+  assert.equal(typeof today.orderCount, 'number', 'today should report order count');
+  assert.equal(typeof today.revenueInCents, 'number', 'today should report revenue');
+
   const invalidSale = await api(`/api/merchant/products/${productId}`, {
     method: 'POST', headers: merchantAuth,
     body: JSON.stringify({ salePriceInCents: 1800, saleStartsAt: new Date(now - 3600 * 1000).toISOString(), saleEndsAt: new Date(now + 3600 * 1000).toISOString() })
