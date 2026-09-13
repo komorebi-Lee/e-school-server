@@ -40,6 +40,14 @@ function isTlsInterceptionError(error) {
   return tlsCodes.has(error.code) || /self-signed/i.test(error.message);
 }
 
+function localDateKey(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
 function publicSettings(settings = {}) {
   return {
     brandName: settings.brandName || '狮山智生活',
@@ -5653,6 +5661,44 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               .filter((product) => product.publishReviewStatus === 'PENDING_REVIEW')
               .map((product) => ({ id: product.id, name: product.name, publishReviewNote: product.publishReviewNote || '' }))
           },
+          requestId
+        });
+      }
+
+            if (request.method === 'GET' && pathname === '/api/merchant/revenue-trend') {
+        const requestedDays = Number(url.searchParams.get('days')) || 7;
+        const dayCount = requestedDays >= 7 && requestedDays <= 90 ? requestedDays : 7;
+        const data = store.read();
+        const merchant = (data.merchants || []).find((item) => item.id === merchantSession.merchantId);
+        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        const products = data.products.filter((item) => item.merchantId === merchant.id);
+        const merchantProductIds = new Set(products.map((product) => product.id));
+        const orders = data.orders.filter((order) =>
+          order.items.some((item) => merchantProductIds.has(item.productId) || item.merchantId === merchant.id)
+        );
+        const PAID_STATUSES = ['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'];
+        const buckets = [];
+        for (let i = dayCount - 1; i >= 0; i -= 1) {
+          const day = new Date();
+          day.setHours(0, 0, 0, 0);
+          day.setDate(day.getDate() - i);
+          buckets.push({ dateKey: localDateKey(day), revenueInCents: 0, orderCount: 0 });
+        }
+        const bucketByKey = new Map(buckets.map((bucket) => [bucket.dateKey, bucket]));
+        for (const order of orders) {
+          if (!PAID_STATUSES.includes(order.status)) continue;
+          const bucket = bucketByKey.get(localDateKey(new Date(order.createdAt)));
+          if (!bucket) continue;
+          bucket.revenueInCents += Number(order.totalInCents || 0);
+          bucket.orderCount += 1;
+        }
+        const series = buckets.map((bucket) => ({
+          date: bucket.dateKey,
+          revenueInCents: bucket.revenueInCents,
+          orderCount: bucket.orderCount
+        }));
+        return sendJson(response, 200, {
+          data: { days: dayCount, endDate: localDateKey(new Date()), series },
           requestId
         });
       }

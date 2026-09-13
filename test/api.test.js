@@ -5868,3 +5868,54 @@ test('rectification cases warn merchants before the review deadline', async () =
     body: JSON.stringify({ patrolIntervalMinutes: 10 })
   });
 });
+
+test('merchant revenue-trend returns last 7 days of revenue and orders', async () => {
+  const session = await loginWeChat('trend_buyer');
+  const merchantSession = await loginWeChat('merchant_demo');
+  const merchantLogin = await api('/api/merchant/login', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${merchantSession.token}` },
+    body: JSON.stringify({ merchantId: 'merchant_001' })
+  });
+  assert.equal(merchantLogin.response.status, 200);
+  const merchantAuth = { 'content-type': 'application/json', authorization: `Bearer ${merchantLogin.body.data.token}` };
+
+  const product = await api('/api/merchant/products', {
+    method: 'POST', headers: merchantAuth,
+    body: JSON.stringify({ name: '趋势测试商品', category: 'DIGITAL', description: '营收趋势测试', priceInCents: 2500, stock: 5 })
+  });
+  assert.equal(product.response.status, 201);
+
+  const created = await api('/api/orders', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ userId: session.userId, items: [{ productId: product.body.data.id, quantity: 2 }] })
+  });
+  assert.equal(created.response.status, 201);
+  const payment = await confirmPayment(created.body.paymentOrder.id, session.token);
+  assert.equal(payment.response.status, 200);
+
+  const trend = await api('/api/merchant/revenue-trend', { headers: merchantAuth });
+  assert.equal(trend.response.status, 200);
+  assert.equal(trend.body.data.days, 7);
+  assert.ok(Array.isArray(trend.body.data.series));
+  assert.equal(trend.body.data.series.length, 7);
+  for (const bucket of trend.body.data.series) {
+    assert.equal(typeof bucket.date, 'string');
+    assert.equal(typeof bucket.revenueInCents, 'number');
+    assert.equal(typeof bucket.orderCount, 'number');
+    assert.ok(bucket.revenueInCents >= 0);
+    assert.ok(bucket.orderCount >= 0);
+  }
+  const totalRevenue = trend.body.data.series.reduce((sum, b) => sum + b.revenueInCents, 0);
+  assert.ok(totalRevenue >= 5000, 'trend should include the paid order revenue (2500 * 2)');
+  const todayBucket = trend.body.data.series[trend.body.data.series.length - 1];
+  assert.ok(todayBucket.orderCount >= 1, 'today should count the paid order');
+
+  const custom = await api('/api/merchant/revenue-trend?days=14', { headers: merchantAuth });
+  assert.equal(custom.response.status, 200);
+  assert.equal(custom.body.data.days, 14);
+  assert.equal(custom.body.data.series.length, 14);
+
+  const invalid = await api('/api/merchant/revenue-trend?days=3', { headers: merchantAuth });
+  assert.equal(invalid.response.status, 200);
+  assert.equal(invalid.body.data.days, 7, 'days below 7 should default to 7');
+});
