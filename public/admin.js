@@ -1,5 +1,5 @@
 const savedAdminUser=JSON.parse(localStorage.getItem('shishan_admin_user')||'null');
-const state={data:null,view:'dashboard',query:'',status:'ALL',ownerFilter:'ALL',token:localStorage.getItem('shishan_admin_token')||'',user:savedAdminUser};
+const state={data:null,revenueTrend:null,view:'dashboard',query:'',status:'ALL',ownerFilter:'ALL',token:localStorage.getItem('shishan_admin_token')||'',user:savedAdminUser};
 const lowStockThreshold=Number((state.data.settings||{}).lowStockThreshold??10);
 const titles={dashboard:'经营概览',merchants:'商家入驻',qualification:'资质复审',products:'商品中心',stock:'库存流水',promos:'话费活动',reviews:'商品评价',orders:'电瓶车订单',payments:'支付单',phones:'电话卡订单',recharges:'话费权益',finance:'财务流水',broadband:'宽带资格',plates:'牌照辅助',afterSales:'售后工单',notifications:'站内通知',logs:'操作日志',settings:'运营设置',settlements:'商家结算',payouts:'商家提现',patrol:'超时预警',scores:'商家服务分'};
 titles.serviceCollabs='服务单协同';
@@ -21,7 +21,7 @@ async function login(username,password){const response=await fetch('/api/admin/l
 function logout(){localStorage.removeItem('shishan_admin_token');localStorage.removeItem('shishan_admin_user');state.token='';state.user=null;document.querySelector('#appShell').classList.add('hidden');document.querySelector('#loginPage').classList.remove('hidden')}
 function showApp(){renderAdminIdentity();document.querySelector('#loginPage').classList.add('hidden');document.querySelector('#appShell').classList.remove('hidden')}
 function renderAdminIdentity(){const user=state.user||{name:'运营管理员',roleLabel:'管理员'};const box=document.querySelector('.sidebar-user');if(!box)return;box.querySelector('strong').textContent=user.name||user.username||'运营管理员';box.querySelector('small').textContent=user.roleLabel||user.role||'管理员';box.querySelector('.avatar').textContent=(user.name||user.username||'运').slice(0,1)}
-async function load(){document.querySelector('#syncState').textContent='正在同步';state.data=await api('/api/admin/overview');const settings=state.data.settings||{};const school=document.querySelector('#sidebarSchool');const campus=document.querySelector('#sidebarCampus');if(school)school.textContent=settings.schoolName||'华中农业大学';if(campus)campus.textContent=settings.campusName||'狮山校区';document.querySelector('#syncState').textContent=`已同步 ${new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}`;render()}
+async function load(){document.querySelector('#syncState').textContent='正在同步';state.data=await api('/api/admin/overview');try{state.revenueTrend=await api('/api/admin/revenue-trend?days=7')}catch(error){state.revenueTrend=null}const settings=state.data.settings||{};const school=document.querySelector('#sidebarSchool');const campus=document.querySelector('#sidebarCampus');if(school)school.textContent=settings.schoolName||'华中农业大学';if(campus)campus.textContent=settings.campusName||'狮山校区';document.querySelector('#syncState').textContent=`已同步 ${new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}`;render()}
 
 const metric=(name,value,note,primary=false)=>`<div class="metric ${primary?'primary-metric':''}"><div class="metric-label">${name}</div><div class="metric-value">${value}</div><div class="metric-note">${note}</div></div>`;
 const task=(name,note,count,view)=>`<div class="task" data-goto="${view}"><div><strong>${name}</strong><p>${note}</p></div><div class="task-count">${count}</div></div>`;
@@ -58,6 +58,19 @@ dashboard=function(){
     .replace('<div class="task-list">',`<div class="task-list">${reconciliationTask}`)
     .replace('<div class="dashboard-grid">',operationsReportPanel()+'<div class="dashboard-grid">')
     .replace('<section class="panel" style="margin-top:16px">',`${slaOwnerTasksPanel()}<section class="panel" style="margin-top:16px">`);
+};
+function revenueTrendPanel(){
+  const trend=state.revenueTrend;
+  if(!trend||!Array.isArray(trend.series)||!trend.series.length)return'';
+  const maxRevenue=Math.max(...trend.series.map(b=>b.revenueInCents||0),1);
+  const bars=trend.series.map(b=>`<div class="trend-col"><div class="trend-bar-fill" style="height:${Math.max(6,Math.round((b.revenueInCents||0)/maxRevenue*96))}px"></div><small>${esc(String(b.date||'').slice(5))}</small></div>`).join('');
+  const total=trend.series.reduce((sum,b)=>sum+(b.revenueInCents||0),0);
+  const orders=trend.series.reduce((sum,b)=>sum+(b.orderCount||0),0);
+  return`<section class="panel" style="margin-top:16px"><div class="panel-head"><h2>近7日营收趋势</h2><span>营收 ${money(total)} · 订单 ${orders} 单</span></div><div class="trend-chart">${bars}</div></section>`;
+}
+const dashboardWithReport=dashboard;
+dashboard=function(){
+  return dashboardWithReport().replace('<section class="panel" style="margin-top:16px">',`${revenueTrendPanel()}<section class="panel" style="margin-top:16px">`);
 };
 function toolbar(count,{add=false,statusesList=[]}={}){return`<div class="page-actions"><p>共 ${count} 条记录</p><div>${add?'<button id="addProduct" class="primary">＋ 新增商品</button>':''}</div></div><div class="filterbar"><div class="filters"><input id="listSearch" class="search" value="${esc(state.query)}" placeholder="搜索当前列表">${statusesList.length?`<select id="statusFilter" class="filter-select"><option value="ALL">全部状态</option>${statusesList.map(x=>`<option value="${x}" ${state.status===x?'selected':''}>${label(x)}</option>`).join('')}</select>`:''}</div><button id="exportButton" class="export-button">导出 CSV</button></div>`}
 function table(headers,rows,count){return`<div class="table-wrap"><table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')||`<tr><td colspan="${headers.length}" class="empty">没有符合条件的记录</td></tr>`}</tbody></table><div class="pagination"><span>显示 1-${Math.min(count,20)}，共 ${count} 条</span><div><button disabled>上一页</button> <button disabled>下一页</button></div></div></div>`}

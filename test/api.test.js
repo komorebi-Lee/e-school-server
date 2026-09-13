@@ -5944,3 +5944,39 @@ test('merchant revenue-trend returns last 7 days of revenue and orders', async (
   assert.equal(invalid.response.status, 200);
   assert.equal(invalid.body.data.days, 7, 'days below 7 should default to 7');
 });
+
+test('admin revenue-trend aggregates platform-wide revenue and orders', async () => {
+  const admin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(admin.response.status, 200);
+  const adminAuth = { 'content-type': 'application/json', authorization: `Bearer ${admin.body.data.token}` };
+
+  const unauthorized = await api('/api/admin/revenue-trend');
+  assert.equal(unauthorized.response.status, 401);
+
+  const trend = await api('/api/admin/revenue-trend?days=7', { headers: adminAuth });
+  assert.equal(trend.response.status, 200);
+  assert.equal(trend.body.data.days, 7);
+  assert.ok(Array.isArray(trend.body.data.series));
+  assert.equal(trend.body.data.series.length, 7);
+  for (const bucket of trend.body.data.series) {
+    assert.equal(typeof bucket.date, 'string');
+    assert.equal(typeof bucket.revenueInCents, 'number');
+    assert.equal(typeof bucket.orderCount, 'number');
+    assert.ok(bucket.revenueInCents >= 0);
+    assert.ok(bucket.orderCount >= 0);
+  }
+  const totalRevenue = trend.body.data.series.reduce((sum, b) => sum + b.revenueInCents, 0);
+  assert.ok(totalRevenue > 0, 'trend should include paid business revenue from earlier tests');
+
+  const custom = await api('/api/admin/revenue-trend?days=14', { headers: adminAuth });
+  assert.equal(custom.response.status, 200);
+  assert.equal(custom.body.data.days, 14);
+  assert.equal(custom.body.data.series.length, 14);
+
+  const invalid = await api('/api/admin/revenue-trend?days=3', { headers: adminAuth });
+  assert.equal(invalid.response.status, 200);
+  assert.equal(invalid.body.data.days, 7, 'days below 7 should default to 7');
+});

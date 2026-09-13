@@ -6640,6 +6640,51 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: updated, requestId });
       }
 
+      if (request.method === 'GET' && pathname === '/api/admin/revenue-trend') {
+        const requestedDays = Number(url.searchParams.get('days')) || 7;
+        const dayCount = requestedDays >= 7 && requestedDays <= 90 ? requestedDays : 7;
+        const data = store.read();
+        const buckets = [];
+        for (let i = dayCount - 1; i >= 0; i -= 1) {
+          const day = new Date();
+          day.setHours(0, 0, 0, 0);
+          day.setDate(day.getDate() - i);
+          buckets.push({ dateKey: localDateKey(day), revenueInCents: 0, orderCount: 0 });
+        }
+        const bucketByKey = new Map(buckets.map((bucket) => [bucket.dateKey, bucket]));
+        const addEvent = (createdAt, amountInCents) => {
+          const bucket = bucketByKey.get(localDateKey(new Date(createdAt)));
+          if (!bucket) return;
+          bucket.revenueInCents += Number(amountInCents || 0);
+          bucket.orderCount += 1;
+        };
+        for (const order of data.orders || []) {
+          if (!['PAID', 'FULFILLING', 'COMPLETED', 'AFTER_SALE'].includes(order.status)) continue;
+          addEvent(order.createdAt, order.totalInCents);
+        }
+        for (const order of data.phoneCardOrders || []) {
+          if (!['PENDING_REALNAME', 'ACTIVATED'].includes(order.status)) continue;
+          addEvent(order.createdAt, order.amountInCents);
+        }
+        for (const order of data.rechargeOrders || []) {
+          if (!['PENDING_CREDIT', 'CREDITED'].includes(order.status)) continue;
+          addEvent(order.createdAt, order.paidInCents);
+        }
+        for (const order of data.plateApplications || []) {
+          if (order.paymentStatus !== 'PAID') continue;
+          addEvent(order.createdAt, order.feeInCents);
+        }
+        const series = buckets.map((bucket) => ({
+          date: bucket.dateKey,
+          revenueInCents: bucket.revenueInCents,
+          orderCount: bucket.orderCount
+        }));
+        return sendJson(response, 200, {
+          data: { days: dayCount, endDate: localDateKey(new Date()), series },
+          requestId
+        });
+      }
+
       if (request.method === 'GET' && pathname === '/api/admin/overview') {
         await sweepExpiredOrders();
         sweepMaturedSettlements();
