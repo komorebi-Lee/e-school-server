@@ -6982,6 +6982,51 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const items = [...phoneCardOrders, ...rechargeOrders, ...broadbandApplications, ...plateApplications].sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
         return sendJson(response,200,{data:items,total:items.length,requestId});
       }
+            if (request.method === 'GET' && pathname === '/api/my/charging-eligibility') {
+        const { userId } = requireUser(request);
+        const data = store.read();
+        const applications = (data.plateApplications || [])
+          .filter((item) => item.userId === userId)
+          .sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)));
+        const approved = applications.find((item) => ['APPROVED', 'COMPLETED'].includes(item.status));
+        if (approved) {
+          return sendJson(response, 200, {
+            data: {
+              eligible: true,
+              stateLabel: '已开通',
+              detail: '校园牌照已审核通过，可按学校规定使用校园充电设施',
+              plateApplicationId: approved.id,
+              updatedAt: approved.updatedAt || approved.createdAt || ''
+            },
+            requestId
+          });
+        }
+        const pending = applications.find((item) => item.status !== 'REJECTED');
+        if (pending) {
+          const pendingLabels = { PENDING_PAYMENT: '待支付', MATERIAL_PENDING: '待补材料', REVIEWING: '审核中', PENDING_VERIFY: '待核验' };
+          return sendJson(response, 200, {
+            data: {
+              eligible: false,
+              stateLabel: pendingLabels[pending.status] || '办理中',
+              detail: '牌照审核通过后自动开通校园充电资格',
+              plateApplicationId: pending.id,
+              updatedAt: pending.updatedAt || pending.createdAt || ''
+            },
+            requestId
+          });
+        }
+        return sendJson(response, 200, {
+          data: {
+            eligible: false,
+            stateLabel: '未申请',
+            detail: '完成校园牌照登记并审核通过后即可充电',
+            plateApplicationId: '',
+            updatedAt: ''
+          },
+          requestId
+        });
+      }
+
       if (request.method === 'GET' && pathname === '/api/my/orders') {
         const { userId } = requireUser(request);
         await sweepExpiredOrders();

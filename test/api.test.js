@@ -5980,3 +5980,40 @@ test('admin revenue-trend aggregates platform-wide revenue and orders', async ()
   assert.equal(invalid.response.status, 200);
   assert.equal(invalid.body.data.days, 7, 'days below 7 should default to 7');
 });
+
+test('charging eligibility follows plate application review status', async () => {
+  const session = await loginWeChat('charging_user');
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+
+  const unauthorized = await api('/api/my/charging-eligibility');
+  assert.equal(unauthorized.response.status, 401);
+
+  const none = await api('/api/my/charging-eligibility', { headers: auth });
+  assert.equal(none.response.status, 200);
+  assert.equal(none.body.data.eligible, false);
+  assert.equal(none.body.data.stateLabel, '未申请');
+
+  const created = await api('/api/plate-applications', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({ customerName: '充电资格同学', customerPhone: '15527111003', studentNo: '2026101234569', vehicleModel: '自带测试车辆' })
+  });
+  assert.equal(created.response.status, 201);
+  const pending = await api('/api/my/charging-eligibility', { headers: auth });
+  assert.equal(pending.body.data.eligible, false);
+
+  const admin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  assert.equal(admin.response.status, 200);
+  const approved = await api(`/api/admin/plate-applications/${created.body.data.id}/status`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${admin.body.data.token}` },
+    body: JSON.stringify({ status: 'COMPLETED' })
+  });
+  assert.equal(approved.response.status, 200);
+
+  const eligible = await api('/api/my/charging-eligibility', { headers: auth });
+  assert.equal(eligible.body.data.eligible, true);
+  assert.equal(eligible.body.data.stateLabel, '已开通');
+  assert.equal(eligible.body.data.plateApplicationId, created.body.data.id);
+});
