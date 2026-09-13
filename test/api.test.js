@@ -5323,6 +5323,31 @@ test('users can favorite products and revisit them from profile', async () => {
   assert.equal(removedList.body.data.length, 0);
 });
 
+test('users get category-aware recommendations from purchase and favorite signals', async () => {
+  const session = await loginWeChat('recommend_user');
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+
+  const unauthorized = await api('/api/my/recommendations');
+  assert.equal(unauthorized.response.status, 401);
+
+  const add = await api('/api/products/prod_card_service_001/favorite', {
+    method: 'POST', headers: auth, body: JSON.stringify({ favorited: true })
+  });
+  assert.equal(add.response.status, 200);
+
+  const list = await api('/api/my/recommendations?limit=2', { headers: auth });
+  assert.equal(list.response.status, 200);
+  assert.equal(list.body.data.length, 2);
+  const ids = list.body.data.map((item) => item.id);
+  assert.ok(!ids.includes('prod_card_service_001'), 'favorited product should be excluded');
+  assert.equal(list.body.data[0].category, 'PHONE_PLAN', 'same category should rank first');
+  assert.ok(list.body.data.every((item) => (
+    item.active
+    && item.availableStock !== undefined
+    && 'ratingSummary' in item
+    && 'effectivePriceInCents' in item
+  )));
+});
 test('merchant and admin surfaces turn favorites into demand signals', async () => {
   const merchantSession = await loginWeChat('merchant_demo');
   const merchantLogin = await api('/api/merchant/login', {

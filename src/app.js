@@ -4619,6 +4619,58 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
+      if (request.method === 'GET' && pathname === '/api/my/recommendations') {
+        const { userId } = requireUser(request);
+        const data = store.read();
+        const favoriteProductIds = new Set((data.productFavorites || [])
+          .filter((item) => item.userId === userId)
+          .map((item) => item.productId));
+        const purchasedProductIds = new Set((data.orders || [])
+          .filter((order) => order.userId === userId)
+          .flatMap((order) => (order.items || []).map((item) => item.productId).filter(Boolean)));
+        const categoryAffinity = new Map();
+        const bumpCategory = (category, weight) => {
+          if (!category) return;
+          categoryAffinity.set(category, (categoryAffinity.get(category) || 0) + weight);
+        };
+        for (const product of data.products) {
+          if (favoriteProductIds.has(product.id)) bumpCategory(product.category, 3);
+          if (purchasedProductIds.has(product.id)) bumpCategory(product.category, 2);
+        }
+        const salesCounts = calculateProductSalesCounts(data);
+        const candidates = data.products
+          .filter((product) => product.active
+            && !favoriteProductIds.has(product.id)
+            && !purchasedProductIds.has(product.id));
+        const scored = candidates.map((product, index) => {
+          const reviewed = withProductReviewSummary(product, data.productReviews || []);
+          const salesCount = salesCounts.get(product.id) || 0;
+          const affinity = categoryAffinity.get(product.category) || 0;
+          return {
+            product,
+            index,
+            score: affinity * 1000
+              + (reviewed.ratingSummary?.average || 0) * 100
+              + Math.min(salesCount, 50)
+          };
+        }).sort((a, b) => b.score - a.score || a.index - b.index);
+        const now = new Date().toISOString();
+        const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 4, 1), 8);
+        const items = scored.slice(0, limit).map((entry) => withProductSale(
+          withMerchantScore(
+            withAvailableStock(
+              withProductReviewSummary(
+                withMerchantName(entry.product, data.merchants || []),
+                data.productReviews || []
+              )
+            ),
+            data.merchants || []
+          ),
+          now
+        ));
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
       if (productFavoriteMatch) {
         requireUser(request);
         if (request.method === 'GET') {
