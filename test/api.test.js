@@ -1875,6 +1875,20 @@ test('completed order owner can submit one verified product review', async () =>
   assert.equal(merchantReply.body.data.reply.merchantName, '评价测试车行');
   assert.equal(merchantReply.body.data.reply.content, '感谢反馈，我们会持续检查车辆与配送服务。');
 
+  const myReviews = await api('/api/my/product-reviews', { headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` } });
+  assert.equal(myReviews.response.status, 200);
+  const myReview = myReviews.body.data.find((item) => item.id === review.body.data.id);
+  assert.ok(myReview);
+  assert.equal(myReview.productName, product.body.data.name);
+  assert.ok(myReview.content.includes('配送'));
+  assert.deepEqual(myReview.images, ['/api/uploads/review-photo.jpg']);
+  assert.equal(myReview.visibility, 'PUBLISHED');
+
+  const myReviewsAfter = await api('/api/my/product-reviews', { headers: { 'content-type': 'application/json', authorization: `Bearer ${userSession.token}` } });
+  const myReviewAfter = myReviewsAfter.body.data.find((item) => item.id === review.body.data.id);
+  assert.ok(myReviewAfter.reply);
+  assert.ok(myReviewAfter.reply.content.includes('感谢'));
+
   const userNotifications = await api('/api/my/notifications', {
     headers: { authorization: `Bearer ${userSession.token}` }
   });

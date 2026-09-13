@@ -7046,9 +7046,24 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (request.method === 'GET' && pathname === '/api/my/product-reviews') {
         const { userId } = requireUser(request);
-        const records = (store.read().productReviews || [])
+        const data = store.read();
+        const records = (data.productReviews || [])
           .filter((item) => item.userId === userId)
-          .map((item) => ({ id:item.id, orderId:item.orderId, productId:item.productId, rating:item.rating, createdAt:item.createdAt }));
+          .map((item) => {
+            const product = (data.products || []).find((p) => p.id === item.productId);
+            return {
+              id: item.id,
+              orderId: item.orderId,
+              productId: item.productId,
+              productName: product?.name || '商品',
+              rating: item.rating,
+              content: item.content || '',
+              images: Array.isArray(item.images) ? item.images.slice(0, 3) : [],
+              reply: item.reply || null,
+              visibility: item.visibility || 'PUBLISHED',
+              createdAt: item.createdAt
+            };
+          });
         return sendJson(response, 200, { data: records, total: records.length, requestId });
       }
 
