@@ -6031,3 +6031,34 @@ test('charging eligibility follows plate application review status', async () =>
   assert.equal(eligible.body.data.stateLabel, '已开通');
   assert.equal(eligible.body.data.plateApplicationId, created.body.data.id);
 });
+
+test('footprints feed category-aware recommendations', async () => {
+  const session = await loginWeChat('footprint_user');
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+
+  const unauthorized = await api('/api/my/footprints', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ productId: 'prod_card_service_001' })
+  });
+  assert.equal(unauthorized.response.status, 401);
+
+  const record = await api('/api/my/footprints', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({ productId: 'prod_card_service_001' })
+  });
+  assert.equal(record.response.status, 200);
+
+  const missing = await api('/api/my/footprints', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({ productId: 'not_a_product' })
+  });
+  assert.equal(missing.response.status, 404);
+
+  const footprints = await api('/api/my/footprints', { headers: auth });
+  assert.equal(footprints.response.status, 200);
+  assert.ok(footprints.body.data.some((item) => item.id === 'prod_card_service_001'));
+
+  const list = await api('/api/my/recommendations?limit=2', { headers: auth });
+  assert.equal(list.response.status, 200);
+  assert.equal(list.body.data[0].category, 'PHONE_PLAN', 'viewed category should rank first');
+});

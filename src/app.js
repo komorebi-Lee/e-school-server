@@ -4619,6 +4619,47 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
+      if (request.method === 'POST' && pathname === '/api/my/footprints') {
+        const { userId } = requireUser(request);
+        const body = await readJson(request);
+        const productId = requireString(body.productId, 'productId', { maxLength: 80 });
+        const result = store.update((data) => {
+          const product = data.products.find((item) => item.id === productId && item.active);
+          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          data.productFootprints = data.productFootprints || [];
+          data.productFootprints = data.productFootprints.filter((item) => !(
+            item.productId === product.id && item.userId === userId
+          ));
+          const now = new Date().toISOString();
+          data.productFootprints.unshift({ productId: product.id, userId, createdAt: now, updatedAt: now });
+          if (data.productFootprints.length > 200) data.productFootprints.length = 200;
+          return { recorded: true };
+        });
+        return sendJson(response, 200, { data: result, requestId });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/my/footprints') {
+        const { userId } = requireUser(request);
+        const data = store.read();
+        const footprintProductIds = new Set(
+          (data.productFootprints || [])
+            .filter((item) => item.userId === userId)
+            .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
+            .map((item) => item.productId)
+        );
+        const now = new Date().toISOString();
+        const items = data.products
+          .filter((product) => product.active && footprintProductIds.has(product.id))
+          .slice(0, 20)
+          .map((product) => withProductSale(
+            withMerchantScore(
+              withAvailableStock(withMerchantName(product, data.merchants || [])),
+              data.merchants || []
+            ),
+            now
+          ));
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
       if (request.method === 'GET' && pathname === '/api/my/recommendations') {
         const { userId } = requireUser(request);
         const data = store.read();
@@ -4633,9 +4674,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!category) return;
           categoryAffinity.set(category, (categoryAffinity.get(category) || 0) + weight);
         };
+        const footprintProductIds = new Set((data.productFootprints || [])
+          .filter((item) => item.userId === userId)
+          .map((item) => item.productId));
         for (const product of data.products) {
           if (favoriteProductIds.has(product.id)) bumpCategory(product.category, 3);
           if (purchasedProductIds.has(product.id)) bumpCategory(product.category, 2);
+          if (footprintProductIds.has(product.id)) bumpCategory(product.category, 1);
         }
         const salesCounts = calculateProductSalesCounts(data);
         const candidates = data.products
