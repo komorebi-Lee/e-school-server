@@ -5295,6 +5295,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (role === 'PLATFORM' && action === 'INTERVENE') item.collaboration.intervention = { status:'REQUESTED', note, updatedAt:new Date().toISOString() };
           if (role === 'PLATFORM' && action === 'RESOLVE') item.collaboration.intervention = { status:'RESOLVED', note, updatedAt:new Date().toISOString() };
           if (role === 'USER' && action === 'APPEAL') item.collaboration.intervention = { status:'REQUESTED', note, updatedAt:new Date().toISOString() };
+          if (role === 'USER' && action === 'APPEAL') addNotification(data, 'PLATFORM', 'SERVICE_MESSAGE', `${item.orderNo} 申请平台协助`, note, { focusId: item.id });
           const eventNote = role === 'MERCHANT' ? (action === 'ACCEPT' ? '商家已确认履约' : action === 'COMPLETE' ? '商家已核验交付码，订单已完成' : note) : note;
           appendCollaborationEvent(item, role, action, eventNote);
           addAudit(data, `${role}订单协同动作：${action}`, item.orderNo);
