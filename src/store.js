@@ -380,11 +380,40 @@ class JsonStore {
     fs.renameSync(temporaryPath, this.filePath);
   }
 
+  /**
+   * 同步读 → 改 → 写。整段零 await，因此 Node 单线程下天然原子。
+   *
+   * 同步性是当前正确性的来源，一旦引入 await 就会重新出现丢失更新窗口，
+   * 所以这里同步返回结果，并把「是否发生过重入」等不变量暴露到 stats() 供断言。
+   */
   update(mutator) {
-    const data = this.read();
-    const result = mutator(data);
-    this.write(data);
-    return result;
+    this._activeWrites = (this._activeWrites || 0) + 1;
+    const reentrancy = this._activeWrites - 1;
+    if (reentrancy > (this._maxWriteReentrancy || 0)) this._maxWriteReentrancy = reentrancy;
+    try {
+      const data = this.read();
+      const result = mutator(data);
+      this.write(data);
+      this._writeSeq = (this._writeSeq || 0) + 1;
+      return result;
+    } finally {
+      this._activeWrites -= 1;
+    }
+  }
+
+  /**
+   * 暴露写路径的可观测不变量，供测试断言，防止未来重构引入回归。
+   *
+   * - `writeSeq`：成功写入次数，单调递增
+   * - `maxWriteReentrancy`：mutator 内再次调用 update() 的最大嵌套层数，正常应为 0
+   * - `pendingAsyncWrites`：悬挂的异步写数量（JsonStore 为同步写，恒为 0）
+   */
+  stats() {
+    return {
+      writeSeq: this._writeSeq || 0,
+      maxWriteReentrancy: this._maxWriteReentrancy || 0,
+      pendingAsyncWrites: 0
+    };
   }
 }
 

@@ -67,6 +67,17 @@ POST /api/admin/finance-tasks/:id/resolve
 
 `CORS_ALLOWED_ORIGINS` 使用逗号分隔的浏览器来源，默认仅允许 `http://localhost:3000` 和 `http://127.0.0.1:3000`。小程序请求和管理端同域访问不受影响；如需把浏览器端部署到其他域名，必须显式配置精确 Origin，避免第三方网页直接调用带登录态的接口。
 
+### 上传配额（防滥用）
+
+`POST /api/uploads`（用户端上传，用于评价图片、市集图片、资质图片等）受 24 小时配额限制：
+
+- 默认**每用户每 24 小时 30 次**，超出返回 **429 `UPLOAD_RATE_LIMITED`**；响应体沿用统一错误格式 `{ error: { code, message }, requestId }`，message 会提示约多久后可重试
+- 配额由 `adminSettings.uploadRateLimitPer24h` 控制，可在管理端「运营设置」调整，**取值范围 1–200**（缺省 30）
+- 计数按**登录用户**维度独立统计，用户之间互不影响
+- 上传记录只保留 24 小时窗口内的数据并自动清理，`uploadRecords` 集合不会无限增长
+- 单次大小上限维持 **1KB ~ 5MB**，MIME 白名单（`image/jpeg` / `image/png` / `image/webp`）与文件魔数校验不变
+- **`POST /api/admin/uploads`（管理端银行回单上传）不在此配额内** —— 它已由 `FINANCE_MANAGE` 权限门禁控制，且批量上传回单是正常业务场景，加配额会阻塞财务操作
+
 浏览器管理端地址：
 
 ```text
