@@ -6168,6 +6168,55 @@ test('forum supports boards, publish, like toggle, and comments', async () => {
   assert.equal(badBoard.response.status, 400);
 });
 
+test('forum like state persists for the liking viewer across list and detail reads', async () => {
+  const session = await loginWeChat('forum_like_persist');
+  const other = await loginWeChat('forum_like_other');
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+  const created = await api('/api/forum/posts', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({ title: '点赞态回显回归', content: '点赞后刷新列表与详情都应保持已点赞', board: 'CAMPUS' })
+  });
+  assert.equal(created.response.status, 201);
+  const postId = created.body.data.id;
+
+  const viewerList = async (token) => api('/api/forum/posts', {
+    headers: token ? { authorization: `Bearer ${token}` } : {}
+  });
+  const findPost = (result) => {
+    const entry = result.body.data.find((post) => post.id === postId);
+    assert.ok(entry, 'the published post must appear in the public feed');
+    return entry;
+  };
+
+  // 未点赞时：登录用户与未登录用户都必须看到 liked === false
+  assert.equal(findPost(await viewerList(session.token)).liked, false, 'never-liked post must report liked=false to its viewer');
+  assert.equal(findPost(await viewerList(null)).liked, false, 'anonymous feed must report liked=false');
+  assert.equal((await api(`/api/forum/posts/${postId}`)).body.data.liked, false, 'anonymous detail must report liked=false');
+
+  const like = await api(`/api/forum/posts/${postId}/like`, {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(like.response.status, 200);
+  assert.equal(like.body.data.liked, true);
+  assert.equal(like.body.data.likes, 1);
+
+  // 回归：点赞后重新读取列表与详情都必须保持 liked === true（此前恒为 false）
+  assert.equal(findPost(await viewerList(session.token)).liked, true, 'feed must keep liked=true after the viewer liked the post');
+  const likedDetail = await api(`/api/forum/posts/${postId}`, { headers: { authorization: `Bearer ${session.token}` } });
+  assert.equal(likedDetail.body.data.liked, true, 'detail must keep liked=true after the viewer liked the post');
+  assert.equal(likedDetail.body.data.likes, 1);
+
+  // 点赞态是查看者相对的：其他登录用户不得继承点赞态
+  assert.equal(findPost(await viewerList(other.token)).liked, false, 'other viewers must not inherit the like state');
+
+  // 取消点赞后列表回落到 liked === false
+  const unlike = await api(`/api/forum/posts/${postId}/like`, {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(unlike.body.data.liked, false);
+  assert.equal(findPost(await viewerList(session.token)).liked, false, 'feed must fall back to liked=false after unliking');
+});
+
 test('admin can moderate marketplace listings and forum posts', async () => {
   const adminHeaders = await loginAdmin();
   const session = await loginWeChat('community_moderation');

@@ -5210,12 +5210,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const data = store.read();
         const board = url.searchParams.get('board');
         const query = (url.searchParams.get('q') || '').trim().toLowerCase();
+        // 传入可选登录用户，保证列表页能正确回显「我是否点过赞」。
+        const viewerId = optionalUser(request)?.userId || null;
         const posts = (data.forumPosts || [])
           .filter((post) => post.status === 'PUBLISHED')
           .filter((post) => !board || post.board === board)
           .filter((post) => !query || `${post.title} ${post.content}`.toLowerCase().includes(query))
           .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-          .map((post) => publicForumPost(post, null));
+          .map((post) => publicForumPost(post, viewerId));
         return sendJson(response, 200, { data: posts, total: posts.length, requestId });
       }
 
@@ -5256,9 +5258,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       const forumPostMatch = pathname.match(/^\/api\/forum\/posts\/([^/]+)$/);
       if (request.method === 'GET' && forumPostMatch) {
+        // 详情页同样需要回显当前登录用户的点赞态，避免刷新后回退为未点赞。
+        const viewerId = optionalUser(request)?.userId || null;
         const post = (store.read().forumPosts || []).find((entry) => entry.id === forumPostMatch[1]);
         if (!post || post.status !== 'PUBLISHED') throw new ApiError(404, 'FORUM_POST_NOT_FOUND', '帖子不存在或已隐藏');
-        return sendJson(response, 200, { data: publicForumPost(post, null), requestId });
+        return sendJson(response, 200, { data: publicForumPost(post, viewerId), requestId });
       }
 
       const forumLikeMatch = pathname.match(/^\/api\/forum\/posts\/([^/]+)\/like$/);
