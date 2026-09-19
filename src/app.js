@@ -1210,6 +1210,47 @@ function normalizeQualificationExpireDate(value) {
   return date;
 }
 
+const UPLOAD_RATE_WINDOW_MS = 24 * 60 * 60 * 1000;
+const UPLOAD_RATE_DEFAULT_LIMIT = 30;
+
+function uploadQuotaLimit(settings = {}) {
+  const raw = Number(settings.uploadRateLimitPer24h);
+  if (!Number.isFinite(raw) || raw <= 0) return UPLOAD_RATE_DEFAULT_LIMIT;
+  return Math.min(200, Math.max(1, Math.trunc(raw)));
+}
+
+function enforceUploadQuota(data, actorId, settings, now = new Date()) {
+  const limit = uploadQuotaLimit(settings);
+  const windowStart = new Date(now.getTime() - UPLOAD_RATE_WINDOW_MS).toISOString();
+  const recent = (data.uploadRecords || []).filter(
+    (item) => item.actorId === actorId && item.createdAt > windowStart
+  );
+  if (recent.length < limit) return;
+  const oldest = recent.reduce(
+    (min, item) => (item.createdAt < min ? item.createdAt : min),
+    recent[0].createdAt
+  );
+  const resetInMinutes = Math.max(
+    1,
+    Math.ceil((new Date(oldest).getTime() + UPLOAD_RATE_WINDOW_MS - now.getTime()) / 60000)
+  );
+  throw new ApiError(429, 'UPLOAD_RATE_LIMITED', `上传过于频繁，每 24 小时最多 ${limit} 张，请约 ${resetInMinutes} 分钟后重试`);
+}
+
+function recordUpload(data, actorId, fileName, size, now = new Date()) {
+  if (!Array.isArray(data.uploadRecords)) data.uploadRecords = [];
+  const windowStart = new Date(now.getTime() - UPLOAD_RATE_WINDOW_MS).toISOString();
+  // 只保留窗口内的记录，避免 uploadRecords 无限增长
+  data.uploadRecords = data.uploadRecords.filter((item) => item.createdAt > windowStart);
+  data.uploadRecords.push({
+    id: `upl_${randomUUID()}`,
+    actorId,
+    fileName,
+    size,
+    createdAt: now.toISOString()
+  });
+}
+
 function createApp({
   store,
   wechatAuth = exchangeWeChatCode,
@@ -4649,7 +4690,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'POST' && pathname === '/api/uploads') {
-        requireUser(request);
+        const uploader = requireUser(request);
         const body = await readJson(request);
         const dataBase64 = requireString(body.dataBase64, 'dataBase64', { maxLength: 7000000 });
         const mimeType = requireString(body.mimeType, 'mimeType', { maxLength: 50 });
@@ -4666,8 +4707,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         if (!isJpeg && !isPng && !isWebp) throw new ApiError(400, 'VALIDATION_ERROR', '图片内容格式不正确');
         const extension = mimeType === 'image/png' ? '.png' : mimeType === 'image/webp' ? '.webp' : '.jpg';
         const fileName = `${randomUUID()}${extension}`;
+        const uploadSnapshot = store.read();
+        enforceUploadQuota(uploadSnapshot, uploader.userId, uploadSnapshot.adminSettings || {});
         fs.mkdirSync(uploadsDirectory, { recursive: true });
         fs.writeFileSync(path.join(uploadsDirectory, fileName), file);
+        store.update((data) => recordUpload(data, uploader.userId, fileName, file.length));
         return sendJson(response, 201, { data: { url: `/api/uploads/${fileName}`, size: file.length }, requestId });
       }
 
