@@ -6062,3 +6062,191 @@ test('footprints feed category-aware recommendations', async () => {
   assert.equal(list.response.status, 200);
   assert.equal(list.body.data[0].category, 'PHONE_PLAN', 'viewed category should rank first');
 });
+
+test('marketplace supports publish, list, detail, ownership status, and my listings', async () => {
+  const session = await loginWeChat('market_user');
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+  const upload = await api('/api/uploads', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify(makeImage())
+  });
+  assert.equal(upload.response.status, 201);
+  const imageUrl = upload.body.data.url;
+
+  const created = await api('/api/market/items', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({
+      title: '高等数学教材（第七版）',
+      description: '九成新，校内自提',
+      category: 'BOOK',
+      condition: 'LIKE_NEW',
+      priceInCents: 1500,
+      images: [imageUrl],
+      contact: '微信 test-market'
+    })
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.data.categoryText, '二手书');
+  assert.equal(created.body.data.conditionText, '九成新');
+  assert.equal(created.body.data.isOwner, undefined, 'public create payload should not leak ownership');
+
+  const list = await api('/api/market/items');
+  assert.equal(list.response.status, 200);
+  assert.ok(list.body.data.some((item) => item.id === created.body.data.id));
+
+  const filtered = await api('/api/market/items?category=BOOK');
+  assert.ok(filtered.body.data.some((item) => item.id === created.body.data.id));
+
+  const detail = await api(`/api/market/items/${created.body.data.id}`, {
+    headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(detail.response.status, 200);
+  assert.equal(detail.body.data.isOwner, true, 'seller should see ownership on detail');
+
+  const sold = await api(`/api/market/items/${created.body.data.id}`, {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({ status: 'SOLD' })
+  });
+  assert.equal(sold.response.status, 200);
+  assert.equal(sold.body.data.statusText, '已出');
+
+  const other = await loginWeChat('market_other');
+  const forbidden = await api(`/api/market/items/${created.body.data.id}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${other.token}` },
+    body: JSON.stringify({ status: 'ACTIVE' })
+  });
+  assert.equal(forbidden.response.status, 403, 'only the seller can update item status');
+
+  const mine = await api('/api/my/market-items', {
+    headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.ok(mine.body.data.some((item) => item.id === created.body.data.id && item.status === 'SOLD'));
+});
+
+test('forum supports boards, publish, like toggle, and comments', async () => {
+  const session = await loginWeChat('forum_user');
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+  const created = await api('/api/forum/posts', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({ title: '自习占座攻略', content: '图书馆三楼靠窗早上有空位', board: 'STUDY' })
+  });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.data.boardText, '学习互助');
+
+  const list = await api('/api/forum/posts?board=STUDY');
+  assert.ok(list.body.data.some((post) => post.id === created.body.data.id));
+
+  const like = await api(`/api/forum/posts/${created.body.data.id}/like`, {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(like.response.status, 200);
+  assert.equal(like.body.data.liked, true);
+  assert.equal(like.body.data.likes, 1);
+
+  const unlike = await api(`/api/forum/posts/${created.body.data.id}/like`, {
+    method: 'POST', headers: { authorization: `Bearer ${session.token}` }
+  });
+  assert.equal(unlike.body.data.liked, false);
+  assert.equal(unlike.body.data.likes, 0);
+
+  const comment = await api(`/api/forum/posts/${created.body.data.id}/comments`, {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({ content: '感谢整理，周末就去' })
+  });
+  assert.equal(comment.response.status, 200);
+
+  const detail = await api(`/api/forum/posts/${created.body.data.id}`);
+  assert.equal(detail.response.status, 200);
+  assert.equal(detail.body.data.commentCount, 1);
+  assert.equal(detail.body.data.comments[0].content, '感谢整理，周末就去');
+
+  const badBoard = await api('/api/forum/posts', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({ title: '无效板块', content: '测试', board: 'NOT_A_BOARD' })
+  });
+  assert.equal(badBoard.response.status, 400);
+});
+
+test('admin can moderate marketplace listings and forum posts', async () => {
+  const adminHeaders = await loginAdmin();
+  const session = await loginWeChat('community_moderation');
+  const userHeaders = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+
+  const item = await api('/api/market/items', {
+    method: 'POST', headers: userHeaders,
+    body: JSON.stringify({
+      title: '违规测试平板支架', description: '用于平台下架回归测试',
+      category: 'OTHER', condition: 'GOOD', priceInCents: 900, contact: '微信 test-moderation'
+    })
+  });
+  assert.equal(item.response.status, 201);
+  const itemId = item.body.data.id;
+
+  const userCannotModerate = await api(`/api/admin/market-items/${itemId}/status`, {
+    method: 'POST', headers: userHeaders,
+    body: JSON.stringify({ status: 'REMOVED' })
+  });
+  assert.equal(userCannotModerate.response.status, 401, 'only admins may moderate marketplace content');
+
+  const removed = await api(`/api/admin/market-items/${itemId}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'REMOVED' })
+  });
+  assert.equal(removed.response.status, 200);
+  assert.equal(removed.body.data.statusText, '已下架');
+
+  const publicList = await api('/api/market/items');
+  assert.ok(!publicList.body.data.some((entry) => entry.id === itemId), 'removed listing should leave the public listing');
+
+  const sellerUpdate = await api(`/api/market/items/${itemId}`, {
+    method: 'POST', headers: userHeaders,
+    body: JSON.stringify({ status: 'SOLD' })
+  });
+  assert.equal(sellerUpdate.response.status, 403, 'seller cannot bypass a platform removal');
+  assert.equal(sellerUpdate.body.error.code, 'MARKET_ITEM_REMOVED');
+
+  const badStatus = await api(`/api/admin/market-items/${itemId}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'SOLD' })
+  });
+  assert.equal(badStatus.response.status, 400);
+
+  const restored = await api(`/api/admin/market-items/${itemId}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'ACTIVE' })
+  });
+  assert.equal(restored.response.status, 200);
+  assert.equal(restored.body.data.statusText, '在售');
+  const reopened = await api('/api/market/items');
+  assert.ok(reopened.body.data.some((entry) => entry.id === itemId), 'restored listing should return to the public listing');
+
+  const post = await api('/api/forum/posts', {
+    method: 'POST', headers: userHeaders,
+    body: JSON.stringify({ title: '违规测试帖子', content: '用于平台隐藏回归测试', board: 'CAMPUS' })
+  });
+  assert.equal(post.response.status, 201);
+  const postId = post.body.data.id;
+
+  const hidden = await api(`/api/admin/forum-posts/${postId}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'HIDDEN' })
+  });
+  assert.equal(hidden.response.status, 200);
+  const hiddenList = await api('/api/forum/posts');
+  assert.ok(!hiddenList.body.data.some((entry) => entry.id === postId), 'hidden post should leave the public feed');
+  const hiddenDetail = await api(`/api/forum/posts/${postId}`);
+  assert.equal(hiddenDetail.response.status, 404);
+
+  const published = await api(`/api/admin/forum-posts/${postId}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'PUBLISHED' })
+  });
+  assert.equal(published.response.status, 200);
+  const publishedList = await api('/api/forum/posts');
+  assert.ok(publishedList.body.data.some((entry) => entry.id === postId), 'restored post should return to the public feed');
+
+  const overview = await api('/api/admin/overview', { headers: adminHeaders });
+  assert.ok((overview.body.data.marketItems || []).some((entry) => entry.id === itemId), 'admin overview should expose marketplace listings');
+  assert.ok((overview.body.data.forumPosts || []).some((entry) => entry.id === postId), 'admin overview should expose forum posts');
+});

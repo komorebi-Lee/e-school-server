@@ -708,6 +708,77 @@ function withMerchantName(product, merchants) {
   return { ...product, merchantName: merchants.find((merchant) => merchant.id === product.merchantId)?.name || '平台自营' };
 }
 
+const marketCategoryLabels = {
+  BOOK: '二手书',
+  DAILY: '生活用品',
+  ELECTRONICS: '数码',
+  SPORTS: '运动装备',
+  OTHER: '其他'
+};
+
+const marketConditionLabels = {
+  LIKE_NEW: '九成新',
+  GOOD: '七成新',
+  USED: '有使用痕迹'
+};
+
+const forumBoardLabels = {
+  CAMPUS: '校园生活',
+  SECONDHAND: '二手交流',
+  LOST_FOUND: '失物招领',
+  STUDY: '学习互助',
+  RIDES: '拼车顺风'
+};
+
+function publicMarketItem(item) {
+  const price = Math.round((Number(item.priceInCents) || 0) / 100);
+  return {
+    id: item.id,
+    sellerName: item.sellerName || '狮山同学',
+    title: item.title,
+    description: item.description || '',
+    category: item.category,
+    categoryText: marketCategoryLabels[item.category] || '其他',
+    condition: item.condition,
+    conditionText: marketConditionLabels[item.condition] || '七成新',
+    price,
+    priceText: `¥${price.toFixed(2)}`,
+    images: Array.isArray(item.images) ? item.images.slice(0, 6) : [],
+    contact: item.contact || '通过平台客服联系',
+    status: item.status,
+    statusText: item.status === 'SOLD' ? '已出' : item.status === 'RESERVED' ? '已预留' : item.status === 'REMOVED' ? '已下架' : '在售',
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt
+  };
+}
+
+function publicForumComment(comment) {
+  return {
+    id: comment.id,
+    authorName: comment.authorName || '狮山同学',
+    content: comment.content || '',
+    createdAt: comment.createdAt
+  };
+}
+
+function publicForumPost(post, viewerId) {
+  return {
+    id: post.id,
+    authorName: post.authorName || '狮山同学',
+    board: post.board,
+    boardText: forumBoardLabels[post.board] || '校园生活',
+    title: post.title,
+    content: post.content || '',
+    images: Array.isArray(post.images) ? post.images.slice(0, 3) : [],
+    likes: (post.likedBy || []).length,
+    liked: viewerId ? (post.likedBy || []).includes(viewerId) : false,
+    comments: (post.comments || []).map(publicForumComment),
+    commentCount: (post.comments || []).length,
+    status: post.status,
+    createdAt: post.createdAt
+  };
+}
+
 function withProductReviewSummary(product, reviews = []) {
   const matched = reviews.filter((review) => review.productId === product.id && review.purchaseVerified && review.visibility !== 'HIDDEN');
   const lowReviews = matched.filter((review) => Number(review.rating) <= 3);
@@ -1093,7 +1164,9 @@ function adminPermissionForRequest(pathname) {
     || pathname.startsWith('/api/admin/finance-events')) return 'FINANCE_MANAGE';
   if (pathname.startsWith('/api/admin/products')
     || pathname.startsWith('/api/admin/recharge-promos')
-    || pathname.startsWith('/api/admin/product-reviews')) return 'CATALOG_MANAGE';
+    || pathname.startsWith('/api/admin/product-reviews')
+    || pathname.startsWith('/api/admin/market-items')
+    || pathname.startsWith('/api/admin/forum-posts')) return 'CATALOG_MANAGE';
   if (pathname.startsWith('/api/admin/merchants')
     || pathname.startsWith('/api/admin/qualification-renewals')
     || pathname.startsWith('/api/admin/merchant-scores')
@@ -1627,6 +1700,14 @@ function createApp({
     const session = token ? userSessions.get(token) : null;
     if (!session || session.expiresAt < Date.now()) throw new ApiError(401, 'USER_UNAUTHORIZED', '请先使用微信登录');
     return session;
+  }
+
+  function optionalUser(request) {
+    try {
+      return requireUser(request);
+    } catch (error) {
+      return null;
+    }
   }
   const uploadsDirectory = path.join(path.dirname(store.filePath), 'uploads');
   const statusLabels = {
@@ -5027,6 +5108,232 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: items, total: items.length, requestId });
       }
 
+      // ===== 二手市集 =====
+      if (request.method === 'GET' && pathname === '/api/market/items') {
+        const data = store.read();
+        const category = url.searchParams.get('category');
+        const query = (url.searchParams.get('q') || '').trim().toLowerCase();
+        const items = (data.marketItems || [])
+          .filter((item) => item.status === 'ACTIVE')
+          .filter((item) => !category || item.category === category)
+          .filter((item) => !query || `${item.title} ${item.description}`.toLowerCase().includes(query))
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+          .map(publicMarketItem);
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/market/items') {
+        const { userId } = requireUser(request);
+        const body = await readJson(request);
+        const title = requireString(body.title, 'title', { maxLength: 60 });
+        const description = requireString(body.description, 'description', { maxLength: 500 });
+        const category = requireString(body.category, 'category', { maxLength: 20 });
+        const condition = requireString(body.condition, 'condition', { maxLength: 20 });
+        if (!marketCategoryLabels[category]) throw new ApiError(400, 'VALIDATION_ERROR', '商品分类不支持');
+        if (!marketConditionLabels[condition]) throw new ApiError(400, 'VALIDATION_ERROR', '成色描述不支持');
+        const priceInCents = Math.round(Number(body.priceInCents));
+        if (!Number.isFinite(priceInCents) || priceInCents <= 0 || priceInCents > 10000000) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '价格需要在 0.01 元到 10 万元之间');
+        }
+        const images = Array.isArray(body.images) ? body.images.slice(0, 6).map((image) => String(image || '').trim()) : [];
+        if (images.some((image) => !image.startsWith('/api/uploads/'))) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '商品图片必须来自平台上传目录');
+        }
+        const contact = String(body.contact || '').trim().slice(0, 50);
+        const record = store.update((data) => {
+          const records = data.marketItems = data.marketItems || [];
+          const now = new Date().toISOString();
+          const item = {
+            id: `market_${randomUUID()}`,
+            sellerId: userId,
+            sellerName: '狮山同学',
+            title,
+            description,
+            category,
+            condition,
+            priceInCents,
+            images,
+            contact,
+            status: 'ACTIVE',
+            createdAt: now,
+            updatedAt: now
+          };
+          records.unshift(item);
+          addAudit(data, '新增二手商品', title);
+          return item;
+        });
+        return sendJson(response, 201, { data: publicMarketItem(record), requestId });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/my/market-items') {
+        const { userId } = requireUser(request);
+        const items = (store.read().marketItems || [])
+          .filter((item) => item.sellerId === userId)
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+          .map(publicMarketItem);
+        return sendJson(response, 200, { data: items, total: items.length, requestId });
+      }
+
+      const marketItemMatch = pathname.match(/^\/api\/market\/items\/([^/]+)$/);
+      if (request.method === 'GET' && marketItemMatch) {
+        const item = (store.read().marketItems || []).find((entry) => entry.id === marketItemMatch[1]);
+        if (!item) throw new ApiError(404, 'MARKET_ITEM_NOT_FOUND', '商品不存在或已下架');
+        const user = optionalUser(request);
+        return sendJson(response, 200, {
+          data: { ...publicMarketItem(item), isOwner: Boolean(user && user.userId === item.sellerId) },
+          requestId
+        });
+      }
+
+      if (request.method === 'POST' && marketItemMatch) {
+        const { userId } = requireUser(request);
+        const body = await readJson(request);
+        const status = requireString(body.status, 'status', { maxLength: 20 });
+        if (!['ACTIVE', 'RESERVED', 'SOLD'].includes(status)) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '商品状态不支持');
+        }
+        const record = store.update((data) => {
+          const item = (data.marketItems || []).find((entry) => entry.id === marketItemMatch[1]);
+          if (!item) throw new ApiError(404, 'MARKET_ITEM_NOT_FOUND', '商品不存在或已下架');
+          if (item.status === 'REMOVED') throw new ApiError(403, 'MARKET_ITEM_REMOVED', '商品已被平台下架，如需申诉请联系客服');
+          if (item.sellerId !== userId) throw new ApiError(403, 'MARKET_ITEM_FORBIDDEN', '只有卖家可以更新商品状态');
+          item.status = status;
+          item.updatedAt = new Date().toISOString();
+          addAudit(data, '更新二手商品状态', `${item.title} → ${status}`);
+          return item;
+        });
+        return sendJson(response, 200, { data: publicMarketItem(record), requestId });
+      }
+
+      // ===== 学校论坛 =====
+      if (request.method === 'GET' && pathname === '/api/forum/posts') {
+        const data = store.read();
+        const board = url.searchParams.get('board');
+        const query = (url.searchParams.get('q') || '').trim().toLowerCase();
+        const posts = (data.forumPosts || [])
+          .filter((post) => post.status === 'PUBLISHED')
+          .filter((post) => !board || post.board === board)
+          .filter((post) => !query || `${post.title} ${post.content}`.toLowerCase().includes(query))
+          .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+          .map((post) => publicForumPost(post, null));
+        return sendJson(response, 200, { data: posts, total: posts.length, requestId });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/forum/posts') {
+        const { userId } = requireUser(request);
+        const body = await readJson(request);
+        const title = requireString(body.title, 'title', { maxLength: 60 });
+        const content = requireString(body.content, 'content', { maxLength: 1000 });
+        const board = requireString(body.board, 'board', { maxLength: 20 });
+        if (!forumBoardLabels[board]) throw new ApiError(400, 'VALIDATION_ERROR', '论坛板块不支持');
+        const images = Array.isArray(body.images) ? body.images.slice(0, 3).map((image) => String(image || '').trim()) : [];
+        if (images.some((image) => !image.startsWith('/api/uploads/'))) {
+          throw new ApiError(400, 'VALIDATION_ERROR', '帖子图片必须来自平台上传目录');
+        }
+        const record = store.update((data) => {
+          const posts = data.forumPosts = data.forumPosts || [];
+          const now = new Date().toISOString();
+          const post = {
+            id: `post_${randomUUID()}`,
+            authorId: userId,
+            authorName: '狮山同学',
+            board,
+            title,
+            content,
+            images,
+            likedBy: [],
+            comments: [],
+            status: 'PUBLISHED',
+            createdAt: now,
+            updatedAt: now
+          };
+          posts.unshift(post);
+          addAudit(data, '新增论坛帖子', title);
+          return post;
+        });
+        return sendJson(response, 201, { data: publicForumPost(record, userId), requestId });
+      }
+
+      const forumPostMatch = pathname.match(/^\/api\/forum\/posts\/([^/]+)$/);
+      if (request.method === 'GET' && forumPostMatch) {
+        const post = (store.read().forumPosts || []).find((entry) => entry.id === forumPostMatch[1]);
+        if (!post || post.status !== 'PUBLISHED') throw new ApiError(404, 'FORUM_POST_NOT_FOUND', '帖子不存在或已隐藏');
+        return sendJson(response, 200, { data: publicForumPost(post, null), requestId });
+      }
+
+      const forumLikeMatch = pathname.match(/^\/api\/forum\/posts\/([^/]+)\/like$/);
+      if (request.method === 'POST' && forumLikeMatch) {
+        const { userId } = requireUser(request);
+        const result = store.update((data) => {
+          const post = (data.forumPosts || []).find((entry) => entry.id === forumLikeMatch[1]);
+          if (!post || post.status !== 'PUBLISHED') throw new ApiError(404, 'FORUM_POST_NOT_FOUND', '帖子不存在或已隐藏');
+          const likedBy = post.likedBy = post.likedBy || [];
+          const liked = !likedBy.includes(userId);
+          post.likedBy = liked ? [...likedBy, userId] : likedBy.filter((id) => id !== userId);
+          post.updatedAt = new Date().toISOString();
+          return { post, liked };
+        });
+        return sendJson(response, 200, { data: { liked: result.liked, likes: result.post.likedBy.length }, requestId });
+      }
+
+      const forumCommentMatch = pathname.match(/^\/api\/forum\/posts\/([^/]+)\/comments$/);
+      if (request.method === 'POST' && forumCommentMatch) {
+        const { userId } = requireUser(request);
+        const body = await readJson(request);
+        const content = requireString(body.content, 'content', { maxLength: 300 });
+        const result = store.update((data) => {
+          const post = (data.forumPosts || []).find((entry) => entry.id === forumCommentMatch[1]);
+          if (!post || post.status !== 'PUBLISHED') throw new ApiError(404, 'FORUM_POST_NOT_FOUND', '帖子不存在或已隐藏');
+          const comments = post.comments = post.comments || [];
+          const now = new Date().toISOString();
+          const comment = {
+            id: `cmt_${randomUUID()}`,
+            authorId: userId,
+            authorName: '狮山同学',
+            content,
+            createdAt: now
+          };
+          comments.unshift(comment);
+          post.updatedAt = now;
+          addAudit(data, '论坛帖子新评论', post.title);
+          return { post, comment };
+        });
+        return sendJson(response, 200, { data: publicForumComment(result.comment), requestId });
+      }
+
+      // ===== 管理端：市集与论坛内容审核 =====
+      const adminMarketItemMatch = pathname.match(/^\/api\/admin\/market-items\/([^/]+)\/status$/);
+      if (request.method === 'POST' && adminMarketItemMatch) {
+        const body = await readJson(request);
+        const status = requireString(body.status, 'status', { maxLength: 20 });
+        if (!['ACTIVE', 'REMOVED'].includes(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'status 需为 ACTIVE 或 REMOVED');
+        const updated = store.update((data) => {
+          const item = (data.marketItems || []).find((entry) => entry.id === adminMarketItemMatch[1]);
+          if (!item) throw new ApiError(404, 'MARKET_ITEM_NOT_FOUND', '商品不存在');
+          item.status = status;
+          item.updatedAt = new Date().toISOString();
+          addAudit(data, status === 'REMOVED' ? '下架违规市集商品' : '恢复市集商品', item.title);
+          return item;
+        });
+        return sendJson(response, 200, { data: publicMarketItem(updated), requestId });
+      }
+
+      const adminForumPostMatch = pathname.match(/^\/api\/admin\/forum-posts\/([^/]+)\/status$/);
+      if (request.method === 'POST' && adminForumPostMatch) {
+        const body = await readJson(request);
+        const status = requireString(body.status, 'status', { maxLength: 20 });
+        if (!['PUBLISHED', 'HIDDEN'].includes(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'status 需为 PUBLISHED 或 HIDDEN');
+        const updated = store.update((data) => {
+          const post = (data.forumPosts || []).find((entry) => entry.id === adminForumPostMatch[1]);
+          if (!post) throw new ApiError(404, 'FORUM_POST_NOT_FOUND', '帖子不存在');
+          post.status = status;
+          post.updatedAt = new Date().toISOString();
+          addAudit(data, status === 'HIDDEN' ? '隐藏违规论坛帖子' : '恢复论坛帖子', post.title);
+          return post;
+        });
+        return sendJson(response, 200, { data: publicForumPost(updated, null), requestId });
+      }
+
       if (request.method === 'GET' && pathname === '/api/business-config') {
         return sendJson(response, 200, { data: publicSettings(store.read().adminSettings), requestId });
       }
@@ -6836,6 +7143,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             notifications: data.notifications || [],
             afterSales: data.afterSales,
             productReviews: data.productReviews || [],
+            marketItems: (data.marketItems || []).map(publicMarketItem),
+            forumPosts: (data.forumPosts || []).map((post) => publicForumPost(post, null)),
             settlements: data.settlements || [],
             settlementSummary: { ...settlementSummary(data.settlements || []), settlementPeriodDays: settlementPeriodDays(data), payoutMinimumInCents: payoutMinimumInCents(data) },
             payoutRequests: data.payoutRequests || [],

@@ -137,6 +137,118 @@ const seedProductReviews = [
   }
 ];
 
+const seedMarketItems = [
+  {
+    id: 'market_seed_1',
+    sellerId: 'seed_user_1',
+    sellerName: '刘同学',
+    title: '高等数学教材（第七版）上下册',
+    description: '大四学长毕业出，笔记很少，九成新，可狮山校区内自提。',
+    category: 'BOOK',
+    condition: 'LIKE_NEW',
+    priceInCents: 1500,
+    images: [],
+    contact: '微信 shishan-study',
+    status: 'ACTIVE',
+    createdAt: '2026-09-10T10:00:00.000Z',
+    updatedAt: '2026-09-10T10:00:00.000Z'
+  },
+  {
+    id: 'market_seed_2',
+    sellerId: 'seed_user_2',
+    sellerName: '张同学',
+    title: '宿舍学习台灯（可调亮度）',
+    description: '用了半年，功能完好，毕业清仓，荟园自提。',
+    category: 'DAILY',
+    condition: 'GOOD',
+    priceInCents: 2900,
+    images: [],
+    contact: '电话 156****8812',
+    status: 'ACTIVE',
+    createdAt: '2026-09-11T09:00:00.000Z',
+    updatedAt: '2026-09-11T09:00:00.000Z'
+  },
+  {
+    id: 'market_seed_3',
+    sellerId: 'seed_user_3',
+    sellerName: '王同学',
+    title: 'CET-4/6 真题试卷全套',
+    description: '2024 版带解析，做完一半，低价转给需要的同学。',
+    category: 'BOOK',
+    condition: 'USED',
+    priceInCents: 800,
+    images: [],
+    contact: '微信 wang-cet',
+    status: 'ACTIVE',
+    createdAt: '2026-09-12T08:30:00.000Z',
+    updatedAt: '2026-09-12T08:30:00.000Z'
+  },
+  {
+    id: 'market_seed_4',
+    sellerId: 'seed_user_4',
+    sellerName: '陈同学',
+    title: '室外篮球（附赠球袋）',
+    description: '水泥地专用，买来打过几次，气足，已出。',
+    category: 'SPORTS',
+    condition: 'GOOD',
+    priceInCents: 4500,
+    images: [],
+    contact: '微信 chen-ball',
+    status: 'SOLD',
+    createdAt: '2026-09-09T14:00:00.000Z',
+    updatedAt: '2026-09-12T18:00:00.000Z'
+  }
+];
+
+const seedForumPosts = [
+  {
+    id: 'post_seed_1',
+    authorId: 'seed_user_1',
+    authorName: '刘同学',
+    board: 'STUDY',
+    title: '考研自习占座攻略（狮子山校区）',
+    content: '图书馆三楼靠窗位置早上 7 点前基本有空位，行政楼自习室周末人少。分享给大家，祝上岸。',
+    images: [],
+    likedBy: ['seed_user_2'],
+    comments: [
+      { id: 'cmt_seed_1', authorId: 'seed_user_2', authorName: '张同学', content: '感谢整理，周末就去！', createdAt: '2026-09-11T12:00:00.000Z' }
+    ],
+    status: 'PUBLISHED',
+    createdAt: '2026-09-11T08:00:00.000Z',
+    updatedAt: '2026-09-11T08:00:00.000Z'
+  },
+  {
+    id: 'post_seed_2',
+    authorId: 'seed_user_2',
+    authorName: '张同学',
+    board: 'SECONDHAND',
+    title: '毕业跳蚤市集本周六荟园广场开市',
+    content: '本周六上午 9 点开市，学长学姐出清生活用品和书籍，欢迎来淘。',
+    images: [],
+    likedBy: ['seed_user_3', 'seed_user_4'],
+    comments: [],
+    status: 'PUBLISHED',
+    createdAt: '2026-09-12T10:30:00.000Z',
+    updatedAt: '2026-09-12T10:30:00.000Z'
+  },
+  {
+    id: 'post_seed_3',
+    authorId: 'seed_user_4',
+    authorName: '陈同学',
+    board: 'LOST_FOUND',
+    title: '拾到一张校园卡（名字被磨掉了）',
+    content: '在东体操场看台捡到一张校园卡，失主带学生证来认领，或联系平台客服转交。',
+    images: [],
+    likedBy: [],
+    comments: [
+      { id: 'cmt_seed_2', authorId: 'seed_user_1', authorName: '刘同学', content: '已转发到班群，帮失主留意。', createdAt: '2026-09-13T09:00:00.000Z' }
+    ],
+    status: 'PUBLISHED',
+    createdAt: '2026-09-13T08:20:00.000Z',
+    updatedAt: '2026-09-13T08:20:00.000Z'
+  }
+];
+
 function initialData() {
   return {
     schemaVersion: 1,
@@ -168,6 +280,8 @@ function initialData() {
     addresses: [],
     productRestockAlerts: [],
     productFavorites: [],
+    marketItems: seedMarketItems,
+    forumPosts: seedForumPosts,
     phoneCardOrders: [
       { id: 'tel_1001', customerName: '张同学', phone: '138****3201', planName: '校园畅享卡', amountInCents: 2900, status: 'PENDING_REALNAME', createdAt: '2026-08-28T08:20:00.000Z' },
       { id: 'tel_1002', customerName: '李同学', phone: '156****7812', planName: '校园畅联卡', amountInCents: 3900, status: 'ACTIVATED', createdAt: '2026-08-28T07:10:00.000Z' }
@@ -236,7 +350,7 @@ class JsonStore {
       if (!data || !Array.isArray(data.products)) throw new Error('invalid database');
       const defaults = initialData();
       let changed = false;
-      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'addresses', 'productRestockAlerts', 'productFavorites', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'paymentReconciliations', 'financeTasks', 'notifications', 'slaAlerts', 'merchantScoreLogs', 'merchantScoreSnapshots', 'serviceRiskFollowUps', 'settingChangeLogs', 'adminUsers', 'adminSessions', 'adminLoginFailures']) {
+      for (const key of ['phoneCardOrders', 'rechargeOrders', 'broadbandApplications', 'plateApplications', 'afterSales', 'productReviews', 'rechargePromos', 'leads', 'addresses', 'productRestockAlerts', 'productFavorites', 'marketItems', 'forumPosts', 'auditLogs', 'merchants', 'paymentOrders', 'settlements', 'payoutRequests', 'financeEvents', 'paymentReconciliations', 'financeTasks', 'notifications', 'slaAlerts', 'merchantScoreLogs', 'merchantScoreSnapshots', 'serviceRiskFollowUps', 'settingChangeLogs', 'adminUsers', 'adminSessions', 'adminLoginFailures']) {
         if (!Array.isArray(data[key])) { data[key] = defaults[key]; changed = true; }
       }
       if (!data.adminSettings) {
