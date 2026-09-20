@@ -20,6 +20,10 @@ const {
   restoreOrderStock,
   restoreOrderStockQuantity
 } = require('./domain/inventory');
+const {
+  buildPaymentReconciliationTaskDetail,
+  upsertPaymentReconciliationTask
+} = require('./domain/settlement-tasks');
 
 const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
@@ -173,79 +177,6 @@ function issueDeliveryCode(order, now) {
     order.deliveryCodeIssuedAt = now;
   }
   return order.deliveryCode;
-}
-
-function buildPaymentReconciliationTaskDetail(report) {
-  const detail = report.differences
-    .slice(0, 3)
-    .map((item) => `${item.paymentNo || item.refundNo}：${item.type}`)
-    .join('；');
-  return report.differences.length > 3 ? `${detail}；等 ${report.differences.length} 项差异` : detail;
-}
-
-function upsertPaymentReconciliationTask(data, report, now = new Date().toISOString(), addAuditLog = () => {}) {
-  if (!Array.isArray(data.financeTasks)) data.financeTasks = [];
-  if (!Array.isArray(data.auditLogs)) data.auditLogs = [];
-  const existing = data.financeTasks.find((item) => (
-    item.type === 'PAYMENT_RECONCILIATION'
-    && item.billDate === report.billDate
-    && item.provider === report.provider
-  ));
-  const differenceCount = report.differences.length;
-  if (!differenceCount) {
-    if (existing && existing.status !== 'RESOLVED') {
-      existing.status = 'RESOLVED';
-      existing.resolvedAt = now;
-      existing.resolvedReason = '重新对账后账实相符，待办自动关闭';
-      existing.updatedAt = now;
-      addAuditLog(data, '关闭支付对账待办', `${report.billDate} ${report.provider}`);
-    }
-    return existing || null;
-  }
-
-  const detail = buildPaymentReconciliationTaskDetail(report);
-  if (!existing) {
-    const task = {
-      id: `fin_${randomUUID()}`,
-      type: 'PAYMENT_RECONCILIATION',
-      reportId: report.id,
-      billDate: report.billDate,
-      provider: report.provider,
-      channel: report.channel,
-      differenceCount,
-      detail: differenceCount > 3 ? `${detail}；等 ${differenceCount} 项差异` : detail,
-      status: 'PENDING',
-      ownerRole: 'PLATFORM',
-      dueAt: financeTaskDueAt(data, now),
-      acknowledgeNote: '',
-      acknowledgedAt: '',
-      resolutionNote: '',
-      resolvedAt: '',
-      resolvedReason: '',
-      reopenCount: 0,
-      createdAt: now,
-      updatedAt: now
-    };
-    data.financeTasks.unshift(task);
-    addAuditLog(data, '生成支付对账待办', `${report.billDate} ${report.provider} ${differenceCount} 项差异`);
-    return task;
-  }
-
-  existing.reportId = report.id;
-  existing.differenceCount = differenceCount;
-  existing.detail = differenceCount > 3 ? `${detail}；等 ${differenceCount} 项差异` : detail;
-  existing.updatedAt = now;
-  if (existing.status === 'RESOLVED') {
-    existing.status = 'PENDING';
-    existing.acknowledgeNote = '';
-    existing.acknowledgedAt = '';
-    existing.resolutionNote = '';
-    existing.resolvedAt = '';
-    existing.resolvedReason = '';
-    existing.reopenCount = Number(existing.reopenCount || 0) + 1;
-    addAuditLog(data, '重新打开支付对账待办', `${report.billDate} ${report.provider}`);
-  }
-  return existing;
 }
 
 function sanitizeOrderForMerchant(order) {
