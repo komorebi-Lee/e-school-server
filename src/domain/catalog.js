@@ -197,4 +197,78 @@ function productPromotionOrderMetrics(product, data, now = new Date().toISOStrin
   };
 }
 
-module.exports = { withProductReviewSummary, productSalesCount, productStoreProfile, rechargePromoAvailability, publicRechargePromo, normalizeProductSaleCampaign, withProductSale, productPromotionOrderMetrics };
+/**
+ * 商品形态与租赁方案。
+ *
+ * 售卖 / 租赁用 `listingType` 区分，而不是新增 category：`E_BIKE_NEW` 被首页、
+ * 列表页、管理端分类下拉以及免费牌照辅助等 20+ 处当作「电瓶车品类」使用，
+ * 新增 category 会让租赁车从所有既有入口消失。
+ */
+
+const RENTAL_UNITS = ['DAY', 'HOUR'];
+const LISTING_TYPES = ['SALE', 'RENT'];
+
+/**
+ * 校验并规范化租赁方案。
+ *
+ * @param {unknown} value 原始 rentalPlan；空值表示「非租赁商品」。
+ * @returns {{unit: string, unitPriceInCents: number, minUnits: number, maxUnits: number, depositInCents: number}|null}
+ *          规范化后的方案；传入空值时返回 null。
+ * @throws {ApiError} 400 VALIDATION_ERROR —— 结构或数值非法。
+ */
+function normalizeRentalPlan(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new ApiError(400, 'VALIDATION_ERROR', 'rentalPlan 必须是对象');
+  }
+  const unit = typeof value.unit === 'string' ? value.unit.trim().toUpperCase() : '';
+  if (!RENTAL_UNITS.includes(unit)) {
+    throw new ApiError(400, 'VALIDATION_ERROR', `rentalPlan.unit 仅支持 ${RENTAL_UNITS.join(' / ')}`);
+  }
+  const unitPriceInCents = Number(value.unitPriceInCents);
+  if (!Number.isInteger(unitPriceInCents) || unitPriceInCents <= 0) {
+    throw new ApiError(400, 'VALIDATION_ERROR', 'rentalPlan.unitPriceInCents 必须是大于 0 的整数分');
+  }
+  const minUnits = Number(value.minUnits);
+  if (!Number.isInteger(minUnits) || minUnits <= 0) {
+    throw new ApiError(400, 'VALIDATION_ERROR', 'rentalPlan.minUnits 必须是大于 0 的整数');
+  }
+  const maxUnits = Number(value.maxUnits);
+  if (!Number.isInteger(maxUnits) || maxUnits <= 0) {
+    throw new ApiError(400, 'VALIDATION_ERROR', 'rentalPlan.maxUnits 必须是大于 0 的整数');
+  }
+  if (maxUnits < minUnits) {
+    throw new ApiError(400, 'VALIDATION_ERROR', 'rentalPlan.maxUnits 不能小于 minUnits');
+  }
+  const depositInCents = Number(value.depositInCents);
+  if (!Number.isInteger(depositInCents) || depositInCents < 0) {
+    throw new ApiError(400, 'VALIDATION_ERROR', 'rentalPlan.depositInCents 必须是非负整数分');
+  }
+  // 字段顺序固定，保证响应体与落库 JSON 稳定，便于快照比对。
+  return { unit, unitPriceInCents, minUnits, maxUnits, depositInCents };
+}
+
+/**
+ * 为商品补上 `listingType`（及租赁商品的规范化 `rentalPlan`）。
+ *
+ * 存量商品没有 `listingType` 字段，统一按 `'SALE'` 输出，保证前端只认一种形态。
+ * 非租赁商品不输出 `rentalPlan` 字段（而不是输出 null），避免前端误判。
+ *
+ * @param {object} product 商品记录。
+ * @returns {object} 带 `listingType` 的商品对象。
+ */
+function withListingType(product) {
+  const source = product || {};
+  if (source.listingType === 'RENT') {
+    try {
+      const rentalPlan = normalizeRentalPlan(source.rentalPlan);
+      if (rentalPlan) return { ...source, listingType: 'RENT', rentalPlan };
+    } catch (error) {
+      // 读取路径不允许因单条脏数据把整个商品列表打成 400，降级为售卖形态。
+    }
+  }
+  const { rentalPlan, ...rest } = source;
+  return { ...rest, listingType: 'SALE' };
+}
+
+module.exports = { withProductReviewSummary, productSalesCount, productStoreProfile, rechargePromoAvailability, publicRechargePromo, normalizeProductSaleCampaign, withProductSale, productPromotionOrderMetrics, normalizeRentalPlan, withListingType, LISTING_TYPES, RENTAL_UNITS };

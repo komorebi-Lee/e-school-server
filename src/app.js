@@ -53,7 +53,10 @@ const {
   publicRechargePromo,
   normalizeProductSaleCampaign,
   withProductSale,
-  productPromotionOrderMetrics
+  productPromotionOrderMetrics,
+  normalizeRentalPlan,
+  withListingType,
+  LISTING_TYPES
 } = require('./domain/catalog');
 const {
   userNotificationLink,
@@ -277,6 +280,30 @@ function createApp({
   const userWeChatIdentities = new Map();
   const userSessions = new Map();
   const userSessionTtlMs = 7 * 24 * 60 * 60 * 1000;
+
+  /**
+   * 解析商家 / 管理端提交的商品形态字段。
+   *
+   * 售卖 / 租赁只由 `listingType` 区分，不新增 category（`E_BIKE_NEW` 仍代表电瓶车品类）。
+   * 未显式传 `listingType` 时沿用商品当前形态（编辑场景），新建商品默认 `'SALE'`。
+   * 声明为 `'RENT'` 却拿不出合法 `rentalPlan` 时直接 400，避免落库出「半租赁」商品。
+   *
+   * @param {object} body 请求体。
+   * @param {object|null} currentProduct 编辑场景下的现有商品，新建时为 null。
+   * @returns {{listingType: string, rentalPlan: object|null}}
+   */
+  function resolveListingFields(body, currentProduct = null) {
+    const requested = body.listingType === undefined
+      ? (currentProduct?.listingType === 'RENT' ? 'RENT' : 'SALE')
+      : String(body.listingType).trim().toUpperCase();
+    if (!LISTING_TYPES.includes(requested)) {
+      throw new ApiError(400, 'VALIDATION_ERROR', `listingType 仅支持 ${LISTING_TYPES.join(' / ')}`);
+    }
+    if (requested === 'SALE') return { listingType: 'SALE', rentalPlan: null };
+    const rentalPlan = normalizeRentalPlan(body.rentalPlan ?? currentProduct?.rentalPlan);
+    if (!rentalPlan) throw new ApiError(400, 'VALIDATION_ERROR', '租赁商品必须提供完整的 rentalPlan');
+    return { listingType: 'RENT', rentalPlan };
+  }
 
   async function attachProviderIntent(paymentOrder) {
     if (!paymentOrder) return null;
@@ -4141,9 +4168,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const salesCounts = calculateProductSalesCounts(data);
         const now = new Date().toISOString();
         return sendJson(response, 200, {
-          data: ranked.map((product) => withProductSale(withMerchantScore(
+          // 租赁车与售卖车共用同一个列表与 category 过滤，只靠 listingType 区分形态。
+          data: ranked.map((product) => withListingType(withProductSale(withMerchantScore(
             withAvailableStock(withProductSales(product, salesCounts)), data.merchants || []
-          ), now)),
+          ), now))),
           total: ranked.length,
           requestId
         });
@@ -4445,14 +4473,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .filter((item) => item.active && item.id !== product.id && item.category === product.category)
         )
         .slice(0, 3)
-          .map((item) => withProductSale(withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || [])), data.merchants || []), now));
+          .map((item) => withListingType(withProductSale(withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || [])), data.merchants || []), now)));
         const productMerchant = (data.merchants || []).find((item) => item.id === product.merchantId);
-        const enrichedProduct = withProductSale(withMerchantScore(
+        const enrichedProduct = withListingType(withProductSale(withMerchantScore(
           withAvailableStock(
             withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])
           ),
           data.merchants || []
-        ), now);
+        ), now));
         enrichedProduct.serviceArea = productMerchant?.serviceArea || '华中农业大学狮山校区';
         const storeProfile = productStoreProfile(enrichedProduct, {
           deliveryResponseHours: settings.deliveryResponseHours,
@@ -5397,6 +5425,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const autoPublish = serviceScoreStages[stage].autoPublish;
           const sale = normalizeProductSaleCampaign(body);
           if (sale && sale.salePriceInCents >= priceInCents) throw new ApiError(400, 'VALIDATION_ERROR', '促销价必须低于商品原价');
+          const listing = resolveListingFields(body);
           const item = {
             id: `prod_${randomUUID()}`,
             name: requireString(body.name, 'name', { maxLength: 80 }),
@@ -5409,6 +5438,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             merchantId: merchant.id,
             active: autoPublish ? body.active !== false : false,
             publishReviewStatus: autoPublish ? 'AUTO' : 'PENDING_REVIEW',
+            listingType: listing.listingType,
+            ...(listing.rentalPlan ? { rentalPlan: listing.rentalPlan } : {}),
             ...(sale || {})
             ,
             publishReviewNote: autoPublish ? '' : '服务分处限期间，商品需平台复核后上架'
@@ -5452,6 +5483,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             item.imageUrl = imageUrl;
           }
           if (body.priceInCents !== undefined) item.priceInCents = requirePositiveInteger(body.priceInCents, 'priceInCents');
+          // 形态字段仅在显式提交时改写，避免存量商品被无谓地补上 listingType。
+          if (body.listingType !== undefined || body.rentalPlan !== undefined) {
+            const listing = resolveListingFields(body, item);
+            item.listingType = listing.listingType;
+            if (listing.rentalPlan) item.rentalPlan = listing.rentalPlan;
+            else delete item.rentalPlan;
+          }
           const previousPromotion = withProductSale(item).promotion;
           const availableBefore = availableStock(item);
           const sale = normalizeProductSaleCampaign(body, item);
@@ -7472,6 +7510,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (body.description !== undefined) product.description = requireString(body.description, 'description', { maxLength: 300 });
           if (body.priceInCents !== undefined) { const price = Number(body.priceInCents); if (!Number.isInteger(price) || price < 0) throw new ApiError(400, 'VALIDATION_ERROR', 'priceInCents must be non-negative'); product.priceInCents = price; }
           if (body.category !== undefined) product.category = requireString(body.category, 'category', { maxLength: 50 });
+          // 形态字段仅在显式提交时改写，避免存量商品被无谓地补上 listingType。
+          if (body.listingType !== undefined || body.rentalPlan !== undefined) {
+            const listing = resolveListingFields(body, product);
+            product.listingType = listing.listingType;
+            if (listing.rentalPlan) product.rentalPlan = listing.rentalPlan;
+            else delete product.rentalPlan;
+          }
           const sale = normalizeProductSaleCampaign(body, product);
           if (sale) {
             if (sale.salePriceInCents >= product.priceInCents) throw new ApiError(400, 'VALIDATION_ERROR', '促销价必须低于商品原价');
@@ -7555,7 +7600,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (sale && sale.salePriceInCents >= priceInCents) throw new ApiError(400, 'VALIDATION_ERROR', '促销价必须低于商品原价');
           const imageUrl = typeof body.imageUrl === 'string' ? body.imageUrl.trim() : '';
           if (imageUrl && !imageUrl.startsWith('/api/uploads/')) throw new ApiError(400, 'VALIDATION_ERROR', '商品图片必须来自平台上传目录');
-          const item = { id: `prod_${randomUUID()}`, name: requireString(body.name, 'name', { maxLength: 80 }), category: requireString(body.category, 'category', { maxLength: 50 }), description: requireString(body.description, 'description', { maxLength: 300 }), priceInCents, stock, campusIds: ['campus_hzau'], imageUrl, active: body.active !== false, ...(sale || {}) };
+          const listing = resolveListingFields(body);
+          const item = { id: `prod_${randomUUID()}`, name: requireString(body.name, 'name', { maxLength: 80 }), category: requireString(body.category, 'category', { maxLength: 50 }), description: requireString(body.description, 'description', { maxLength: 300 }), priceInCents, stock, campusIds: ['campus_hzau'], imageUrl, active: body.active !== false, listingType: listing.listingType, ...(listing.rentalPlan ? { rentalPlan: listing.rentalPlan } : {}), ...(sale || {}) };
           data.products.unshift(item);
           recordStockMovement(data, item, {
             movementType: 'INITIAL',
