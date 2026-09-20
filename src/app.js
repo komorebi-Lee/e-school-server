@@ -4,15 +4,7 @@ const { URL } = require('node:url');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createPaymentProvider } = require('./payment-provider');
-
-class ApiError extends Error {
-  constructor(statusCode, code, message, details) {
-    super(message);
-    this.statusCode = statusCode;
-    this.code = code;
-    this.details = details;
-  }
-}
+const { ApiError } = require('./http/api-error');
 
 const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
