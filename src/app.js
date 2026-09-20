@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createPaymentProvider } = require('./payment-provider');
 const { ApiError } = require('./http/api-error');
+const { sendJson, normalizeCorsOrigins, resolveCorsOrigin, sendStatic } = require('./http/respond');
 
 const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
@@ -609,44 +610,6 @@ async function exchangeWeChatCode(code) {
   if (!result.openid) throw new ApiError(401, 'WECHAT_LOGIN_FAILED', result.errmsg || '微信登录失败', result.errcode ? { errcode: result.errcode } : undefined);
   return { openid: result.openid, userId: `wx_${result.openid}` };
 }
-function sendJson(response, statusCode, body) {
-  const headers = {
-    'content-type': 'application/json; charset=utf-8',
-    'access-control-allow-methods': 'GET,POST,OPTIONS',
-    'access-control-allow-headers': 'content-type,idempotency-key,authorization',
-    'cache-control': 'no-store'
-  };
-  if (response.corsOrigin) {
-    headers['access-control-allow-origin'] = response.corsOrigin;
-    headers.vary = 'Origin';
-  }
-  response.writeHead(statusCode, headers);
-  response.end(JSON.stringify(body));
-}
-
-function normalizeCorsOrigins(input) {
-  const values = Array.isArray(input)
-    ? input
-    : String(input || '').split(',');
-  return values.map((value) => value.trim()).filter(Boolean);
-}
-
-function resolveCorsOrigin(request, allowedOrigins) {
-  const origin = String(request.headers.origin || '').trim();
-  if (!origin) return '';
-  if (allowedOrigins.includes('*')) return '*';
-  return allowedOrigins.includes(origin) ? origin : '';
-}
-
-function sendStatic(response, filePath) {
-  const extensions = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
-  const extension = path.extname(filePath);
-  if (!fs.existsSync(filePath)) return false;
-  response.writeHead(200, { 'content-type': extensions[extension] || 'application/octet-stream', 'cache-control': 'no-store' });
-  response.end(fs.readFileSync(filePath));
-  return true;
-}
-
 function requireString(value, field, options = {}) {
   const normalized = typeof value === 'string' ? value.trim() : '';
   if (!normalized) throw new ApiError(400, 'VALIDATION_ERROR', `${field} is required`);
