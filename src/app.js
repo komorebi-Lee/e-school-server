@@ -24,6 +24,11 @@ const {
   buildPaymentReconciliationTaskDetail,
   upsertPaymentReconciliationTask
 } = require('./domain/settlement-tasks');
+const {
+  uploadQuotaLimit,
+  enforceUploadQuota,
+  recordUpload
+} = require('./domain/uploads');
 
 const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
@@ -826,47 +831,6 @@ function normalizeQualificationExpireDate(value) {
     throw new ApiError(400, 'VALIDATION_ERROR', '资质有效期格式需为 YYYY-MM-DD');
   }
   return date;
-}
-
-const UPLOAD_RATE_WINDOW_MS = 24 * 60 * 60 * 1000;
-const UPLOAD_RATE_DEFAULT_LIMIT = 30;
-
-function uploadQuotaLimit(settings = {}) {
-  const raw = Number(settings.uploadRateLimitPer24h);
-  if (!Number.isFinite(raw) || raw <= 0) return UPLOAD_RATE_DEFAULT_LIMIT;
-  return Math.min(200, Math.max(1, Math.trunc(raw)));
-}
-
-function enforceUploadQuota(data, actorId, settings, now = new Date()) {
-  const limit = uploadQuotaLimit(settings);
-  const windowStart = new Date(now.getTime() - UPLOAD_RATE_WINDOW_MS).toISOString();
-  const recent = (data.uploadRecords || []).filter(
-    (item) => item.actorId === actorId && item.createdAt > windowStart
-  );
-  if (recent.length < limit) return;
-  const oldest = recent.reduce(
-    (min, item) => (item.createdAt < min ? item.createdAt : min),
-    recent[0].createdAt
-  );
-  const resetInMinutes = Math.max(
-    1,
-    Math.ceil((new Date(oldest).getTime() + UPLOAD_RATE_WINDOW_MS - now.getTime()) / 60000)
-  );
-  throw new ApiError(429, 'UPLOAD_RATE_LIMITED', `上传过于频繁，每 24 小时最多 ${limit} 张，请约 ${resetInMinutes} 分钟后重试`);
-}
-
-function recordUpload(data, actorId, fileName, size, now = new Date()) {
-  if (!Array.isArray(data.uploadRecords)) data.uploadRecords = [];
-  const windowStart = new Date(now.getTime() - UPLOAD_RATE_WINDOW_MS).toISOString();
-  // 只保留窗口内的记录，避免 uploadRecords 无限增长
-  data.uploadRecords = data.uploadRecords.filter((item) => item.createdAt > windowStart);
-  data.uploadRecords.push({
-    id: `upl_${randomUUID()}`,
-    actorId,
-    fileName,
-    size,
-    createdAt: now.toISOString()
-  });
 }
 
 function createApp({
