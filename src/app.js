@@ -7,6 +7,7 @@ const { createPaymentProvider } = require('./payment-provider');
 const { ApiError } = require('./http/api-error');
 const { sendJson, normalizeCorsOrigins, resolveCorsOrigin, sendStatic } = require('./http/respond');
 const { requireString } = require('./http/body');
+const { localDateKey, normalizeTimeSlot, normalizeDateValue, financeTaskDueAt } = require('./utils/time');
 
 const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
@@ -32,14 +33,6 @@ let weChatAccessToken = { token: '', expiresAt: 0 };
 function isTlsInterceptionError(error) {
   const tlsCodes = new Set(['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'CERT_HAS_EXPIRED']);
   return tlsCodes.has(error.code) || /self-signed/i.test(error.message);
-}
-
-function localDateKey(date) {
-  const d = date instanceof Date ? date : new Date(date);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return y + '-' + m + '-' + day;
 }
 
 function publicSettings(settings = {}) {
@@ -152,14 +145,6 @@ const orderNotificationTemplates = {
   }
 };
 
-function normalizeTimeSlot(value) {
-  return String(value || '').trim().slice(0, 40);
-}
-
-function normalizeDateValue(value) {
-  return String(value || '').trim().slice(0, 10);
-}
-
 function validateDeliverySchedule(fulfillment, settings) {
   if (fulfillment.type !== 'DELIVERY') return;
   const date = normalizeDateValue(fulfillment.date);
@@ -193,13 +178,6 @@ function buildPaymentReconciliationTaskDetail(report) {
     .map((item) => `${item.paymentNo || item.refundNo}：${item.type}`)
     .join('；');
   return report.differences.length > 3 ? `${detail}；等 ${report.differences.length} 项差异` : detail;
-}
-
-function financeTaskDueAt(data, baseIso) {
-  const value = Number(data?.adminSettings?.financeTaskResponseHours);
-  const hours = Number.isInteger(value) && value >= 1 && value <= 168 ? value : 24;
-  const base = new Date(baseIso || Date.now()).getTime();
-  return new Date(base + hours * 60 * 60 * 1000).toISOString();
 }
 
 function upsertPaymentReconciliationTask(data, report, now = new Date().toISOString(), addAuditLog = () => {}) {
