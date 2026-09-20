@@ -44,6 +44,8 @@ const {
   publicStorefrontReviews,
   publicAdminUser
 } = require('./domain/public-view');
+const { validateDeliverySchedule, issueDeliveryCode } = require('./domain/orders');
+const { normalizeQualificationExpireDate } = require('./utils/validation');
 
 const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
@@ -156,24 +158,6 @@ const orderNotificationTemplates = {
     description: '客服跟进咨询结果时提醒用户查看订单'
   }
 };
-
-function validateDeliverySchedule(fulfillment, settings) {
-  if (fulfillment.type !== 'DELIVERY') return;
-  const date = normalizeDateValue(fulfillment.date);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new ApiError(400, 'VALIDATION_ERROR', '请选择配送日期');
-  if (date < new Date().toISOString().slice(0, 10)) throw new ApiError(400, 'VALIDATION_ERROR', '配送日期不能早于今天');
-  const slot = requireString(fulfillment.timeSlot, 'fulfillment.timeSlot', { maxLength: 40 });
-  const configuredSlots = Array.isArray(settings?.deliveryTimeSlots) ? settings.deliveryTimeSlots.map(normalizeTimeSlot) : [];
-  if (!configuredSlots.includes(slot)) throw new ApiError(400, 'VALIDATION_ERROR', '请选择平台提供的配送时段');
-}
-
-function issueDeliveryCode(order, now) {
-  if (!order.deliveryCode) {
-    order.deliveryCode = String(Math.floor(100000 + Math.random() * 900000));
-    order.deliveryCodeIssuedAt = now;
-  }
-  return order.deliveryCode;
-}
 
 function wechatOpenApiRequest(pathname, rejectUnauthorized) {
   return new Promise((resolve, reject) => {
@@ -664,15 +648,6 @@ function adminPermissionForRequest(pathname) {
   return 'ADMIN_MANAGE';
 }
 
-
-function normalizeQualificationExpireDate(value) {
-  const date = typeof value === 'string' ? value.trim() : '';
-  if (!date) return '';
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(new Date(`${date}T00:00:00.000Z`).getTime())) {
-    throw new ApiError(400, 'VALIDATION_ERROR', '资质有效期格式需为 YYYY-MM-DD');
-  }
-  return date;
-}
 
 function createApp({
   store,
