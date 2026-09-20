@@ -1,5 +1,4 @@
-const { randomUUID, randomBytes, createHash, scryptSync, timingSafeEqual } = require('node:crypto');
-const https = require('node:https');
+const { randomUUID, createHash } = require('node:crypto');
 const { URL } = require('node:url');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -56,6 +55,16 @@ const {
   withProductSale,
   productPromotionOrderMetrics
 } = require('./domain/catalog');
+const {
+  userNotificationLink,
+  leadSourceRecord,
+  createCollaboration,
+  appendCollaborationEvent,
+  serviceRecordOwner,
+  complaintDueAt
+} = require('./domain/collaboration');
+const { hashPassword, verifyPasswordHash, adminPermissionForRequest } = require('./auth/passwords');
+const { isTlsInterceptionError, wechatOpenApiRequest, wechatOpenApiPost } = require('./wechat/open-api');
 
 const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
@@ -77,11 +86,6 @@ const adminOrderStatuses = {
 const allowedPaymentStatuses = new Set(['PENDING', 'PAID', 'CANCELLED', 'PARTIALLY_REFUNDED', 'REFUNDED']);
 const identityVerifications = new Map();
 let weChatAccessToken = { token: '', expiresAt: 0 };
-
-function isTlsInterceptionError(error) {
-  const tlsCodes = new Set(['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'CERT_HAS_EXPIRED']);
-  return tlsCodes.has(error.code) || /self-signed/i.test(error.message);
-}
 
 const scoreNotificationTemplates = {
   SCORE_STAGE_WARNING: {
@@ -169,62 +173,6 @@ const orderNotificationTemplates = {
   }
 };
 
-function wechatOpenApiRequest(pathname, rejectUnauthorized) {
-  return new Promise((resolve, reject) => {
-    const request = https.get(`https://api.weixin.qq.com${pathname}`, { rejectUnauthorized }, (response) => {
-      let body = '';
-      response.setEncoding('utf8');
-      response.on('data', (chunk) => { body += chunk; });
-      response.on('end', () => {
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          console.error('[wechat-login] unexpected status', response.statusCode, body.slice(0, 200));
-          reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务不可用', { reason: `HTTP ${response.statusCode}` }));
-          return;
-        }
-        try { resolve(JSON.parse(body)); }
-        catch {
-          console.error('[wechat-login] non-json body', body.slice(0, 200));
-          reject(new ApiError(502, 'WECHAT_LOGIN_UNAVAILABLE', '微信登录服务返回异常', { reason: 'non-json response' }));
-        }
-      });
-    });
-    request.on('error', (error) => {
-      console.error('[wechat-login] request error:', error.message);
-      reject(Object.assign(new Error(error.message), { code: error.code }));
-    });
-    request.setTimeout(8000, () => {
-      request.destroy();
-      console.error('[wechat-login] request timeout after 8s');
-      reject(new Error('timeout after 8s'));
-    });
-  });
-}
-
-function wechatOpenApiPost(pathname, payload) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify(payload);
-    const request = https.request(`https://api.weixin.qq.com${pathname}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }
-    }, (response) => {
-      let responseBody = '';
-      response.setEncoding('utf8');
-      response.on('data', (chunk) => { responseBody += chunk; });
-      response.on('end', () => {
-        try {
-          if (response.statusCode < 200 || response.statusCode >= 300) throw new Error(`HTTP ${response.statusCode}`);
-          resolve(JSON.parse(responseBody));
-        } catch (error) {
-          reject(Object.assign(new Error(error.message || 'response parse failed'), { code: 'WECHAT_API_UNAVAILABLE' }));
-        }
-      });
-    });
-    request.on('error', (error) => reject(Object.assign(new Error(error.message), { code: error.code || 'WECHAT_API_UNAVAILABLE' })));
-    request.setTimeout(8000, () => request.destroy(new Error('timeout after 8s')));
-    request.end(body);
-  });
-}
-
 async function getWeChatAccessToken() {
   const appid = process.env.WECHAT_APPID || process.env.WX_APPID;
   const secret = process.env.WECHAT_APP_SECRET || process.env.WX_APP_SECRET;
@@ -286,91 +234,6 @@ async function readJson(request) {
   }
 }
 
-function userNotificationLink(notification, data = null) {
-  const metadata = notification?.metadata || {};
-  if (metadata.focusId) {
-    const recordType = metadata.recordType ? `&recordType=${encodeURIComponent(String(metadata.recordType))}` : '';
-    return `/pages/orders/orders?focusId=${encodeURIComponent(String(metadata.focusId))}${recordType}`;
-  }
-  if (metadata.productId) {
-    return `/pages/detail/detail?id=${encodeURIComponent(String(metadata.productId))}`;
-  }
-  if (data && metadata.reviewId) {
-    const review = (data.productReviews || []).find((item) => item.id === metadata.reviewId);
-    if (review) return `/pages/orders/orders?focusId=${encodeURIComponent(String(review.orderId))}`;
-  }
-  return '';
-}
-
-function leadSourceRecord(data, userId, sourceType, sourceId) {
-  if (!sourceType && !sourceId) return null;
-  const collections = {
-    ORDER: 'orders',
-    PHONE_PLAN: 'phoneCardOrders',
-    RECHARGE: 'rechargeOrders',
-    BROADBAND: 'broadbandApplications',
-    PLATE: 'plateApplications'
-  };
-  if (!collections[sourceType] || !sourceId) {
-    throw new ApiError(400, 'VALIDATION_ERROR', '来源业务或来源单号不完整');
-  }
-  const source = (data[collections[sourceType]] || []).find((item) => item.id === sourceId && item.userId === userId);
-  if (!source) throw new ApiError(404, 'LEAD_SOURCE_NOT_FOUND', '来源订单不存在或不属于当前用户');
-  return source;
-}
-
-function createCollaboration(order, merchantId) {
-  return {
-    merchantId,
-    handoffs: [
-      { role:'PLATFORM', action:'PLATFORM_ACCEPTED', note:'平台已生成订单', createdAt:order.createdAt },
-      { role:'MERCHANT', action:'WAIT_ACCEPT', note:'待商家确认履约', createdAt:order.createdAt }
-    ],
-    roleActions: {
-      MERCHANT: order.status === 'PAID' ? ['ACCEPT'] : order.status === 'FULFILLING' ? ['COMPLETE'] : [],
-      USER: order.status === 'FULFILLING' ? [] : order.status === 'COMPLETED' ? ['REVIEW'] : ['CONFIRM_INFO'],
-      PLATFORM: []
-    },
-    intervention: { status:'NONE', note:'', updatedAt:'' },
-    messages: [
-      { id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role:'PLATFORM', text:'订单已支付，等待商家确认履约。', createdAt:order.createdAt }
-    ]
-  };
-}
-
-function appendCollaborationEvent(order, role, action, note) {
-  const time = new Date().toISOString();
-  order.collaboration ||= { merchantId:'', handoffs:[], roleActions:{ MERCHANT:[],USER:[],PLATFORM:[] }, intervention:{ status:'NONE', note:'', updatedAt:'' }, messages:[] };
-  order.collaboration.handoffs.unshift({ role, action, note, createdAt:time });
-  order.collaboration.messages.unshift({ id:`msg_${Date.now()}_${Math.random().toString(16).slice(2,8)}`, role, text:note, createdAt:time });
-  order.collaboration.roleActions = {
-    MERCHANT: order.status === 'PAID' ? ['ACCEPT'] : order.status === 'FULFILLING' ? ['COMPLETE'] : [],
-    USER: order.status === 'COMPLETED' ? ['REVIEW'] : ['CONFIRM_INFO'],
-    PLATFORM: order.collaboration.intervention.status === 'REQUESTED' ? ['RESOLVE'] : []
-  };
-  order.collaboration.intervention.status = role === 'PLATFORM' ? 'RESOLVED' : order.collaboration.intervention.status;
-  order.collaboration.intervention.updatedAt = time;
-  if (role === 'USER' && action === 'NOTE') {
-    order.collaboration.unrepliedMessage = { text: note, createdAt: time };
-  } else if (['MERCHANT', 'PLATFORM'].includes(role) && order.collaboration.unrepliedMessage) {
-    order.collaboration.unrepliedMessage = null;
-  }
-}
-
-function serviceRecordOwner(data, recordId) {
-  const collections = [
-    { key: 'phoneCardOrders', type: 'PHONE_PLAN', label: '电话卡订单' },
-    { key: 'rechargeOrders', type: 'RECHARGE', label: '话费权益' },
-    { key: 'broadbandApplications', type: 'BROADBAND', label: '宽带资格' },
-    { key: 'plateApplications', type: 'PLATE', label: '校园牌照' }
-  ];
-  for (const collection of collections) {
-    const item = (data[collection.key] || []).find((row) => row.id === recordId);
-    if (item) return { ...collection, item };
-  }
-  return null;
-}
-
 function appendServiceRecordEvent(record, role, action, note) {
   const time = new Date().toISOString();
   record.collaboration ||= { handoffs: [], roleActions: { MERCHANT: [], USER: [], PLATFORM: [] }, intervention: { status: 'NONE', note: '', updatedAt: '' }, messages: [] };
@@ -390,10 +253,6 @@ const scoreComplaintTypeLabels = {
   AFTER_SALE_ISSUE: '售后责任认定有异议'
 };
 
-function complaintDueAt(now) {
-  return new Date(new Date(now).getTime() + 48 * 3600 * 1000).toISOString();
-}
-
 const adminRoleLabels = {
   SUPER_ADMIN: '超级管理员',
   OPERATOR: '运营管理员',
@@ -407,65 +266,6 @@ const adminRolePermissions = {
   FINANCE: ['FINANCE_MANAGE', 'REPORT_VIEW'],
   SUPPORT: ['ORDER_MANAGE', 'REPORT_VIEW']
 };
-
-function hashPassword(password) {
-  const salt = randomBytes(16);
-  const passwordHash = scryptSync(String(password), salt, 64);
-  return `scrypt$${salt.toString('hex')}$${passwordHash.toString('hex')}`;
-}
-
-function verifyPasswordHash(suppliedPassword, storedHash) {
-  const parts = String(storedHash || '').split('$');
-  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
-  let salt;
-  let expectedHash;
-  try {
-    salt = Buffer.from(parts[1], 'hex');
-    expectedHash = Buffer.from(parts[2], 'hex');
-  } catch {
-    return false;
-  }
-  if (salt.length !== 16 || expectedHash.length !== 64) return false;
-  const actualHash = scryptSync(String(suppliedPassword || ''), salt, 64);
-  return timingSafeEqual(actualHash, expectedHash);
-}
-
-function adminPermissionForRequest(pathname) {
-  if (pathname.startsWith('/api/admin/admins')) return 'ADMIN_MANAGE';
-  if (pathname.startsWith('/api/admin/uploads')) return 'FINANCE_MANAGE';
-  if (/^\/api\/admin\/merchants\/[^/]+\/settle$/.test(pathname)) return 'FINANCE_MANAGE';
-  if (pathname.startsWith('/api/admin/settings')
-    || pathname.startsWith('/api/admin/subscribe-templates')) return 'CONFIG_MANAGE';
-  if (pathname.startsWith('/api/admin/payment-orders')
-    || pathname.startsWith('/api/admin/payment-reconciliations')
-    || pathname.startsWith('/api/admin/finance-tasks')
-    || pathname.startsWith('/api/admin/payout-requests')
-    || pathname.startsWith('/api/admin/finance-events')) return 'FINANCE_MANAGE';
-  if (pathname.startsWith('/api/admin/products')
-    || pathname.startsWith('/api/admin/recharge-promos')
-    || pathname.startsWith('/api/admin/product-reviews')
-    || pathname.startsWith('/api/admin/market-items')
-    || pathname.startsWith('/api/admin/forum-posts')) return 'CATALOG_MANAGE';
-  if (pathname.startsWith('/api/admin/merchants')
-    || pathname.startsWith('/api/admin/qualification-renewals')
-    || pathname.startsWith('/api/admin/merchant-scores')
-    || pathname.startsWith('/api/admin/service-risk')
-    || pathname.startsWith('/api/admin/score-cases')) return 'MERCHANT_MANAGE';
-  if (pathname.startsWith('/api/admin/orders')
-    || pathname.startsWith('/api/admin/phone-card-orders')
-    || pathname.startsWith('/api/admin/recharge-orders')
-    || pathname.startsWith('/api/admin/broadband-applications')
-    || pathname.startsWith('/api/admin/plate-applications')
-    || pathname.startsWith('/api/admin/after-sales')
-    || pathname.startsWith('/api/admin/leads')
-    || pathname.startsWith('/api/admin/sla-alerts')
-    || pathname.startsWith('/api/admin/patrol/run')
-    || pathname.startsWith('/api/admin/notifications')
-    || pathname.startsWith('/api/admin/subscribe-messages')) return 'ORDER_MANAGE';
-  if (pathname.startsWith('/api/admin/overview')
-    || pathname.startsWith('/api/admin/operations-report')) return 'REPORT_VIEW';
-  return 'ADMIN_MANAGE';
-}
 
 
 function createApp({
