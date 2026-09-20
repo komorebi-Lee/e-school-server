@@ -95,4 +95,17 @@ function complaintDueAt(now) {
   return new Date(new Date(now).getTime() + 48 * 3600 * 1000).toISOString();
 }
 
-module.exports = { userNotificationLink, leadSourceRecord, createCollaboration, appendCollaborationEvent, serviceRecordOwner, complaintDueAt };
+function appendServiceRecordEvent(record, role, action, note) {
+  const time = new Date().toISOString();
+  record.collaboration ||= { handoffs: [], roleActions: { MERCHANT: [], USER: [], PLATFORM: [] }, intervention: { status: 'NONE', note: '', updatedAt: '' }, messages: [] };
+  record.collaboration.handoffs.unshift({ role, action, note, createdAt: time });
+  record.collaboration.messages.unshift({ id: `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`, role, text: note, createdAt: time });
+  record.collaboration.intervention.updatedAt = time;
+  if (role === 'USER') {
+    record.collaboration.unrepliedMessage = { action, text: note, createdAt: time };
+  } else if (role === 'PLATFORM' && record.collaboration.unrepliedMessage) {
+    record.collaboration.unrepliedMessage = null;
+  }
+}
+
+module.exports = { userNotificationLink, leadSourceRecord, createCollaboration, appendCollaborationEvent, serviceRecordOwner, complaintDueAt, appendServiceRecordEvent };

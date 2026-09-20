@@ -61,7 +61,8 @@ const {
   createCollaboration,
   appendCollaborationEvent,
   serviceRecordOwner,
-  complaintDueAt
+  complaintDueAt,
+  appendServiceRecordEvent
 } = require('./domain/collaboration');
 const { hashPassword, verifyPasswordHash, adminPermissionForRequest } = require('./auth/passwords');
 const { isTlsInterceptionError, wechatOpenApiRequest, wechatOpenApiPost } = require('./wechat/open-api');
@@ -231,19 +232,6 @@ async function readJson(request) {
     return body;
   } catch {
     throw new ApiError(400, 'INVALID_JSON', 'Request body must be valid JSON');
-  }
-}
-
-function appendServiceRecordEvent(record, role, action, note) {
-  const time = new Date().toISOString();
-  record.collaboration ||= { handoffs: [], roleActions: { MERCHANT: [], USER: [], PLATFORM: [] }, intervention: { status: 'NONE', note: '', updatedAt: '' }, messages: [] };
-  record.collaboration.handoffs.unshift({ role, action, note, createdAt: time });
-  record.collaboration.messages.unshift({ id: `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`, role, text: note, createdAt: time });
-  record.collaboration.intervention.updatedAt = time;
-  if (role === 'USER') {
-    record.collaboration.unrepliedMessage = { action, text: note, createdAt: time };
-  } else if (role === 'PLATFORM' && record.collaboration.unrepliedMessage) {
-    record.collaboration.unrepliedMessage = null;
   }
 }
 
