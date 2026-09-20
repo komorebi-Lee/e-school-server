@@ -6,6 +6,7 @@ const path = require('node:path');
 const { createPaymentProvider } = require('./payment-provider');
 const { ApiError } = require('./http/api-error');
 const { sendJson, normalizeCorsOrigins, resolveCorsOrigin, sendStatic } = require('./http/respond');
+const { requireString } = require('./http/body');
 
 const allowedCardServices = new Set(['NEW_CARD', 'REPLACEMENT', 'TOP_UP']);
 const allowedAfterSaleTypes = new Set(['REFUND', 'RETURN', 'REPAIR']);
@@ -610,15 +611,6 @@ async function exchangeWeChatCode(code) {
   if (!result.openid) throw new ApiError(401, 'WECHAT_LOGIN_FAILED', result.errmsg || '微信登录失败', result.errcode ? { errcode: result.errcode } : undefined);
   return { openid: result.openid, userId: `wx_${result.openid}` };
 }
-function requireString(value, field, options = {}) {
-  const normalized = typeof value === 'string' ? value.trim() : '';
-  if (!normalized) throw new ApiError(400, 'VALIDATION_ERROR', `${field} is required`);
-  if (options.maxLength && normalized.length > options.maxLength) {
-    throw new ApiError(400, 'VALIDATION_ERROR', `${field} is too long`);
-  }
-  return normalized;
-}
-
 async function readJson(request) {
   const chunks = [];
   let size = 0;
