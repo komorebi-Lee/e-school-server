@@ -58,6 +58,7 @@ const {
   withListingType,
   LISTING_TYPES
 } = require('./domain/catalog');
+const { buildRentalOrderItem, createRentalDeposit } = require('./domain/rental');
 const {
   userNotificationLink,
   leadSourceRecord,
@@ -7799,21 +7800,57 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             return { order: existing, reused: true };
           }
           const mergedQuantities = new Map();
+          // 租赁单按「一单一车」处理：同一租赁商品重复提交会被合并成 quantity > 1，
+          // 而一个订单项只能承载一组租期，所以租期先按商品 id 单独收集并做重复校验。
+          const requestedRentalUnits = new Map();
           for (const requestedItem of body.items) {
             const productId = requireString(requestedItem.productId, 'items[].productId');
             const quantity = Number(requestedItem.quantity);
             if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
               throw new ApiError(400, 'VALIDATION_ERROR', 'Each quantity must be an integer from 1 to 99');
             }
+            if (requestedItem.rentalUnits !== undefined) {
+              if (requestedRentalUnits.has(productId)) {
+                throw new ApiError(400, 'VALIDATION_ERROR', '同一租赁商品不能重复提交，请合并为一次租赁');
+              }
+              requestedRentalUnits.set(productId, requestedItem.rentalUnits);
+            }
             mergedQuantities.set(productId, (mergedQuantities.get(productId) || 0) + quantity);
           }
           const orderItems = [];
+          const rentalItems = [];
+          let rentalDepositTotalInCents = 0;
           let totalInCents = 0;
           const settings = data.adminSettings || {};
           const deliveryFeeInCents = Number(settings.deliveryFeeInCents || 0);
           for (const [productId, quantity] of mergedQuantities) {
             const product = data.products.find((item) => item.id === productId && item.active);
             if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', `Product ${productId} not found`);
+            if (product.listingType === 'RENT') {
+              // 租赁分支与售卖分支完全分流，绝不共用售价逻辑。
+              const rentalUnits = requestedRentalUnits.get(productId);
+              if (rentalUnits === undefined) {
+                throw new ApiError(400, 'VALIDATION_ERROR', `${product.name} 是租赁商品，必须指定 rentalUnits`);
+              }
+              if (quantity !== 1) {
+                throw new ApiError(400, 'VALIDATION_ERROR', `${product.name} 是租赁商品，单次只能租 1 台`);
+              }
+              if (availableStock(product) < quantity) {
+                throw new ApiError(409, 'INSUFFICIENT_STOCK', `${product.name} 可租库存不足，当前仅剩 ${availableStock(product)} 台`);
+              }
+              // 下单路径不允许把「声明 RENT 但方案损坏」的商品按售价卖掉，必须显式失败。
+              const rentalPlan = normalizeRentalPlan(product.rentalPlan);
+              if (!rentalPlan) throw new ApiError(400, 'VALIDATION_ERROR', `${product.name} 缺少租赁方案，无法下单`);
+              const rentalItem = buildRentalOrderItem({ ...product, rentalPlan }, rentalUnits);
+              orderItems.push(rentalItem);
+              rentalItems.push(rentalItem);
+              rentalDepositTotalInCents += Number(rentalPlan.depositInCents || 0);
+              totalInCents += rentalItem.subtotalInCents;
+              continue;
+            }
+            if (requestedRentalUnits.has(productId)) {
+              throw new ApiError(400, 'VALIDATION_ERROR', `${product.name} 不是租赁商品，不能传 rentalUnits`);
+            }
             if (availableStock(product) < quantity) {
               throw new ApiError(409, 'INSUFFICIENT_STOCK', `${product.name} 可售库存不足，当前仅剩 ${availableStock(product)} 件`);
             }
@@ -7822,15 +7859,36 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             totalInCents += subtotalInCents;
             orderItems.push({ productId, merchantId: product.merchantId || '', name: product.name, priceInCents: effectivePriceInCents, originalPriceInCents: product.priceInCents, quantity, subtotalInCents });
           }
+          // 混装会让「这单是买还是租」失去唯一答案，本轮明确报错而不是静默取其一。
+          if (rentalItems.length && rentalItems.length !== orderItems.length) {
+            throw new ApiError(400, 'VALIDATION_ERROR', '同一订单不能混装售卖商品与租赁商品，请分开下单');
+          }
+          const orderKind = rentalItems.length ? 'RENTAL' : 'SALE';
           const isDelivery = body.fulfillment?.type === 'DELIVERY';
           if (isDelivery) validateDeliverySchedule(body.fulfillment, settings);
           if (isDelivery) totalInCents += deliveryFeeInCents;
           const now = new Date().toISOString();
+          // 押金计入用户实付（totalInCents），但绝不进入 order.items[].subtotalInCents：
+          // 分账只认租金，押金只活在 data.rentalDeposits 里。
+          totalInCents += rentalDepositTotalInCents;
+          const rentalDurationMs = rentalItems.reduce((longest, item) => {
+            const stepMs = item.rentalUnit === 'HOUR' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+            return Math.max(longest, Number(item.rentalUnits || 0) * stepMs);
+          }, 0);
+          const rental = orderKind === 'RENTAL' ? {
+            status: 'RENTING',
+            units: rentalItems.reduce((sum, item) => sum + Number(item.rentalUnits || 0), 0),
+            unit: rentalItems[0].rentalUnit,
+            rentAmountInCents: rentalItems.reduce((sum, item) => sum + Number(item.subtotalInCents || 0), 0),
+            depositInCents: rentalDepositTotalInCents,
+            dueAt: new Date(new Date(now).getTime() + rentalDurationMs).toISOString()
+          } : null;
           const paymentTimeoutMinutes = Number(settings.paymentTimeoutMinutes || 30);
           const order = {
             id: `ord_${randomUUID()}`,
             orderNo: `CG${Date.now()}${Math.floor(Math.random() * 9000 + 1000)}`,
             userId,
+            orderKind,
             items: orderItems,
             totalInCents,
             currency: 'CNY',
@@ -7844,12 +7902,22 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               deliveryFeeInCents: isDelivery ? deliveryFeeInCents : 0,
               totalInCents
             },
+            // 售卖单不输出 rental 字段（而不是输出 null），避免前端误判形态。
+            ...(rental ? { rental } : {}),
             createdAt: now,
             updatedAt: now,
             collaboration: createCollaboration({ createdAt: now, status:'PAID' }, orderItems[0]?.merchantId || '')
           };
           data.orders.push(order);
           reserveOrderStock(data, order);
+          // 押金记录只在建单成功后写入，且与订单项完全分离：它不参与分账。
+          if (rental) {
+            data.rentalDeposits ||= [];
+            for (const rentalItem of rentalItems) {
+              const rentalProduct = data.products.find((item) => item.id === rentalItem.productId);
+              data.rentalDeposits.unshift(createRentalDeposit(order, rentalProduct, rentalItem.rentalUnits, now));
+            }
+          }
           if (compoundKey) data.idempotencyKeys[compoundKey] = order.id;
           if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
           const paymentOrder = {
@@ -7859,6 +7927,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             orderNo: order.orderNo,
             userId,
             amountInCents: totalInCents,
+            // 押金是「用户实付但非交易对价」的钱：收款口径含它，分账口径不含它。
+            // 这两个字段让「这笔收款里多少是租金、多少是押金」可被读取，
+            // 但**不改变** amountInCents / financeEvents / financeSummary 的既有口径。
+            rentAmountInCents: rental ? rental.rentAmountInCents : 0,
+            depositInCents: rental ? rental.depositInCents : 0,
             currency: 'CNY',
             status: 'PENDING',
             idempotencyKey: compoundKey || idempotencyKey || '',
