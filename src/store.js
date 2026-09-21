@@ -15,6 +15,10 @@ const seedProducts = [
     active: true
   },
   {
+    // 历史命名遗留：ID 里带 rent，但它是一辆**售卖车**，必须保持 SALE。
+    // 既有测试（api.test.js 的多处下单、payment-reconciliation.test.js 的对账）
+    // 都把它当作金额基准：319900 分是这些断言的锚点，改成租赁会让它们全部失效。
+    // 真正的租赁商品是紧随其后的 prod_ebike_rent_002。
     id: 'prod_ebike_rent_001',
     name: '远途 长续航版',
     category: 'E_BIKE_NEW',
@@ -24,8 +28,22 @@ const seedProducts = [
     campusIds: ['campus_demo'],
     imageUrl: 'https://placehold.co/600x400?text=Rental',
     merchantId: 'merchant_001',
-    active: true,
+    active: true
+  },
+  {
     // 租赁形态：不新增 category，改用 listingType 区分售卖 / 租赁。
+    // priceInCents 是「买断参考价」，仅作展示（落到订单项的 originalPriceInCents），
+    // 实际计费用 rentalPlan.unitPriceInCents，绝不能用它给租赁单定价。
+    id: 'prod_ebike_rent_002',
+    name: '远行 租赁版',
+    category: 'E_BIKE_NEW',
+    description: '按天计费，校内取还，购车免费牌照辅助不适用',
+    priceInCents: 319900,
+    stock: 5,
+    campusIds: ['campus_demo'],
+    imageUrl: 'https://placehold.co/600x400?text=Rental',
+    merchantId: 'merchant_001',
+    active: true,
     listingType: 'RENT',
     rentalPlan: {
       unit: 'DAY',

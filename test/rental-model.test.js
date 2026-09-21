@@ -10,7 +10,9 @@ const { createApp } = require('../src/app');
 process.env.ADMIN_USERNAME = 'rental-model-admin';
 process.env.ADMIN_PASSWORD = 'rental-model-admin-password-123';
 
-const RENTAL_PRODUCT_ID = 'prod_ebike_rent_001';
+// prod_ebike_rent_001 是历史命名遗留的**售卖车**（价格 319900 被既有测试当作金额锚点），
+// 因此租赁种子商品是 prod_ebike_rent_002。
+const RENTAL_PRODUCT_ID = 'prod_ebike_rent_002';
 const SALE_PRODUCT_ID = 'prod_ebike_001';
 
 let server;
@@ -135,16 +137,16 @@ test('⑤ category=E_BIKE_NEW 同时返回租赁车与售卖车', async () => {
   assert.ok(filtered.body.data.every((item) => item.category === 'E_BIKE_NEW'));
 });
 
-test('⑥ 存量种子商品仍为 5 个', () => {
-  assert.equal(initialData().products.length, 5);
+test('⑥ 存量种子商品仍为 6 个', () => {
+  assert.equal(initialData().products.length, 6);
   assert.equal(initialData().products.filter((item) => item.listingType === 'RENT').length, 1);
 
   // 用一份全新的 db.json 再确认一次，避免受本文件后续写操作影响。
   const fresh = new JsonStore(path.join(tempDirectory, 'seed-count-db.json'));
-  assert.equal(fresh.read().products.length, 5);
+  assert.equal(fresh.read().products.length, 6);
   assert.deepEqual(
     fresh.read().products.map((item) => item.id),
-    ['prod_ebike_001', RENTAL_PRODUCT_ID, 'prod_card_service_001', 'prod_card_service_002', 'prod_card_service_003']
+    ['prod_ebike_001', 'prod_ebike_rent_001', RENTAL_PRODUCT_ID, 'prod_card_service_001', 'prod_card_service_002', 'prod_card_service_003']
   );
 });
 
