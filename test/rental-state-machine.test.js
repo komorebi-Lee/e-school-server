@@ -248,6 +248,8 @@ test('② 归还核验后：order COMPLETED、rental RETURNED、分账进入账�
   );
 
   // 状态机没有 RETURNED 的出边：归还核验不可回退（下游押金/分账已发生）。
+  // T35 起重复核验改用专属码 RENTAL_ALREADY_RETURNED —— 商家双击/客户端重试必须能
+  // 区分「已经归还」与「操作非法」，同时保证库存不被二次回补（见 rental-return-stock.test.js ②）。
   const repeated = await collab(merchantToken, {
     role: 'MERCHANT',
     action: 'RETURN_VERIFY',
@@ -255,7 +257,7 @@ test('② 归还核验后：order COMPLETED、rental RETURNED、分账进入账�
     note: '重复核验。'
   });
   assert.equal(repeated.response.status, 409);
-  assert.equal(repeated.body.error.code, 'ACTION_NOT_ALLOWED');
+  assert.equal(repeated.body.error.code, 'RENTAL_ALREADY_RETURNED');
 });
 
 test('③ ★ 归还前无法评价（409 ORDER_NOT_COMPLETED），归还核验后同一请求成功', async () => {
