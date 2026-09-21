@@ -92,6 +92,85 @@ function buildRentalOrderItem(product, rentalUnits) {
 }
 
 /**
+ * 租赁状态机的合法迁移表。
+ *
+ * ```
+ * RENTING --RETURN_REQUEST--> RETURN_REQUESTED --RETURN_VERIFY--> RETURNED
+ * ```
+ *
+ * 表是「动作 → { 当前状态 → 下一个状态 }」的二维映射：动作不在表里、
+ * 或当前状态没有出边，都属于非法迁移（统一抛 409 `ACTION_NOT_ALLOWED`）。
+ * 状态一旦走到 `RETURNED` 就没有出边 —— 归还核验不可回退，因为押金结算与
+ * 分账打款都已在下游发生。
+ *
+ * @type {Readonly<Record<string, Readonly<Record<string, string>>>>}
+ */
+const RENTAL_ACTIONS = Object.freeze({
+  RETURN_REQUEST: Object.freeze({ RENTING: 'RETURN_REQUESTED' }),
+  RETURN_VERIFY: Object.freeze({ RETURN_REQUESTED: 'RETURNED' })
+});
+
+/**
+ * 判断订单是否是一张可走租赁状态机的租赁单。
+ *
+ * `orderKind === 'RENTAL'` 与 `order.rental` 必须同时成立：只有前者意味着
+ * 数据形态已经损坏（T33 建单时会同时写入），此时任何租赁动作都必须失败，
+ * 而不是在 `undefined` 上继续读写状态。
+ *
+ * @param {object} order 订单。
+ * @returns {boolean} 是否为形态完整的租赁单。
+ */
+function isRentalOrder(order) {
+  return Boolean(order && order.orderKind === 'RENTAL' && order.rental);
+}
+
+/**
+ * 在租赁状态机上执行一个动作（唯一的状态迁移入口）。
+ *
+ * 只做状态迁移，不碰订单状态、不碰分账 —— 那些由调用方在迁移成功后显式触发，
+ * 保证「状态机」与「资金/订单副作用」的职责分离。
+ *
+ * @param {object} order 租赁订单（原地修改 `order.rental.status`）。
+ * @param {string} action 动作名，见 {@link RENTAL_ACTIONS}。
+ * @returns {string} 迁移后的 `rental.status`。
+ * @throws {ApiError} 409 ACTION_NOT_ALLOWED —— 非租赁单，或当前状态不支持该动作。
+ */
+function applyRentalAction(order, action) {
+  if (!isRentalOrder(order)) {
+    throw new ApiError(409, 'ACTION_NOT_ALLOWED', '当前订单不是租赁单，不支持租赁动作');
+  }
+  const current = order.rental.status;
+  const next = RENTAL_ACTIONS[action]?.[current];
+  if (!next) {
+    throw new ApiError(409, 'ACTION_NOT_ALLOWED', `租赁单当前状态 ${current} 不支持动作 ${action}`);
+  }
+  order.rental.status = next;
+  return next;
+}
+
+/**
+ * 裁决订单「完成」时应当进入的状态。
+ *
+ * 这是订单侧 `COMPLETED` 的**唯一裁决函数**，所有把订单标记完成的入口
+ * （商家端、管理端、协同接口、售后关闭）都必须经过它：
+ *
+ * - **SALE 单**：保持原语义，直接 `COMPLETED`；
+ * - **RENTAL 单**：只有 `rental.status === 'RETURNED'`（归还核验完成）才 `COMPLETED`，
+ *   否则停在 `FULFILLING` —— 「交付取车」不等于「订单完成」，车还在用户手上。
+ *
+ * 该函数是纯函数（无副作用），返回裁决结果而不写回，避免与调用点紧邻的
+ * `updatedAt` 赋值产生两个不同时间戳的冗余写入。
+ *
+ * @param {object} order 订单。
+ * @returns {string} `'COMPLETED'` 或 `'FULFILLING'`。
+ */
+function resolveOrderCompletion(order) {
+  if (order?.orderKind !== 'RENTAL') return 'COMPLETED';
+  // rental 缺失时按「未归还」处理：失败方向必须偏向不完成订单（不放款）。
+  return order.rental?.status === 'RETURNED' ? 'COMPLETED' : 'FULFILLING';
+}
+
+/**
  * 构造押金记录。
  *
  * 押金独立于订单项存在：`amountInCents` 计入订单 `totalInCents`（用户实付金额），
@@ -128,4 +207,11 @@ function createRentalDeposit(order, product, rentalUnits, now) {
   };
 }
 
-module.exports = { buildRentalOrderItem, createRentalDeposit };
+module.exports = {
+  buildRentalOrderItem,
+  createRentalDeposit,
+  applyRentalAction,
+  resolveOrderCompletion,
+  isRentalOrder,
+  RENTAL_ACTIONS
+};
