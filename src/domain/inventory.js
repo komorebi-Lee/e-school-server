@@ -229,6 +229,72 @@ function restoreOrderStock(data, order) {
   return true;
 }
 
+/**
+ * 租赁归还核验后把车放回可租池。
+ *
+ * ## 为什么必须与 `restoreOrderStock` 分开，而不是给 `movementType` 加参数
+ *
+ * 两者的**业务事件不同**，不是同一个事件的两种措辞：
+ *
+ * | 维度 | `RESTORE`（售后） | `RETURN_RESTORE`（归还） |
+ * |---|---|---|
+ * | 触发 | 退款 / 退货，交易被取消 | 租赁周期正常结束 |
+ * | 语义 | 货退回来了，钱也要退 | 货还回来了，租期正常收尾 |
+ * | 形状 | 可按件部分回补 | 整单回补（一单只租一台车） |
+ *
+ * 混用会让库存流水无法复盘 —— 台账再也回答不了「这个月有多少车是卖出去的、
+ * 多少是租出去又还回来的」。把 `movementType` 参数化虽然代码更短，但会让
+ * 两个业务事件共享一个函数体与一个前置条件，日后任一侧改语义都会误伤另一侧。
+ *
+ * ## 幂等（防重复回补）由两层独立保证
+ *
+ * - **状态机层**：`RETURN_VERIFY` 只能成功一次，重复调用在迁移前就抛
+ *   `409 RENTAL_ALREADY_RETURNED`，本函数根本不会被调用到。
+ * - **本函数层**：只有 `stockReservation === 'CONSUMED'`（支付已扣减、尚未回补）
+ *   才回补，回补后置为 `'RESTORED'`。所以即使被重复调用也不会把库存加两次。
+ *
+ * 第二层还有个**副作用是必须的**：已归还的租赁单若之后又走售后退款，
+ * `restoreOrderStock` 同样以 `stockReservation === 'CONSUMED'` 为前置条件，
+ * 此时它已是 `'RESTORED'`，于是售后路径会正确地跳过回补 —— 车已经回来了，
+ * 不能再补一次。这条不变量让「归还」与「退款」两条链路在数据上天然互斥。
+ *
+ * @param {object} data 全量数据（原地修改 `data.products` 与 `data.stockMovements`）。
+ * @param {object} order 租赁订单。
+ * @returns {boolean} 是否真的发生了回补。
+ */
+function restoreRentalStock(data, order) {
+  // 非租赁单不得走这条回补：售卖单的回补语义是「退款」，由 restoreOrderStock 负责。
+  if (order?.orderKind !== 'RENTAL') return false;
+  // 前置条件同时承担幂等：HELD（未支付）/ RELEASED（已取消）/ RESTORED（已回补）一律跳过。
+  if (order.stockReservation !== 'CONSUMED') return false;
+  const affectedProducts = [];
+  for (const orderItem of order.items || []) {
+    const quantity = Math.max(0, Number(orderItem.quantity || 0));
+    if (!quantity) continue;
+    const product = (data.products || []).find((candidate) => candidate.id === orderItem.productId);
+    if (!product) continue;
+    const stockBefore = Number(product.stock || 0);
+    product.stock = stockBefore + quantity;
+    recordStockMovement(data, product, {
+      movementType: 'RETURN_RESTORE',
+      quantity,
+      stockBefore,
+      stockAfter: Number(product.stock || 0),
+      reservedBefore: Number(product.reservedStock || 0),
+      reservedAfter: Number(product.reservedStock || 0),
+      referenceId: order.id,
+      referenceNo: order.orderNo,
+      operator: 'RENTAL_FLOW',
+      note: '租赁归还核验后回补可租库存'
+    });
+    affectedProducts.push(product);
+  }
+  if (!affectedProducts.length) return false;
+  order.stockReservation = 'RESTORED';
+  affectedProducts.forEach((product) => evaluateLowStockAlert(data, product, new Date().toISOString()));
+  return true;
+}
+
 function restoreOrderStockQuantity(data, order, refundItems = []) {
   const restoredByProduct = order.stockRestoredByProduct || {};
   const affectedProducts = [];
@@ -270,5 +336,6 @@ module.exports = {
   releaseOrderStock,
   consumeOrderStock,
   restoreOrderStock,
+  restoreRentalStock,
   restoreOrderStockQuantity
 };

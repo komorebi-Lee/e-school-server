@@ -111,6 +111,21 @@ const RENTAL_ACTIONS = Object.freeze({
 });
 
 /**
+ * 「该动作已经成功执行过」时使用的专属错误码。
+ *
+ * 只有**不可逆的终态迁移**才配一个专属码。`RETURN_VERIFY` 一旦成功，就同时改动了
+ * 库存（回补）、押金（转待退）、分账（进账期）与订单状态（COMPLETED）——商家双击、
+ * 客户端重试、网络重发都会再打一次这个接口。此时返回通用的 `ACTION_NOT_ALLOWED`
+ * 会让前端无法区分「已经成功了」和「操作非法」，只能靠额外查一次订单状态来猜。
+ *
+ * `RETURN_REQUEST` 没有副作用、也不是终态，重复提交按普通非法迁移处理即可，
+ * 不需要专属码。这个不对称是**有意**的，不是遗漏。
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+const RENTAL_ACTION_DONE_CODES = Object.freeze({ RETURN_VERIFY: 'RENTAL_ALREADY_RETURNED' });
+
+/**
  * 判断订单是否是一张可走租赁状态机的租赁单。
  *
  * `orderKind === 'RENTAL'` 与 `order.rental` 必须同时成立：只有前者意味着
@@ -140,12 +155,48 @@ function applyRentalAction(order, action) {
     throw new ApiError(409, 'ACTION_NOT_ALLOWED', '当前订单不是租赁单，不支持租赁动作');
   }
   const current = order.rental.status;
-  const next = RENTAL_ACTIONS[action]?.[current];
+  const transitions = RENTAL_ACTIONS[action];
+  const next = transitions?.[current];
   if (!next) {
+    // 区分「已经做过」与「本来就不合法」：当前状态恰好是该动作的目标状态 ⇒ 重复提交。
+    // 这一步必须在任何副作用（库存回补、押金、分账）之前抛出，重复提交才不会二次回补。
+    const doneCode = RENTAL_ACTION_DONE_CODES[action];
+    if (doneCode && Object.values(transitions || {}).includes(current)) {
+      throw new ApiError(409, doneCode, '租赁单已完成归还核验，请勿重复提交');
+    }
     throw new ApiError(409, 'ACTION_NOT_ALLOWED', `租赁单当前状态 ${current} 不支持动作 ${action}`);
   }
   order.rental.status = next;
   return next;
+}
+
+/**
+ * 把某张租赁单仍在冻结中的押金转入「待退」。
+ *
+ * 归还核验通过 = 车已回到商家手上 = 押金的占用理由消失，因此押金从 `HELD`
+ * 转入 `REFUND_PENDING` 并打上 `refundPendingAt`（T36「押金结算」的入口状态）。
+ * **本函数只改状态，不动金额**：实际退款额要等车况核验（是否有损坏扣款）才能定，
+ * 那是 T36 的职责。
+ *
+ * 幂等：只处理 `HELD` 的押金，重复调用不会覆盖已进入后续状态的记录，
+ * 也不会刷新 `refundPendingAt`（否则「待退时长」这类指标会失真）。
+ *
+ * @param {object} data 全量数据（原地修改 `data.rentalDeposits`）。
+ * @param {object} order 租赁订单。
+ * @param {string} now 转入待退的时间（ISO 字符串）。
+ * @returns {object[]} 被本次调用改动的押金记录。
+ */
+function markRentalDepositsRefundPending(data, order, now) {
+  const deposits = Array.isArray(data?.rentalDeposits) ? data.rentalDeposits : [];
+  const touched = [];
+  for (const deposit of deposits) {
+    if (deposit.orderId !== order?.id) continue;
+    if (deposit.status !== 'HELD') continue;
+    deposit.status = 'REFUND_PENDING';
+    deposit.refundPendingAt = now;
+    touched.push(deposit);
+  }
+  return touched;
 }
 
 /**
@@ -211,7 +262,9 @@ module.exports = {
   buildRentalOrderItem,
   createRentalDeposit,
   applyRentalAction,
+  markRentalDepositsRefundPending,
   resolveOrderCompletion,
   isRentalOrder,
-  RENTAL_ACTIONS
+  RENTAL_ACTIONS,
+  RENTAL_ACTION_DONE_CODES
 };
