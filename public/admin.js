@@ -85,8 +85,8 @@ function products(){const items=state.data.products.filter(match);const rows=ite
 function stockMovementsView(){
   const items=(state.data.stockMovements||[]).filter(match);
   const merchantName=id=>(state.data.merchants||[]).find(merchant=>merchant.id===id)?.name||'平台自营';
-  const movementTypeLabels={INITIAL:'初始化',ADJUST_IN:'补货入库',ADJUST_OUT:'库存调整',RESERVE:'下单预占',RELEASE:'取消释放',CONSUME:'支付扣减',RESTORE:'退款回补'};
-  const movementBadges={INITIAL:'blue',ADJUST_IN:'green',ADJUST_OUT:'orange',RESERVE:'blue',RELEASE:'orange',CONSUME:'blue',RESTORE:'green'};
+  const movementTypeLabels={INITIAL:'初始化',ADJUST_IN:'补货入库',ADJUST_OUT:'库存调整',RESERVE:'下单预占',RELEASE:'取消释放',CONSUME:'支付扣减',RESTORE:'退款回补',RETURN_RESTORE:'租赁归还回补'};
+  const movementBadges={INITIAL:'blue',ADJUST_IN:'green',ADJUST_OUT:'orange',RESERVE:'blue',RELEASE:'orange',CONSUME:'blue',RESTORE:'green',RETURN_RESTORE:'green'};
   const rows=items.slice(0,100).map(item=>`<tr><td><strong>${esc(item.productName||item.productId)}</strong><small>${esc(merchantName(item.merchantId))}</small></td><td><span class="badge ${movementBadges[item.movementType]||''}">${esc(movementTypeLabels[item.movementType]||item.movementType)}</span><small>${esc(item.note||'')}</small></td><td>${Number(item.quantity||0)}<small>库存 ${Number(item.stockBefore||0)} → ${Number(item.stockAfter||0)}</small></td><td>${Number(item.reservedBefore||0)} → ${Number(item.reservedAfter||0)}</td><td>${esc(item.referenceNo||item.referenceId||'—')}</td><td>${esc(item.operator||'—')}</td><td>${fmtDate(item.createdAt)}</td></tr>`);
   return `<div class="metric-grid">${metric('台账记录',(state.data.stockMovements||[]).length,'最新 500 条库存变更留痕')}${metric('展示条数',rows.length,'按时间倒序展示')}${metric('覆盖类型',new Set((state.data.stockMovements||[]).map(x=>x.movementType)).size,'初始化 / 调整 / 预占 / 扣减 / 回补')}</div>`+toolbar(items.length)+table(['商品 / 商家','变更类型','数量 / 可售库存','待支付占用','关联单号','操作来源','时间'],rows,items.length);
 }

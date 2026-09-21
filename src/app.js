@@ -17,6 +17,7 @@ const {
   releaseOrderStock,
   consumeOrderStock,
   restoreOrderStock,
+  restoreRentalStock,
   restoreOrderStockQuantity
 } = require('./domain/inventory');
 const {
@@ -62,6 +63,7 @@ const {
   buildRentalOrderItem,
   createRentalDeposit,
   applyRentalAction,
+  markRentalDepositsRefundPending,
   resolveOrderCompletion
 } = require('./domain/rental');
 const {
@@ -4686,10 +4688,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             }
             else if (action === 'RETURN_VERIFY') {
               // ★ T34 租赁状态机：商家核验归还 RETURN_REQUESTED → RETURNED。
+              // 迁移失败（重复提交 / 未先申请）在这一步就抛出，
+              // 后面的库存回补与押金改状态一律不会发生。
               applyRentalAction(item, 'RETURN_VERIFY');
+              const rentalReturnedAt = new Date().toISOString();
+              // ★ T35 车回到可租池：movementType 用 RETURN_RESTORE，与售后的 RESTORE 严格区分。
+              restoreRentalStock(data, item);
+              // ★ T35 押金的占用理由消失：HELD → REFUND_PENDING（T36「押金结算」的入口状态）。
+              markRentalDepositsRefundPending(data, item, rentalReturnedAt);
               // 归还核验是租赁单进入 COMPLETED 的唯一入口，此刻资金侧入口守卫也随之放行。
               item.status = resolveOrderCompletion(item);
-              activateOrderSettlements(data, item, new Date().toISOString());
+              activateOrderSettlements(data, item, rentalReturnedAt);
             }
             else if (!['CONTACT','NOTE'].includes(action)) throw new ApiError(409,'ACTION_NOT_ALLOWED','当前状态不支持该商家动作');
           }
@@ -5265,7 +5274,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       }
 
       if (request.method === 'GET' && pathname === '/api/merchant/stock-movements') {
-        const allowedTypes = new Set(['INITIAL', 'ADJUST_IN', 'ADJUST_OUT', 'RESERVE', 'RELEASE', 'CONSUME', 'RESTORE']);
+        // ★ T35 新增 RETURN_RESTORE（租赁归还回补）：流水类型的白名单必须与
+        // domain/inventory.js 里真正写入的 movementType 保持同步，否则商家按
+        // type=RETURN_RESTORE 过滤会拿到 400 而不是数据。
+        const allowedTypes = new Set(['INITIAL', 'ADJUST_IN', 'ADJUST_OUT', 'RESERVE', 'RELEASE', 'CONSUME', 'RESTORE', 'RETURN_RESTORE']);
         const data = store.read();
         let items = (data.stockMovements || []).filter((item) => item.merchantId === merchantSession.merchantId);
         const productId = url.searchParams.get('productId') || '';
