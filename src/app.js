@@ -58,7 +58,12 @@ const {
   withListingType,
   LISTING_TYPES
 } = require('./domain/catalog');
-const { buildRentalOrderItem, createRentalDeposit } = require('./domain/rental');
+const {
+  buildRentalOrderItem,
+  createRentalDeposit,
+  applyRentalAction,
+  resolveOrderCompletion
+} = require('./domain/rental');
 const {
   userNotificationLink,
   leadSourceRecord,
@@ -1074,6 +1079,12 @@ function createApp({
   // 交付核验通过后开始计算账期；账期为 0 天时立即可结算。
   function activateOrderSettlements(data, order, now) {
     if (!order?.id || !Array.isArray(data.settlements)) return [];
+    // ★ T34 资金侧单点守卫：租赁单在「归还核验」完成前，任何路径都不得激活分账。
+    // 守卫放在函数入口而不是 6 个调用方：调用方跨 4 个接口（商家协同、商家订单状态、
+    // 商家售后、管理端状态），其中管理端两条藏在正则分支里，逐个打补丁必漏；
+    // 入口守卫对未来新增的第 7 个调用方同样自动生效。
+    // 返回 `[]` 与第 1076 行的早返回同形，调用方 `if (released.length)` 语义不变。
+    if (order.orderKind === 'RENTAL' && order.rental?.status !== 'RETURNED') return [];
     const days = settlementPeriodDays(data);
     const touched = [];
     for (const settlement of data.settlements) {
@@ -4668,10 +4679,24 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               if (!item.deliveryCode || providedCode !== item.deliveryCode) {
                 throw new ApiError(409, 'DELIVERY_CODE_INVALID', '交付码不正确，请向用户确认后完成订单');
               }
-              item.status = 'COMPLETED';
+              // ★ T34 状态侧收口：租赁单「交付取车」不等于「订单完成」，
+              // 车还在用户手上时订单停在 FULFILLING，由 resolveOrderCompletion 统一裁决。
+              item.status = resolveOrderCompletion(item);
+              activateOrderSettlements(data, item, new Date().toISOString());
+            }
+            else if (action === 'RETURN_VERIFY') {
+              // ★ T34 租赁状态机：商家核验归还 RETURN_REQUESTED → RETURNED。
+              applyRentalAction(item, 'RETURN_VERIFY');
+              // 归还核验是租赁单进入 COMPLETED 的唯一入口，此刻资金侧入口守卫也随之放行。
+              item.status = resolveOrderCompletion(item);
               activateOrderSettlements(data, item, new Date().toISOString());
             }
             else if (!['CONTACT','NOTE'].includes(action)) throw new ApiError(409,'ACTION_NOT_ALLOWED','当前状态不支持该商家动作');
+          }
+          // ★ T34 租赁状态机：用户在订单页申请归还（RENTING → RETURN_REQUESTED）。
+          // 挂在协同接口上：用户侧动作的鉴权、留言/通知链路这里都已具备，无需新开端点。
+          if (role === 'USER' && action === 'RETURN_REQUEST') {
+            applyRentalAction(item, 'RETURN_REQUEST');
           }
           if (role === 'USER' && item.collaboration.merchantId) {
             notifyOrderMerchant(data, item, 'ORDER', `订单 ${item.orderNo} 有新用户留言`, note);
@@ -5570,7 +5595,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               throw new ApiError(409, 'DELIVERY_CODE_INVALID', '交付码不正确，请向用户确认后完成订单');
             }
           }
-          item.status = status;
+          // ★ T34 状态侧收口：租赁单的「完成」受归还状态约束，车未归还则停在 FULFILLING。
+          item.status = status === 'COMPLETED' ? resolveOrderCompletion(item) : status;
           item.updatedAt = new Date().toISOString();
           appendCollaborationEvent(item, 'MERCHANT', status === 'FULFILLING' ? 'ACCEPT' : 'COMPLETE', status === 'FULFILLING' ? '商家已确认履约' : '商家已核验交付码，订单已完成');
           addAudit(data, '商家更新订单状态', item.orderNo);
@@ -5610,7 +5636,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
               : applyOrderRefund(data, order, item.updatedAt);
             appendCollaborationEvent(order, 'MERCHANT', 'AFTER_SALE_CLOSED', `${refundResult?.full === false ? '按数量部分退款完成' : '退款已完成，订单关闭'}：${resolutionNote}`);
           } else if (status === 'CLOSED') {
-            order.status = 'COMPLETED';
+            // ★ T34 状态侧收口：售后关闭把订单标记完成时，租赁单仍受归还状态约束。
+            order.status = resolveOrderCompletion(order);
             order.updatedAt = item.updatedAt;
             unfreezeOrderSettlements(data, order, item.updatedAt);
             activateOrderSettlements(data, order, item.updatedAt);
@@ -7060,7 +7087,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (status === 'COMPLETED' && !['PAID', 'FULFILLING'].includes(item.status)) throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '仅未完成订单可以标记完成');
             if (status === 'CANCELLED' && item.status !== 'PENDING_PAYMENT') throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '已支付订单请先走售后退款，不能直接取消');
           }
-          item.status = status; item.updatedAt = new Date().toISOString(); addAudit(data, `更新${adminStatusMatch[1]}状态为${status}`, item.id);
+          // ★ T34 状态侧收口：管理端把订单标记完成同样受租赁归还状态约束。
+          item.status = isOrder && status === 'COMPLETED' ? resolveOrderCompletion(item) : status;
+          item.updatedAt = new Date().toISOString();
+          addAudit(data, `更新${adminStatusMatch[1]}状态为${status}`, item.id);
           if (isPendingPaymentCollection && status === 'PENDING_PAYMENT') {
             const timeoutMinutes = Number(data.adminSettings?.paymentTimeoutMinutes || 30);
             item.paymentExpiresAt = new Date(new Date(item.updatedAt).getTime() + timeoutMinutes * 60 * 1000).toISOString();
@@ -7118,7 +7148,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (order && item.type === 'REFUND' && item.refundItems?.length) applyPartialOrderRefund(data, order, item, item.updatedAt);
             else if (order && item.type === 'REFUND') applyOrderRefund(data, order, item.updatedAt);
             else if (order) {
-              order.status = 'COMPLETED';
+              // ★ T34 状态侧收口：管理端售后关闭时，租赁单仍受归还状态约束。
+              order.status = resolveOrderCompletion(order);
               order.updatedAt = item.updatedAt;
               unfreezeOrderSettlements(data, order, item.updatedAt);
               activateOrderSettlements(data, order, item.updatedAt);
