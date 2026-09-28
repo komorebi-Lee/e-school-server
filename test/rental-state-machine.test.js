@@ -512,3 +512,78 @@ test('⑨ ★ SALE 订单回归：交付核验后仍置 COMPLETED 并激活分�
     `售卖单交付核验后分账必须进入账期，实际 ${settlementStatusOf(orderId)}`
   );
 });
+
+test('⑩ ★ 未支付租赁单不可申请归还（洞口由状态机关闭），支付后立即恢复', async () => {
+  // ## 这条断言守护的是「洞口根本不存在」，而不是「洞口被拦住了」
+  //
+  // 改动前：建单即 `rental.status = 'RENTING'`，而 `RETURN_REQUEST` 的迁移表是
+  // `{ RENTING: 'RETURN_REQUESTED' }` —— 未支付单同样落在 `RENTING` 上，
+  // 于是**没付钱也能成功申请归还**（已用真实链路实测复现：HTTP 200 +
+  // `rental.status` 落库为 `RETURN_REQUESTED`，而 `paymentStatus` 仍是 `UNPAID`）。
+  //
+  // 改动后建单为 `PENDING_PAYMENT`，该状态在迁移表里**没有出边** ⇒ 天然 409。
+  // 洞口由状态机本身关闭，不需要在每条调用路径上再加一道支付判断。
+  const session = await loginWeChat('rental_sm_unpaid');
+  const created = await api('/api/orders', {
+    method: 'POST',
+    headers: jsonHeaders(session.token),
+    body: JSON.stringify({ items: [{ productId: RENTAL_PRODUCT_ID, quantity: 1, rentalUnits: RENTAL_UNITS }] })
+  });
+  assert.equal(created.response.status, 201);
+  const orderId = created.body.data.id;
+
+  // ★ 洞口关闭的直接证据 —— 放在最前面，且**必须放在任何「建单形态」断言之前**。
+  //
+  // 变异测试发现的排序问题：如果把「建单不得直接置 RENTING」放在前面，把建单状态改回
+  // `RENTING`（即重新打开洞口）时，测试会停在**形态断言**上，`409` 这条真正的
+  // 证据根本没被执行 —— 我们只知道「形态变了」，不知道「洞口是否真的重新打开」。
+  // 让最关键的断言最先执行，变异才会指向它本该指向的那一条。
+  const unpaidRequest = await collab(session.token, {
+    role: 'USER',
+    action: 'RETURN_REQUEST',
+    orderId,
+    note: '未支付就申请归还，必须被状态机拒绝。'
+  });
+  assert.equal(unpaidRequest.response.status, 409, '未支付申请归还必须被拒（洞口关闭的直接证据）');
+  assert.equal(unpaidRequest.body.error.code, 'ACTION_NOT_ALLOWED');
+
+  // 商家侧同样关闭：未支付单不可核验归还。
+  const unpaidVerify = await collab(merchantToken, {
+    role: 'MERCHANT',
+    action: 'RETURN_VERIFY',
+    orderId,
+    note: '未支付单不该能核验归还。'
+  });
+  assert.equal(unpaidVerify.response.status, 409);
+  assert.equal(unpaidVerify.body.error.code, 'ACTION_NOT_ALLOWED');
+
+  // 被拒的请求零副作用：状态一个字节都没动。
+  assert.equal(orderOf(orderId).rental.status, 'PENDING_PAYMENT', '被拒的申请不得改动租赁状态');
+  assert.equal(orderOf(orderId).status, 'PENDING_PAYMENT');
+
+  // 建单形态：占用库存，但不消耗租期。
+  assert.equal(orderOf(orderId).status, 'PENDING_PAYMENT');
+  assert.equal(orderOf(orderId).paymentStatus, 'UNPAID');
+  assert.equal(orderOf(orderId).rental.status, 'PENDING_PAYMENT', '建单不得直接置 RENTING');
+  assert.equal(orderOf(orderId).rental.dueAt, null, '未支付不消耗租期');
+
+  // ★ 反向：支付后守卫**不得误伤** —— 真实租赁单必须能申请归还。
+  // 只测「未支付被拒」是不够的：把迁移表整条删掉也能让上面全绿。
+  await confirmPayment(created.body.paymentOrder.id, session.token);
+  const paidOrder = orderOf(orderId);
+  assert.equal(paidOrder.rental.status, 'RENTING', '支付成功 ⇒ 租期起算');
+  assert.equal(
+    new Date(paidOrder.rental.dueAt).getTime() - new Date(paidOrder.paidAt).getTime(),
+    RENTAL_UNITS * 24 * 60 * 60 * 1000,
+    'dueAt 必须等于「支付时刻 + 租期」'
+  );
+
+  const paidRequest = await collab(session.token, {
+    role: 'USER',
+    action: 'RETURN_REQUEST',
+    orderId,
+    note: '支付后申请归还，必须放行。'
+  });
+  assert.equal(paidRequest.response.status, 200);
+  assert.equal(paidRequest.body.data.rental.status, 'RETURN_REQUESTED');
+});

@@ -171,6 +171,24 @@ test('④ 支付成功后分账基数只有租金，平台抽佣按租金计算'
   assert.equal(paid.response.status, 200);
   assert.equal(paid.body.data.order.status, 'PAID');
 
+  // ★ 支付成功 ⇒ 租期起算（`startRental`）：PENDING_PAYMENT → RENTING，
+  // 且 dueAt = **支付时刻** + 租期。
+  //
+  // 这两条是「未支付不能申请归还」的正面配套：如果支付后不置 RENTING，
+  // 状态机就会把**真实租赁单**的归还申请也一起拒掉 —— 过宽的守卫会误伤正常链路。
+  // 同时它们把「租期从支付起算」钉死：改动前 dueAt 由**建单**时刻算出，
+  // 用户不付款时租期窗口会被白白烧掉。
+  const paidOrder = store.read().orders.find((item) => item.id === rentalOrder.id);
+  assert.equal(paidOrder.rental.status, 'RENTING', '支付成功后租赁周期才正式开始');
+  assert.ok(paidOrder.paidAt, '支付成功后应写入 paidAt');
+  assert.equal(
+    new Date(paidOrder.rental.dueAt).getTime() - new Date(paidOrder.paidAt).getTime(),
+    RENTAL_UNITS * 24 * 60 * 60 * 1000,
+    'dueAt 必须等于「支付时刻 + 租期」，而不是「建单时刻 + 租期」'
+  );
+  // 建单快照仍是未支付形态：证明 dueAt 确实是支付时写入的，不是建单时算的。
+  assert.equal(rentalOrder.rental.dueAt, null, '建单响应里 dueAt 必须为空');
+
   const data = store.read();
   const settlements = data.settlements.filter((item) => item.orderId === rentalOrder.id);
   assert.equal(settlements.length, 1);
@@ -199,17 +217,24 @@ test('⑤ rentalDeposits 有且仅有 1 条：金额 29900、状态 HELD', () =>
   assert.equal(deposit.createdAt, rentalOrder.createdAt);
 });
 
-test('⑥ 订单形态与租赁摘要字段', () => {
+test('⑥ 订单形态与租赁摘要字段（建单即 PENDING_PAYMENT，租期未起算）', () => {
   assert.equal(rentalOrder.orderKind, 'RENTAL');
-  assert.equal(rentalOrder.rental.status, 'RENTING');
+  // ★ 建单只「占用」，不「起租」：租期从支付成功起算（`app.js` 的 `startRental`）。
+  //
+  // 改动前这里是 'RENTING'（建单即置位），后果有二：
+  // (1) 未支付单在订单页被标成「已支付待取车」；
+  // (2) `RETURN_REQUEST` 的迁移表是 `{ RENTING: ... }`，未支付单同样落在 RENTING 上，
+  //     于是**未支付也能申请归还**（已实测复现）。
+  // 改为 PENDING_PAYMENT 后该状态在迁移表里没有出边，洞口由状态机本身关闭。
+  assert.equal(rentalOrder.rental.status, 'PENDING_PAYMENT');
   assert.equal(rentalOrder.rental.units, RENTAL_UNITS);
   assert.equal(rentalOrder.rental.unit, 'DAY');
   assert.equal(rentalOrder.rental.rentAmountInCents, 4500);
   assert.equal(rentalOrder.rental.depositInCents, 29900);
 
-  // dueAt = 下单时间 + 3 个 DAY
-  const expectedDueAt = new Date(rentalOrder.createdAt).getTime() + RENTAL_UNITS * 24 * 60 * 60 * 1000;
-  assert.equal(new Date(rentalOrder.rental.dueAt).getTime(), expectedDueAt);
+  // 租期尚未起算：dueAt 为 null，等支付成功才写入（支付后的值由断言 ④ 覆盖）。
+  // 这样「未支付不消耗租期」是可断言的，而不是靠读代码相信。
+  assert.equal(rentalOrder.rental.dueAt, null);
 });
 
 test('⑦ 入参校验：越界 / 缺失 / 错配 / 混单一律 400 且零副作用', async () => {

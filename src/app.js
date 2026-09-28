@@ -61,6 +61,7 @@ const {
 } = require('./domain/catalog');
 const {
   buildRentalOrderItem,
+  startRental,
   createRentalDeposit,
   applyRentalAction,
   markRentalDepositsRefundPending,
@@ -590,6 +591,12 @@ function createApp({
       order.status = 'PAID';
       order.updatedAt = now;
       order.paidAt = order.paidAt || now;
+      // ★ 租赁单：支付成功 ⇒ 租期起算（PENDING_PAYMENT → RENTING，dueAt = 支付时刻 + 租期）。
+      //
+      // 用结算时刻 `now` 而不是 provider 的 paidAt：`order.paidAt` 本来就取 `now`，
+      // 两者用同一个基准，`dueAt - paidAt` 恒等于租期长度，测试与前端都能直接对账。
+      // 非租赁单直接返回 null，SALE 链路一行不受影响。
+      startRental(order, now);
       issueDeliveryCode(order, now);
       consumeOrderStock(data, order);
       const bikeItem = quantityAwarePlateItem(order, data);
@@ -8018,17 +8025,24 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           // 押金计入用户实付（totalInCents），但绝不进入 order.items[].subtotalInCents：
           // 分账只认租金，押金只活在 data.rentalDeposits 里。
           totalInCents += rentalDepositTotalInCents;
-          const rentalDurationMs = rentalItems.reduce((longest, item) => {
-            const stepMs = item.rentalUnit === 'HOUR' ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-            return Math.max(longest, Number(item.rentalUnits || 0) * stepMs);
-          }, 0);
+          // ★ 建单只「占用」，不「起租」：租期从支付成功起算（见 startRental）。
+          //
+          // 改动前这里直接写 'RENTING' 并按建单时刻算 dueAt，导致两个后果：
+          // (1) 未支付单在订单页被标成「已支付待取车」；
+          // (2) 租期在支付前就开始消耗。
+          // 更严重的是 RETURN_REQUEST 的迁移表是 { RENTING: ... } —— 未支付单
+          // 同样落在 RENTING 上，于是**未支付就能申请归还**。
+          //
+          // 改为 PENDING_PAYMENT 后，该状态在迁移表里没有出边，
+          // 「未支付不能申请归还」由状态机本身保证，不需要在调用路径上再加判断。
           const rental = orderKind === 'RENTAL' ? {
-            status: 'RENTING',
+            status: 'PENDING_PAYMENT',
             units: rentalItems.reduce((sum, item) => sum + Number(item.rentalUnits || 0), 0),
             unit: rentalItems[0].rentalUnit,
             rentAmountInCents: rentalItems.reduce((sum, item) => sum + Number(item.subtotalInCents || 0), 0),
             depositInCents: rentalDepositTotalInCents,
-            dueAt: new Date(new Date(now).getTime() + rentalDurationMs).toISOString()
+            // 租期尚未起算：dueAt 在支付成功时由 startRental 写入。
+            dueAt: null
           } : null;
           const paymentTimeoutMinutes = Number(settings.paymentTimeoutMinutes || 30);
           const order = {

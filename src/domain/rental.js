@@ -92,11 +92,53 @@ function buildRentalOrderItem(product, rentalUnits) {
 }
 
 /**
+ * 租期单位 → 毫秒。
+ *
+ * 与前端 `miniprogram/utils/product-view.js` 的 `RENTAL_UNIT_STEP_MS` 保持同一口径。
+ * 表里查不到的单位按 `DAY` 兜底 —— 与建单时 `item.rentalUnit === 'HOUR' ? ... : 天`
+ * 的原始语义完全一致（即「不是 HOUR 就当 DAY」）。
+ *
+ * @type {Readonly<Record<string, number>>}
+ */
+const RENTAL_UNIT_MS = Object.freeze({
+  DAY: 24 * 60 * 60 * 1000,
+  HOUR: 60 * 60 * 1000
+});
+
+/**
+ * 计算一张订单的租期长度（毫秒）。
+ *
+ * **建单与支付两处都必须走这一个函数**：租期的起算时点从「建单」改到「支付成功」
+ * 之后，如果两处各算一遍，公式一旦漂移就会出现「建单算 3 天、支付算 2 天」这类
+ * 无法从订单数据上看出来的错账。抽成单一实现后，这类漂移在结构上不可能发生。
+ *
+ * 多租赁项取**最长**租期（而不是求和）：一张订单的车是同时交付、同时归还的，
+ * 整体可租时长由最长的那一项决定。这个口径与建单时的原始实现逐字一致。
+ *
+ * @param {Array<object>} [orderItems] 订单项列表（租赁项带 `rentalUnits` / `rentalUnit`）。
+ * @returns {number} 租期毫秒数；无租赁项时返回 0。
+ */
+function rentalDurationMsOf(orderItems) {
+  const items = Array.isArray(orderItems) ? orderItems : [];
+  return items.reduce((longest, item) => {
+    const units = Number(item && item.rentalUnits);
+    if (!Number.isInteger(units) || units <= 0) return longest;
+    const stepMs = RENTAL_UNIT_MS[item.rentalUnit] || RENTAL_UNIT_MS.DAY;
+    return Math.max(longest, units * stepMs);
+  }, 0);
+}
+
+/**
  * 租赁状态机的合法迁移表。
  *
  * ```
+ * PENDING_PAYMENT --(支付成功/startRental)--> RENTING
  * RENTING --RETURN_REQUEST--> RETURN_REQUESTED --RETURN_VERIFY--> RETURNED
  * ```
+ *
+ * `PENDING_PAYMENT`（已建单、未支付）**刻意没有任何出边**：租期尚未起算，
+ * 用户不该能申请归还。支付成功由 {@link startRental} 直接写入 `RENTING`，
+ * 不走这张迁移表 —— 「支付成功」是订单域的外部事件，不是租赁状态机上的动作。
  *
  * 表是「动作 → { 当前状态 → 下一个状态 }」的二维映射：动作不在表里、
  * 或当前状态没有出边，都属于非法迁移（统一抛 409 `ACTION_NOT_ALLOWED`）。
@@ -137,6 +179,44 @@ const RENTAL_ACTION_DONE_CODES = Object.freeze({ RETURN_VERIFY: 'RENTAL_ALREADY_
  */
 function isRentalOrder(order) {
   return Boolean(order && order.orderKind === 'RENTAL' && order.rental);
+}
+
+/**
+ * 支付成功 ⇒ 租赁周期正式开始（租期起算的**唯一入口**）。
+ *
+ * ## 为什么需要这个函数（改动前的真实缺口）
+ *
+ * 改动前建单时 `rental.status` 直接写成 `'RENTING'`、`dueAt` 按建单时刻算。
+ * 后果有两条，第二条是资损级的：
+ *
+ * 1. **未支付单被当作「已支付待取车」**：订单页进度条第 1 步直接点亮，
+ *    用户还没付钱就看到「凭交付码到校内取车点取车」。
+ * 2. **租期在支付前就开始消耗**：`dueAt` 由建单时刻推出，用户不付款时
+ *    `paymentTimeoutMinutes` 关单，但那一段租期窗口已经被烧掉了。
+ *
+ * 更严重的是：`RETURN_REQUEST` 的迁移表是 `{ RENTING: 'RETURN_REQUESTED' }`，
+ * 而未支付单也是 `RENTING` —— 于是**未支付单可以成功申请归还**（已实测复现）。
+ *
+ * ## 改动后的语义
+ *
+ * 建单 ⇒ `rental.status = 'PENDING_PAYMENT'`、`dueAt = null`（占用，不消耗租期）；
+ * 支付成功 ⇒ 本函数把状态推进到 `'RENTING'` 并按**支付时刻**起算 `dueAt`。
+ *
+ * 这样一来「未支付不能申请归还」**由状态机本身保证** —— `PENDING_PAYMENT`
+ * 在 `RENTAL_ACTIONS.RETURN_REQUEST` 里没有出边，天然 409。
+ * 洞口被关掉，而不是在每条调用路径上再加一道支付判断。
+ *
+ * @param {object} order 订单（原地修改 `order.rental`）。
+ * @param {string|Date} [now] 支付时刻，缺省为当前时间。
+ * @returns {object|null} 起算后的 `order.rental`；非租赁单返回 `null`。
+ */
+function startRental(order, now) {
+  if (!isRentalOrder(order)) return null;
+  const paidAt = now === undefined || now === null ? new Date() : new Date(now);
+  const startedAt = Number.isFinite(paidAt.getTime()) ? paidAt : new Date();
+  order.rental.status = 'RENTING';
+  order.rental.dueAt = new Date(startedAt.getTime() + rentalDurationMsOf(order.items)).toISOString();
+  return order.rental;
 }
 
 /**
@@ -395,6 +475,8 @@ function createRentalDeposit(order, product, rentalUnits, now) {
 
 module.exports = {
   buildRentalOrderItem,
+  rentalDurationMsOf,
+  startRental,
   createRentalDeposit,
   applyRentalAction,
   markRentalDepositsRefundPending,
@@ -403,6 +485,7 @@ module.exports = {
   settleRentalDeposit,
   isRentalOrder,
   RENTAL_ACTIONS,
+  RENTAL_UNIT_MS,
   RENTAL_ACTION_DONE_CODES,
   RENTAL_DEPOSIT_STATUSES,
   RENTAL_DEPOSIT_FINAL_STATUSES,
