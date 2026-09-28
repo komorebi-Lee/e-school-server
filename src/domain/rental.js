@@ -222,6 +222,141 @@ function resolveOrderCompletion(order) {
 }
 
 /**
+ * 押金状态取值白名单。
+ *
+ * ```
+ * HELD --归还核验--> REFUND_PENDING --平台结算--> REFUNDED / PARTIALLY_REFUNDED
+ * ```
+ *
+ * 前两个是**在途态**（钱还占着，金额恒等式无从谈起），后两个是**终态**
+ * （钱已结清，必须满足 {@link assertDepositBalance} 的恒等式）。
+ *
+ * @type {Readonly<string[]>}
+ */
+const RENTAL_DEPOSIT_STATUSES = Object.freeze(['HELD', 'REFUND_PENDING', 'REFUNDED', 'PARTIALLY_REFUNDED']);
+
+/**
+ * 押金终态：进入即代表资金已结清，金额恒等式必须成立。
+ *
+ * @type {Readonly<string[]>}
+ */
+const RENTAL_DEPOSIT_FINAL_STATUSES = Object.freeze(['REFUNDED', 'PARTIALLY_REFUNDED']);
+
+/**
+ * 唯一可被平台结算的押金状态。
+ *
+ * `HELD`（车还没还）不能结算 —— 车况未知；终态不能结算 —— 会二次退款/二次扣款。
+ *
+ * @type {string}
+ */
+const RENTAL_DEPOSIT_SETTLEABLE_STATUS = 'REFUND_PENDING';
+
+/**
+ * 扣款所得的资金归属口径说明，写入 `financeEvents.note`。
+ *
+ * 扣款是车损/超时的补偿，而**车是商家的、损失也是商家的**。本轮不做真实分账，
+ * 因此这笔钱既不写进商家余额、也不记为平台收入，只留一条带本说明的流水暂挂。
+ * 若直接记为平台收入，下一轮做真实分账时这批历史数据必须回头清洗，且会引发商家抗议。
+ *
+ * @type {string}
+ */
+const DEPOSIT_DEDUCTION_ATTRIBUTION_NOTE = '扣款所得归属口径本轮未定，暂挂待分配';
+
+/**
+ * 校验押金终态的资金恒等式：`refundedInCents + deductionInCents === amountInCents`。
+ *
+ * 这是押金账本的**唯一不变量**：押金总量只有两个出口 —— 退给用户的部分与扣下的部分，
+ * 二者之和必须精确等于原始押金，不能多（凭空退款）也不能少（钱不知去向）。
+ *
+ * 只对终态校验：在途态（`HELD` / `REFUND_PENDING`）尚未发生结算，
+ * `refundedInCents` 与 `deductionInCents` 本来就都还是 0，此时校验没有意义。
+ *
+ * 失败时抛 **500 而不是 400**：能走到这里说明服务端自己写出了坏数据，
+ * 是服务端不变量被破坏，不是用户输入错误 —— 让调用方按 400 处理会把
+ * 「我们的账本坏了」误报成「你参数填错了」，掩盖真正的资损。
+ *
+ * @param {object} deposit 押金记录。
+ * @returns {boolean} 恒等式成立（或该记录不是终态、无需校验）时返回 `true`。
+ * @throws {ApiError} 500 DEPOSIT_BALANCE_BROKEN —— 终态记录的金额恒等式被破坏。
+ */
+function assertDepositBalance(deposit) {
+  if (!deposit || !RENTAL_DEPOSIT_FINAL_STATUSES.includes(deposit.status)) return true;
+  const amountInCents = Number(deposit.amountInCents);
+  const refundedInCents = Number(deposit.refundedInCents);
+  const deductionInCents = Number(deposit.deductionInCents);
+  if (refundedInCents + deductionInCents !== amountInCents) {
+    throw new ApiError(
+      500,
+      'DEPOSIT_BALANCE_BROKEN',
+      `押金 ${deposit.id || ''} 终态金额恒等式被破坏：refundedInCents(${refundedInCents}) + deductionInCents(${deductionInCents}) !== amountInCents(${amountInCents})`
+    );
+  }
+  return true;
+}
+
+/**
+ * 结算一笔押金（平台审核扣款后确定实退金额）。
+ *
+ * 这是押金从「待退」走向终态的**唯一入口**，它同时决定了三件事：
+ * 退多少、扣多少、以及钱在账本上算不算平 —— 因此函数末尾会强制
+ * 调用 {@link assertDepositBalance} 自检，把「算错金额」变成一次立刻失败的写操作，
+ * 而不是一条躺在库里的坏数据。
+ *
+ * **幂等守卫放在这里（而不是端点里）**：与 T34 的 `activateOrderSettlements` 入口守卫
+ * 同一思路 —— 只有 `REFUND_PENDING` 可结算，其他状态一律 409。守卫写在域函数里，
+ * 将来任何新调用方（批量结算、对账补单）都自动被保护，不必记得再加一次校验。
+ *
+ * **扣款所得不进商家余额、也不记为平台收入**：本函数只改押金记录本身，
+ * 完全不触碰 `data.settlements`。扣款金额由调用方写入一条带
+ * {@link DEPOSIT_DEDUCTION_ATTRIBUTION_NOTE} 说明的 `financeEvents` 流水暂挂待分配。
+ *
+ * @param {object} deposit 押金记录（原地修改）。
+ * @param {object} options 结算参数。
+ * @param {number} options.deductionInCents 扣款金额（分），必须是非负整数且不超过押金总额。
+ * @param {string} [options.operator] 操作人展示名，写入 `settledBy`。
+ * @param {string} [options.note] 扣款原因备注，写入 `deductionNote`。
+ * @param {string} now 结算时间（ISO 字符串），写入 `settledAt`。
+ * @returns {object} 更新后的押金记录。
+ * @throws {ApiError} 400 VALIDATION_ERROR —— 扣款金额非非负整数，或超过押金总额。
+ * @throws {ApiError} 409 DEPOSIT_NOT_SETTLEABLE —— 押金不在 `REFUND_PENDING`，重复结算会被挡下。
+ * @throws {ApiError} 500 DEPOSIT_BALANCE_BROKEN —— 自检发现恒等式被破坏。
+ */
+function settleRentalDeposit(deposit, options = {}, now) {
+  if (!deposit || typeof deposit !== 'object') {
+    throw new ApiError(400, 'VALIDATION_ERROR', '押金记录不存在');
+  }
+  const { deductionInCents, operator, note } = options;
+  // 先校验请求体（400），再校验状态（409）：请求本身不合法时不该被状态判断掩盖。
+  if (!Number.isInteger(deductionInCents) || deductionInCents < 0) {
+    throw new ApiError(400, 'VALIDATION_ERROR', 'deductionInCents 必须是非负整数');
+  }
+  const amountInCents = Number(deposit.amountInCents);
+  if (!Number.isInteger(amountInCents) || amountInCents < 0) {
+    throw new ApiError(500, 'DEPOSIT_BALANCE_BROKEN', `押金 ${deposit.id || ''} 的 amountInCents 非法：${deposit.amountInCents}`);
+  }
+  if (deductionInCents > amountInCents) {
+    throw new ApiError(400, 'VALIDATION_ERROR', `deductionInCents 不得超过押金总额 ${amountInCents}`);
+  }
+  if (deposit.status !== RENTAL_DEPOSIT_SETTLEABLE_STATUS) {
+    throw new ApiError(
+      409,
+      'DEPOSIT_NOT_SETTLEABLE',
+      `押金 ${deposit.id || ''} 当前状态 ${deposit.status} 不可结算（仅 ${RENTAL_DEPOSIT_SETTLEABLE_STATUS} 可结算）`
+    );
+  }
+  deposit.deductionInCents = deductionInCents;
+  deposit.refundedInCents = amountInCents - deductionInCents;
+  // 无扣款 = 全额退回；有扣款 = 部分退回。押金只有这两种终态，不存在「全部扣光」之外的第三态。
+  deposit.status = deductionInCents === 0 ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+  deposit.settledAt = now;
+  deposit.settledBy = String(operator || '');
+  deposit.deductionNote = String(note || '');
+  // ★ 自检：算错了就在这里炸，绝不把破坏恒等式的记录写进库。
+  assertDepositBalance(deposit);
+  return deposit;
+}
+
+/**
  * 构造押金记录。
  *
  * 押金独立于订单项存在：`amountInCents` 计入订单 `totalInCents`（用户实付金额），
@@ -264,7 +399,13 @@ module.exports = {
   applyRentalAction,
   markRentalDepositsRefundPending,
   resolveOrderCompletion,
+  assertDepositBalance,
+  settleRentalDeposit,
   isRentalOrder,
   RENTAL_ACTIONS,
-  RENTAL_ACTION_DONE_CODES
+  RENTAL_ACTION_DONE_CODES,
+  RENTAL_DEPOSIT_STATUSES,
+  RENTAL_DEPOSIT_FINAL_STATUSES,
+  RENTAL_DEPOSIT_SETTLEABLE_STATUS,
+  DEPOSIT_DEDUCTION_ATTRIBUTION_NOTE
 };
