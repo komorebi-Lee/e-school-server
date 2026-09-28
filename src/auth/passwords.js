@@ -38,6 +38,7 @@ function adminPermissionForRequest(pathname) {
     || pathname.startsWith('/api/admin/payment-reconciliations')
     || pathname.startsWith('/api/admin/finance-tasks')
     || pathname.startsWith('/api/admin/payout-requests')
+    || pathname.startsWith('/api/admin/rental-deposits')
     || pathname.startsWith('/api/admin/finance-events')) return 'FINANCE_MANAGE';
   if (pathname.startsWith('/api/admin/products')
     || pathname.startsWith('/api/admin/recharge-promos')

@@ -64,7 +64,10 @@ const {
   createRentalDeposit,
   applyRentalAction,
   markRentalDepositsRefundPending,
-  resolveOrderCompletion
+  resolveOrderCompletion,
+  settleRentalDeposit,
+  RENTAL_DEPOSIT_STATUSES,
+  DEPOSIT_DEDUCTION_ATTRIBUTION_NOTE
 } = require('./domain/rental');
 const {
   userNotificationLink,
@@ -1016,11 +1019,39 @@ function createApp({
       settlementReference: meta.settlementReference || '',
       receiptUrl: meta.receiptUrl || '',
       businessType: meta.businessType || '',
+      // 资金归属口径备注（目前只有租赁押金扣款使用，见 DEPOSIT_DEDUCTION_ATTRIBUTION_NOTE）。
+      note: meta.note || '',
       createdAt: now
     };
     data.financeEvents.unshift(event);
     data.financeEvents = data.financeEvents.slice(0, 5000);
     return event;
+  }
+
+  /**
+   * 管理端押金视图：押金记录 + 关联订单号 / 用户名，便于财务在列表页直接核对。
+   *
+   * 本系统没有用户昵称体系（用户以 `wx_<openid>` 标识，`userOpenIds` 只在微信登录后才有值），
+   * 因此 `userName` 按「已知 openid 脱敏展示，否则回退到 userId」生成，
+   * 避免管理端出现空白列；原始 `userId` 随 `...deposit` 一并返回，便于排查。
+   *
+   * @param {object} data 全量数据。
+   * @param {object} deposit 押金记录。
+   * @returns {object} 供管理端渲染的押金视图。
+   */
+  function rentalDepositAdminView(data, deposit) {
+    const order = (data.orders || []).find((item) => item.id === deposit.orderId);
+    const merchant = (data.merchants || []).find((item) => item.id === deposit.merchantId);
+    const openId = String(data.userOpenIds?.[deposit.userId] || '');
+    const maskedOpenId = openId.length > 6 ? `${openId.slice(0, 4)}***${openId.slice(-4)}` : openId;
+    return {
+      ...deposit,
+      orderNo: order?.orderNo || '',
+      orderStatus: order?.status || '',
+      orderKind: order?.orderKind || '',
+      merchantName: merchant?.name || '',
+      userName: openId ? `微信用户 ${maskedOpenId}` : (deposit.userId || '')
+    };
   }
 
   function createSettlements(data, order, now) {
@@ -4059,6 +4090,79 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             ownerNameMasked: `${ownerName.slice(0, 1)}${ownerName.length > 1 ? '*' : ''}`,
             idNumberMasked: maskedIdNumber,
             verifiedAt
+          },
+          requestId
+        });
+      }
+
+      // ★ T36 租赁押金结算（平台审核）。归还核验后押金停在 `REFUND_PENDING`，
+      // 必须由具备 FINANCE_MANAGE 权限的管理员核定车损扣款后才真正结清。
+      //
+      // 为什么新开端点：押金结算是全新的平台操作，**没有既有接口可挂载** ——
+      // 它既不是用户/商家在订单协同里的动作（挂不上 `order-collab`），
+      // 也不是某个既有管理资源的状态变更（`/api/admin/merchants/:id/settle` 是商家打款，
+      // 语义与押金退还是两回事）。与 T34 复用 `order-collab` 的情形不同，这里没有可复用的宿主。
+      //
+      // 权限点选 `FINANCE_MANAGE`：现有角色映射里它只属于 FINANCE 与 SUPER_ADMIN（`*`），
+      // OPERATOR / SUPPORT 都没有 —— 与「客服/运营不得动资金」的职责分离要求精确吻合，
+      // 无需新增权限点或改动角色表。
+      if (request.method === 'GET' && pathname === '/api/admin/rental-deposits') {
+        requireAdmin(request, 'FINANCE_MANAGE');
+        const statusFilter = String(url.searchParams.get('status') || '').trim().toUpperCase();
+        if (statusFilter && !RENTAL_DEPOSIT_STATUSES.includes(statusFilter)) {
+          throw new ApiError(400, 'VALIDATION_ERROR', `status 只支持 ${RENTAL_DEPOSIT_STATUSES.join(' / ')}`);
+        }
+        const data = store.read();
+        const deposits = (data.rentalDeposits || [])
+          .filter((item) => !statusFilter || item.status === statusFilter)
+          .map((item) => rentalDepositAdminView(data, item));
+        return sendJson(response, 200, { data: deposits, total: deposits.length, requestId });
+      }
+
+      const rentalDepositSettleMatch = pathname.match(/^\/api\/admin\/rental-deposits\/([^/]+)\/settle$/);
+      if (request.method === 'POST' && rentalDepositSettleMatch) {
+        const operator = requireAdmin(request, 'FINANCE_MANAGE');
+        const depositId = decodeURIComponent(rentalDepositSettleMatch[1]);
+        const body = await readJson(request);
+        const settled = store.update((data) => {
+          data.rentalDeposits ||= [];
+          const deposit = data.rentalDeposits.find((item) => item.id === depositId);
+          if (!deposit) throw new ApiError(404, 'DEPOSIT_NOT_FOUND', '押金记录不存在');
+          const settledAt = new Date().toISOString();
+          // 域函数内部自带「仅 REFUND_PENDING 可结算」的 409 守卫与终态恒等式自检，
+          // 守卫不在这里重复，保证只有一处判断（见 rental.js settleRentalDeposit）。
+          settleRentalDeposit(deposit, {
+            deductionInCents: body.deductionInCents,
+            operator: operator.displayName || operator.username || operator.id,
+            note: typeof body.note === 'string' ? body.note.trim().slice(0, 300) : ''
+          }, settledAt);
+          const order = (data.orders || []).find((item) => item.id === deposit.orderId);
+          addAudit(
+            data,
+            '平台结算租赁押金',
+            `${deposit.id} / ${order?.orderNo || deposit.orderId}（扣款 ${deposit.deductionInCents} 分，退回 ${deposit.refundedInCents} 分）`,
+            operator.displayName || operator.username
+          );
+          // ★ 资金归属口径：扣款所得本轮不分配、暂挂平台待分配。
+          // 只记流水（含口径说明），**绝不触碰 settlements** —— 车是商家的、损失也是商家的，
+          // 记为平台收入会引发商家抗议，且下一轮真实分账时这批历史数据要回头洗。
+          const financeEvent = addFinanceEvent(data, 'DEPOSIT_SETTLEMENT', `DEPOSIT_SETTLE_${deposit.id}`, deposit.deductionInCents, {
+            userId: deposit.userId,
+            orderNo: order?.orderNo || '',
+            merchantId: deposit.merchantId,
+            merchantName: (data.merchants || []).find((item) => item.id === deposit.merchantId)?.name || '',
+            businessType: 'RENTAL_DEPOSIT',
+            settlementReference: deposit.id,
+            note: DEPOSIT_DEDUCTION_ATTRIBUTION_NOTE
+          }, settledAt);
+          return { deposit, orderNo: order?.orderNo || '', financeEventId: financeEvent?.id || '' };
+        });
+        return sendJson(response, 200, {
+          data: {
+            deposit: settled.deposit,
+            orderNo: settled.orderNo,
+            financeEventId: settled.financeEventId,
+            deductionAttribution: DEPOSIT_DEDUCTION_ATTRIBUTION_NOTE
           },
           requestId
         });
