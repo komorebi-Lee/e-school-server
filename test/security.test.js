@@ -107,11 +107,25 @@ test('admin login locks after repeated credential failures', async () => {
 });
 
 test('admin login lock expires and allows another attempt', async () => {
+  // ⚠️ 这两个数字**故意开得很大**（锁 2000ms、等待 2400ms），请勿「优化」回去。
+  //
+  // 真实机理（已用 8 路并发实测复现，失败形态是 `200 !== 429`）：
+  // `recordAdminLoginFailure` 在 `state.lastFailedAt + lockDurationMs <= now` 时会把
+  // `failures` **清零** —— 这是「失败计数随时间过期」的滑窗语义，本身是对的。
+  // 但原参数 `lockDurationMs: 100` 太窄：本用例要连发 5 次失败请求，
+  // `node --test` 并行跑多个测试文件时，两次请求的间隔一旦超过 100ms，
+  // 计数就被清零，5 次**永远累积不到**，第 6 次正确密码于是返回 200 而不是 429。
+  //
+  // 注意失败的是 **429 那条断言**，不是「等待后恢复」那条 —— 窗口太窄会先让
+  // 「锁根本没上」发生。所以两个数字必须一起放大：
+  //   - `lockDurationMs: 2000`：让 5 次连续请求的间隔几乎不可能超过 2s（计数不被清零）；
+  //   - `setTimeout(2400)`：仍留 400ms 余量确保锁**真的过期**（等待只会晚不会早，
+  //     负载越高越安全）。
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-admin-lock-'));
   const store = new JsonStore(path.join(temporaryDirectory, 'db.json'));
   const lockServer = http.createServer(createApp({
     store,
-    adminLoginLockout: { maxFailures: 5, lockDurationMs: 100 }
+    adminLoginLockout: { maxFailures: 5, lockDurationMs: 2000 }
   }));
   await new Promise((resolve) => lockServer.listen(0, '127.0.0.1', resolve));
   const lockBaseUrl = `http://127.0.0.1:${lockServer.address().port}`;
@@ -127,7 +141,7 @@ test('admin login lock expires and allows another attempt', async () => {
     }
     assert.equal((await login(ADMIN_PASSWORD)).status, 429);
 
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise((resolve) => setTimeout(resolve, 2400));
     assert.equal((await login(ADMIN_PASSWORD)).status, 200);
   } finally {
     await new Promise((resolve) => lockServer.close(resolve));
