@@ -2739,6 +2739,142 @@ test('multi-quantity orders support partial after-sale refunds', async () => {
   });
 });
 
+test('order reschedule is refused once the order is finished, cancelled, in after-sale, or refunded', async () => {
+  const baseline = await api('/api/products/prod_ebike_001');
+  const adminLogin = await api('/api/admin/login', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+  });
+  const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+  const session = await loginWeChat('reschedule_guard_user');
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const dayAfter = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  // 数量 2：部分退款需要「退一部分、留一部分」才能产生 PARTIALLY_REFUNDED。
+  const created = await api('/api/orders', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({
+      items: [{ productId: 'prod_ebike_001', quantity: 2 }],
+      fulfillment: {
+        type: 'DELIVERY', contactName: '李同学', contactPhone: '15527111396',
+        address: '荟园学生社区', date: tomorrow, timeSlot: '今天 12:00-14:00'
+      }
+    })
+  });
+  assert.equal(created.response.status, 201);
+  const orderId = created.body.data.id;
+  await confirmPayment(created.body.paymentOrder.id, session.token);
+
+  /** 直接改库里的订单状态，用于逐个覆盖每个拦截分支。 */
+  const setOrderState = (patch) => store.update((data) => {
+    const order = data.orders.find((item) => item.id === orderId);
+    Object.assign(order, patch);
+    return order;
+  });
+  const reschedule = () => api(`/api/orders/${orderId}`, {
+    method: 'PATCH', headers: auth,
+    body: JSON.stringify({ fulfillment: { address: '荟园学生社区 7 栋', date: dayAfter, timeSlot: '今天 16:00-18:00' } })
+  });
+  /** 断言一次改约被拒，并核对错误码与「含当前状态中文标签」的文案。 */
+  const expectRefused = async (label, expectedText) => {
+    const refused = await reschedule();
+    assert.equal(refused.response.status, 409, `${label}：改约必须被拒绝`);
+    assert.equal(refused.body.error.code, 'ORDER_NOT_MODIFIABLE', `${label}：错误码应为 ORDER_NOT_MODIFIABLE`);
+    assert.ok(
+      String(refused.body.error.message).includes(expectedText),
+      `${label}：文案必须含「${expectedText}」而不是笼统的英文，实得：${refused.body.error.message}`
+    );
+    return refused;
+  };
+
+  // ==================== ① 正向控制：进行中订单仍可改约 ====================
+  // 没有这一条，「全部 409」也可能是「拒绝一切」造成的假通过。
+  const paidSnapshot = await api(`/api/orders/${orderId}`, { headers: { authorization: `Bearer ${session.token}` } });
+  assert.equal(paidSnapshot.body.data.status, 'PAID', '① 前置：支付后订单应为 PAID');
+  const paidEdit = await reschedule();
+  assert.equal(paidEdit.response.status, 200, '① ★ 已支付未履约的订单必须仍可改约');
+  assert.equal(paidEdit.body.data.fulfillment.address, '荟园学生社区 7 栋', '① ★ 改约必须真的写进去');
+
+  setOrderState({ status: 'FULFILLING' });
+  const fulfillingEdit = await reschedule();
+  assert.equal(fulfillingEdit.response.status, 200, '① ★ 配送中的订单也必须仍可改约（拦截列表里没有 FULFILLING）');
+
+  // ==================== ⑦ ★ 真实链路：状态由生产流程自己走出来，不是手写的 ====================
+  // ★ 这一段刻意排在所有「直接改库」的断言**之前**：断言是顺序执行的，前一条失败会
+  //   遮住后面所有条。若把它放在合成状态之后，「删掉 paymentStatus 检查」这个变异
+  //   会先命中⑥，就永远看不到「真实可达的那条链路」到底有没有被拦住 ——
+  //   而这条链路才是本次修复真正要堵的洞。
+  //
+  // 链路：下单 → 支付 → 申请售后 → 管理员部分退款
+  //   `applyPartialOrderRefund` 会把 `order.status` **还原成 statusBeforeAfterSale**
+  //   （此处 FULFILLING），只有 `paymentStatus` 记得「这单退过钱」。
+  //   所以只拦 `status` 的话，这条订单「看起来完全正常」，却已经退过一部分款。
+  const afterSale = await api('/api/after-sales', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({ orderId, type: 'REFUND', quantity: 1, reason: '其中一辆不想要了' })
+  });
+  assert.equal(afterSale.response.status, 201, '⑦ 前置：售后申请应被受理');
+  const closed = await api(`/api/admin/after-sales/${afterSale.body.data.id}/status`, {
+    method: 'POST', headers: adminHeaders,
+    body: JSON.stringify({ status: 'CLOSED', resolutionNote: '按用户申请退回其中一辆' })
+  });
+  assert.equal(closed.response.status, 200, '⑦ 前置：管理员应能部分退款结案');
+
+  const refundedSnapshot = await api(`/api/orders/${orderId}`, { headers: { authorization: `Bearer ${session.token}` } });
+  assert.equal(
+    refundedSnapshot.body.data.paymentStatus, 'PARTIALLY_REFUNDED',
+    '⑦ ★★ 前置：真实链路必须真的产生 PARTIALLY_REFUNDED'
+  );
+  assert.equal(
+    refundedSnapshot.body.data.status, 'FULFILLING',
+    '⑦ ★★ 关键：部分退款后 order.status 被还原成退款前的 FULFILLING —— '
+    + '只看 status 的话这条订单「看起来完全正常」，正是靠 paymentStatus 才拦得住'
+  );
+  await expectRefused('⑦ ★ 真实链路（status=FULFILLING + paymentStatus=PARTIALLY_REFUNDED）', '部分退款');
+
+  // ==================== ⑧ 边界另一侧：状态恢复后改约重新可用 ====================
+  // 证明上面的 409 是「因为状态被拦」而不是「这个订单从此再也改不了」。
+  setOrderState({ status: 'FULFILLING', paymentStatus: 'PAID' });
+  const recovered = await reschedule();
+  assert.equal(recovered.response.status, 200, '⑧ 状态恢复正常后改约应重新可用（证明拦截是状态驱动的，不是永久封禁）');
+
+  // ==================== ②~⑤ 订单状态维度的四个终态 ====================
+  // ② 排在这一组的第一条：同一个 `if` 分支里的多条断言，只有第一条能真正报出
+  // 「分支被删/被改」的变异，后面的会被它遮住。把最典型的终态放在最前面。
+  setOrderState({ status: 'COMPLETED' });
+  await expectRefused('② status=COMPLETED', '已完成');
+
+  setOrderState({ status: 'CANCELLED' });
+  await expectRefused('③ status=CANCELLED', '已取消');
+
+  setOrderState({ status: 'AFTER_SALE' });
+  await expectRefused('④ status=AFTER_SALE', '售后');
+
+  setOrderState({ status: 'PARTIALLY_REFUNDED' });
+  await expectRefused('⑤ status=PARTIALLY_REFUNDED', '部分退款');
+
+  // ==================== ⑥⑦ 支付状态维度：独立于订单状态的一道 ====================
+  // ⑥ status 看起来完全正常（PAID），只有 paymentStatus 暴露「钱已经退过了」。
+  setOrderState({ status: 'PAID', paymentStatus: 'REFUNDED' });
+  await expectRefused('⑥ paymentStatus=REFUNDED', '已退款');
+
+  setOrderState({ status: 'PAID', paymentStatus: 'PARTIALLY_REFUNDED' });
+  await expectRefused('⑦ paymentStatus=PARTIALLY_REFUNDED', '部分退款');
+
+  // 收尾：把这条测试订单对全局状态的影响全部还原。
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === 'prod_ebike_001');
+    product.stock = baseline.body.data.stock;
+    product.reservedStock = 0;
+    data.orders = data.orders.filter((item) => item.id !== orderId);
+    data.afterSales = data.afterSales.filter((item) => item.orderId !== orderId);
+    data.paymentOrders = data.paymentOrders.filter((item) => item.orderId !== orderId);
+    data.settlements = data.settlements.filter((item) => item.orderId !== orderId);
+    data.notifications = data.notifications.filter((item) => item.metadata?.focusId !== orderId);
+  });
+});
+
 test('admin overview includes a seven day operations report', async () => {
   const adminLogin = await api('/api/admin/login', {
     method: 'POST', headers: { 'content-type': 'application/json' },

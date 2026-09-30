@@ -810,6 +810,13 @@ function createApp({
     PENDING_VERIFY:'待核验', APPROVED:'可预约安装',
     MATERIAL_PENDING:'待补材料', REVIEWING:'审核中'
   };
+  // 支付态标签。与 `statusLabels` **分开**：`order.status` 与 `order.paymentStatus`
+  // 是两个独立维度，混用一张表会让「订单状态」的文案污染「支付状态」的文案
+  // （例如部分退款后 status 仍是 PAID，但钱已经退过一部分了）。
+  const paymentStatusLabels = {
+    UNPAID:'未支付', PAID:'已支付', REFUNDED:'已退款', PARTIALLY_REFUNDED:'部分退款',
+    CANCELLED:'已取消', EXPIRED:'已过期'
+  };
   function addAudit(data, action, target, operator = '运营管理员') {
     if (!Array.isArray(data.auditLogs)) data.auditLogs = [];
     data.auditLogs.unshift({ id: `log_${randomUUID()}`, operator, action, target, createdAt: new Date().toISOString() });
@@ -8280,7 +8287,23 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const updated = store.update((data) => {
           const order = data.orders.find((item) => item.id === orderMatch[1] && item.userId === userId);
           if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
-          if (['COMPLETED', 'CANCELLED', 'AFTER_SALE'].includes(order.status)) throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', 'Current order cannot be edited');
+          // 改约前置校验。两个维度都要看，因为 `status` 与 `paymentStatus` 互相独立：
+          //
+          // ① 订单状态已进入终态 / 售后流程中 —— 不可改履约信息。
+          //    `PARTIALLY_REFUNDED` 一并列入：`statusLabels` 有它、前端也会按它渲染
+          //    「部分退款」，万一将来有路径把 status 设成它，这里必须已经拦住。
+          // ② 钱已经退过（全额或部分）—— 更根本的一道。
+          //    ★ 为什么 ② 不能省：部分退款后 `applyPartialOrderRefund` 会把
+          //    `order.status` **还原成退款前的状态**（`statusBeforeAfterSale`，通常是
+          //    `PAID` / `FULFILLING`），只有 `paymentStatus` 记得「这单退过钱」。
+          //    所以只看 ① 会漏掉一条真实可达的链路：
+          //    下单 → 支付 → 申请售后 → 部分退款 → status 回到 PAID，此时仍能改约。
+          if (['COMPLETED', 'CANCELLED', 'AFTER_SALE', 'PARTIALLY_REFUNDED'].includes(order.status)) {
+            throw new ApiError(409, 'ORDER_NOT_MODIFIABLE', `当前订单状态（${statusLabels[order.status] || order.status}）不支持改约`);
+          }
+          if (['REFUNDED', 'PARTIALLY_REFUNDED'].includes(order.paymentStatus)) {
+            throw new ApiError(409, 'ORDER_NOT_MODIFIABLE', `当前订单状态（${paymentStatusLabels[order.paymentStatus] || order.paymentStatus}）不支持改约`);
+          }
           if (body.fulfillment && typeof body.fulfillment === 'object') {
             const previousSchedule = order.fulfillment?.type === 'DELIVERY' ? `${order.fulfillment.date || '尽快'} ${order.fulfillment.timeSlot || ''}`.trim() : '';
             if (order.fulfillment?.type === 'DELIVERY') {
