@@ -6124,6 +6124,73 @@ test('marketplace supports publish, list, detail, ownership status, and my listi
   assert.ok(mine.body.data.some((item) => item.id === created.body.data.id && item.status === 'SOLD'));
 });
 
+test('marketplace publish requires a usable contact so buyers can actually reach the seller', async () => {
+  const session = await loginWeChat('market_contact_required');
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+  // 其余字段全部合法 —— 这样一旦请求被拒，只可能是 contact 的原因。
+  const base = {
+    title: '联系方式必填回归',
+    description: '用于验证发布闲置时必须留下可联系的方式',
+    category: 'BOOK',
+    condition: 'LIKE_NEW',
+    priceInCents: 1200,
+    images: []
+  };
+  const publish = (extra) => api('/api/market/items', {
+    method: 'POST', headers: auth,
+    body: JSON.stringify({ ...base, ...extra })
+  });
+
+  // ① 完全不传 contact：没有联系方式，这条闲置买家联系不上，等于废的。
+  const missing = await publish({});
+  assert.equal(missing.response.status, 400, '不传联系方式必须被拒绝');
+  assert.equal(missing.body.error.code, 'VALIDATION_ERROR');
+  assert.ok(
+    missing.body.error.message.includes('请填写联系方式'),
+    '错误文案必须告诉用户去填联系方式，实得：' + missing.body.error.message
+  );
+
+  // ② 边界两侧：4 字符拒绝、5 字符通过（只测一侧等于没测边界）。
+  const tooShort = await publish({ contact: '1234' });
+  assert.equal(tooShort.response.status, 400, '4 字符低于下界 5，必须被拒绝');
+  assert.equal(tooShort.body.error.code, 'VALIDATION_ERROR');
+  assert.ok(
+    tooShort.body.error.message.includes('请填写联系方式'),
+    '过短也必须给出「请填写联系方式」而不是「too short」，实得：' + tooShort.body.error.message
+  );
+
+  const atBoundary = await publish({ contact: '12345' });
+  assert.equal(atBoundary.response.status, 201, '5 字符是下界的合法侧，必须通过');
+  assert.equal(atBoundary.body.data.contact, '12345', '合法的联系方式应原样落库并回显');
+
+  // ③ 纯空白：trim 后为空，与「没填」等价。
+  const blank = await publish({ contact: '   ' });
+  assert.equal(blank.response.status, 400, '纯空白去 trim 后为空，必须被拒绝');
+  assert.equal(blank.body.error.code, 'VALIDATION_ERROR');
+  assert.ok(blank.body.error.message.includes('请填写联系方式'));
+
+  // ④ 上界：51 字符超过 50（与 wxml 的 maxlength="50" 同口径）。
+  const tooLong = await publish({ contact: 'x'.repeat(51) });
+  assert.equal(tooLong.response.status, 400, '51 字符超过上界 50，必须被拒绝');
+  assert.equal(tooLong.body.error.code, 'VALIDATION_ERROR');
+  const atUpperBound = await publish({ contact: 'y'.repeat(50) });
+  assert.equal(atUpperBound.response.status, 201, '50 字符是上界的合法侧，必须通过');
+
+  // ⑤ 回归：既有 seed 闲置仍可正常读取（加校验不得影响存量数据）。
+  const list = await api('/api/market/items');
+  assert.equal(list.response.status, 200);
+  const seed = list.body.data.find((item) => item.id === 'market_seed_1');
+  assert.ok(seed, '既有 seed 闲置 market_seed_1 仍应出现在公开列表里');
+  assert.equal(seed.contact, '微信 shishan-study', 'seed 的联系方式应原样透出');
+
+  // ⑤ 回归：合法完整发布仍成功，且返回体形态不变。
+  const full = await publish({ contact: '微信 contact-required', images: [] });
+  assert.equal(full.response.status, 201, '合法的完整发布请求仍应成功');
+  assert.equal(full.body.data.categoryText, '二手书');
+  assert.equal(full.body.data.contact, '微信 contact-required');
+  assert.equal(full.body.data.isOwner, undefined, 'public create payload should not leak ownership');
+});
+
 test('forum supports boards, publish, like toggle, and comments', async () => {
   const session = await loginWeChat('forum_user');
   const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };

@@ -4341,7 +4341,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         if (images.some((image) => !image.startsWith('/api/uploads/'))) {
           throw new ApiError(400, 'VALIDATION_ERROR', '商品图片必须来自平台上传目录');
         }
-        const contact = String(body.contact || '').trim().slice(0, 50);
+        // 联系方式是**必填**：没有它，买家看到这条闲置却联系不上卖家，
+        // 这条发布就是废的。下界 5 与前端本地拦截共用同一个口径；
+        // 上界 50 与 wxml 的 maxlength="50" 一致。
+        const contact = requireString(body.contact, 'contact', {
+          minLength: 5,
+          maxLength: 50,
+          message: '请填写联系方式（微信号或手机号），否则买家无法联系你'
+        });
         const record = store.update((data) => {
           const records = data.marketItems = data.marketItems || [];
           const now = new Date().toISOString();
