@@ -1011,9 +1011,19 @@ test('delivery orders require valid campus fulfillment details', async () => {
 
 test('stock validation rejects excessive quantities', async () => {
   const session = await loginWeChat('u3');
+  // ★ M3-P1-02 落地「单笔每商品上限」（默认 5）之后，本用例**原来的前置**已经表达不出
+  // 「超库存」这个语义了：`prod_ebike_001` 库存 8，而所有售卖商品的可用库存最小值是 5
+  // （另一件 `prod_ebike_rent_001` 库存 5）—— 恰好等于上限。于是任何 `quantity ≤ 5`
+  // 都不可能超库存，任何 `quantity > 5` 又会先被上限拦成 400。原来那句 `quantity: 99`
+  // 现在拿到的是 `400 VALIDATION_ERROR`，而不是库存不足的 409。
+  //
+  // 所以改用一件**库存 2** 的临时商品来表达同一语义：`quantity: 5` 过得了上限（5 ≤ 5），
+  // 过不了库存（5 > 2）。★ 下面两条断言逐字节未动 —— 改的只是「用哪件商品、传多少」。
+  const adminHeaders = await loginAdmin();
+  const productId = await createStockProduct(adminHeaders, '超库存回归车', 2);
   const result = await api('/api/orders', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
-    body: JSON.stringify({ userId: 'u3', items: [{ productId: 'prod_ebike_001', quantity: 99 }] })
+    body: JSON.stringify({ userId: 'u3', items: [{ productId, quantity: 5 }] })
   });
   assert.equal(result.response.status, 409);
   assert.equal(result.body.error.code, 'INSUFFICIENT_STOCK');
@@ -7260,5 +7270,234 @@ test('M8-P1-01 identity verification survives a store rebuild (restart)', async 
     assert.equal(afterRestart.body.data.idNumberMasked, maskedIdNumber, '⑥ 重启后返回的仍只有脱敏值');
   } finally {
     await new Promise((resolve) => restarted.instance.close(resolve));
+  }
+});
+
+test('M3-P1-02 单笔购买上限：公开配置默认 5，且服务端真的在校验（含重复提交合并绕过）', async () => {
+  // ==================== ① 公开配置下发该字段，默认 5 ====================
+  const config = await api('/api/business-config');
+  assert.equal(config.response.status, 200);
+  assert.equal(
+    config.body.data.maxOrderQuantityPerItem, 5,
+    '① ★ /api/business-config 必须下发 maxOrderQuantityPerItem，默认 5'
+  );
+  // 判据自测：证明「读到 5」不是「读什么都得 5」的假通过 ——
+  // 同一个响应体里读一个不存在的字段必须是 undefined。
+  assert.equal(
+    config.body.data.maxOrderQuantityPerItemTypo, undefined,
+    '① 判据自测：同一个响应体里读不存在的字段确实是 undefined'
+  );
+
+  // ==================== ② 直接调接口传 quantity: 6（上限 5）→ 400 ====================
+  // 这是「服务端真的在校验」的直接证据 —— 前端写死 5 不能替代它。
+  const session = await loginWeChat('order_cap_user');
+  const jsonAuthHeaders = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+  const over = await api('/api/orders', {
+    method: 'POST', headers: jsonAuthHeaders,
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 6 }] })
+  });
+  assert.equal(over.response.status, 400, '② ★★ 直接调接口传 6（上限 5）必须 400');
+  assert.equal(over.body.error.code, 'VALIDATION_ERROR', '② 错误码');
+  assert.ok(
+    String(over.body.error.message).includes('5'),
+    `② message 必须含上限值 5，实得 ${JSON.stringify(over.body.error.message)}`
+  );
+
+  // ★ 改造前真实存在的漏洞：库存 999 的商品传 quantity: 999 是**能过**的（只要库存够）。
+  // 这条断言钉的就是那个口子 —— 库存充足不再是绕过上限的理由。
+  const huge = await api('/api/orders', {
+    method: 'POST', headers: jsonAuthHeaders,
+    body: JSON.stringify({ items: [{ productId: 'prod_card_service_001', quantity: 999 }] })
+  });
+  assert.equal(huge.response.status, 400, '② ★★ 库存充足的商品传 999 也必须被上限拦住');
+  assert.equal(huge.body.error.code, 'VALIDATION_ERROR');
+
+  // ★ 合并绕过：两项**各自合法**（5 ≤ 5），合并后却是 10。
+  // 只做「合并前逐项校验」的实现会从这里溜过去 —— 这条断言就是为它准备的。
+  const merged = await api('/api/orders', {
+    method: 'POST', headers: jsonAuthHeaders,
+    body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 5 }, { productId: 'prod_ebike_001', quantity: 5 }] })
+  });
+  assert.equal(merged.response.status, 400, '★ 同商品重复提交合并后超限，必须 400');
+  assert.equal(merged.body.error.code, 'VALIDATION_ERROR');
+  assert.ok(
+    String(merged.body.error.message).includes('10'),
+    `★ 报错必须报出**合并后的总量** 10（说明校验发生在合并之后），实得 ${JSON.stringify(merged.body.error.message)}`
+  );
+});
+
+test('M3-P1-02 单笔购买上限：管理端可改、边界两侧都测、非法配置回落 5、租赁与售卖同一上限', async () => {
+  // ★ 全程在**独立实例**上跑：本用例要把配置改小再改回来，若打在共享实例上，
+  // 会与并发执行的其它建单用例互相干扰（`node:test` 并发跑顶层用例）。
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-order-cap-'));
+  const capStore = new JsonStore(path.join(directory, 'db.json'));
+  const extra = await startExtraServer(capStore);
+  try {
+    const jsonHeaders = { 'content-type': 'application/json' };
+    const login = await apiOn(extra.url, '/api/auth/login', {
+      method: 'POST', headers: jsonHeaders, body: JSON.stringify({ code: 'cap_user' })
+    });
+    assert.equal(login.response.status, 200, '前置：隔离实例能登录');
+    const authHeaders = { 'content-type': 'application/json', authorization: `Bearer ${login.body.data.token}` };
+    const adminLogin = await apiOn(extra.url, '/api/admin/login', {
+      method: 'POST', headers: jsonHeaders,
+      body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD })
+    });
+    assert.equal(adminLogin.response.status, 200, '前置：隔离实例能登管理端');
+    const adminHeaders = { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` };
+
+    // ==================== ⑥ 管理端是**逐字段白名单**，不登记就永远改不了 ====================
+    const updated = await apiOn(extra.url, '/api/admin/settings', {
+      method: 'POST', headers: adminHeaders, body: JSON.stringify({ maxOrderQuantityPerItem: 2 })
+    });
+    assert.equal(updated.response.status, 200, '⑥ 管理端必须接受该字段');
+    assert.equal(updated.body.data.maxOrderQuantityPerItem, 2, '⑥ 字段已写入 adminSettings');
+
+    // 边界校验：0 / -1 / 100 / 非整数 一律 400。
+    for (const bad of [0, -1, 100, 2.5]) {
+      const rejected = await apiOn(extra.url, '/api/admin/settings', {
+        method: 'POST', headers: adminHeaders, body: JSON.stringify({ maxOrderQuantityPerItem: bad })
+      });
+      assert.equal(rejected.response.status, 400, `⑥ 管理端必须拒绝 ${bad}`);
+      assert.equal(rejected.body.error.code, 'VALIDATION_ERROR', `⑥ 拒绝 ${bad} 的错误码`);
+    }
+    // 判据自测：上面的 400 不是「这个端点总报 400」—— 合法值必须 200。
+    const accepted = await apiOn(extra.url, '/api/admin/settings', {
+      method: 'POST', headers: adminHeaders, body: JSON.stringify({ maxOrderQuantityPerItem: 2 })
+    });
+    assert.equal(accepted.response.status, 200, '⑥ 判据自测：合法值 2 确实被接受（否则上面那组 400 无区分度）');
+
+    const afterUpdate = await apiOn(extra.url, '/api/business-config');
+    assert.equal(afterUpdate.body.data.maxOrderQuantityPerItem, 2, '③ 配置改动已下发到公开配置');
+
+    // ==================== ③ 边界两侧都测：3 → 400；2 → 成功 ====================
+    const overBoundary = await apiOn(extra.url, '/api/orders', {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 3 }] })
+    });
+    assert.equal(overBoundary.response.status, 400, '③ 配置为 2 时传 3 → 400');
+    assert.ok(
+      String(overBoundary.body.error.message).includes('2'),
+      `③ message 必须含**当前**上限 2（不是默认的 5），实得 ${JSON.stringify(overBoundary.body.error.message)}`
+    );
+
+    const atBoundary = await apiOn(extra.url, '/api/orders', {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ items: [{ productId: 'prod_ebike_001', quantity: 2 }] })
+    });
+    assert.equal(atBoundary.response.status, 201, '③ ★★ 边界值 2 必须成功 —— 证明不是「拒绝一切」');
+
+    // ==================== ⑤ 回归：quantity 1 仍成功 ====================
+    const single = await apiOn(extra.url, '/api/orders', {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ items: [{ productId: 'prod_card_service_002', quantity: 1 }] })
+    });
+    assert.equal(single.response.status, 201, '⑤ quantity 1 仍成功');
+
+    // ==================== ⑥ 租赁分支与售卖分支共用同一条上限 ====================
+    // 租赁自己的 `quantity !== 1`（一单一车）是**更严**的规则；
+    // 上限收窄不该放松它，也不该让它与售卖分裂成两套。
+    const rentalOverCap = await apiOn(extra.url, '/api/orders', {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_002', quantity: 3, rentalUnits: 1 }] })
+    });
+    assert.equal(rentalOverCap.response.status, 400, '⑥ ★ 租赁分支同样受上限约束（不出现「租赁 99、售卖 2」的分裂）');
+    assert.equal(rentalOverCap.body.error.code, 'VALIDATION_ERROR');
+    // ★★ 必须证明「拦住它的是**上限**规则」而不是被租赁自己的规则兜住 ——
+    // 数量 3 在租赁里本来就违规（只能租 1 台），只看 400 分不出是哪条规则起的效。
+    // 若把租赁从上限里豁免出去，这里会变成「单次只能租 1 台」—— 断言就会红。
+    assert.ok(
+      String(rentalOverCap.body.error.message).includes('最多购买'),
+      `⑥ ★★ 租赁触发的是**与售卖同一条上限**，而不是被豁免，实得 ${JSON.stringify(rentalOverCap.body.error.message)}`
+    );
+
+    const rentalTwo = await apiOn(extra.url, '/api/orders', {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_002', quantity: 2, rentalUnits: 1 }] })
+    });
+    assert.equal(rentalTwo.response.status, 400, '⑥ ★ 数量 2 过了上限，但仍被租赁自己的「一单一车」拦住');
+    assert.ok(
+      String(rentalTwo.body.error.message).includes('只能租 1 台'),
+      `⑥ ★★ 租赁既有行为未变（报的仍是租赁规则，不是上限），实得 ${JSON.stringify(rentalTwo.body.error.message)}`
+    );
+
+    const rentalOk = await apiOn(extra.url, '/api/orders', {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ items: [{ productId: 'prod_ebike_rent_002', quantity: 1, rentalUnits: 1 }] })
+    });
+    assert.equal(rentalOk.response.status, 201, '⑥ ★★ 租赁正常下单不受影响（上限 ≥ 1 时租赁行为零变化）');
+
+    // ==================== ④ 非法配置 → publicSettings 回落 5（不是 NaN、不是 0） ====================
+    for (const bad of [0, -1, 'abc', undefined, 100, 2.5, null]) {
+      capStore.update((data) => { data.adminSettings.maxOrderQuantityPerItem = bad; });
+      const publicConfig = await apiOn(extra.url, '/api/business-config');
+      assert.equal(
+        publicConfig.body.data.maxOrderQuantityPerItem, 5,
+        `④ 配置为 ${JSON.stringify(bad)} 时必须回落 5`
+      );
+      assert.equal(
+        Number.isNaN(publicConfig.body.data.maxOrderQuantityPerItem), false,
+        `④ ★ 回落值不能是 NaN（配置 ${JSON.stringify(bad)}）`
+      );
+      assert.equal(
+        publicConfig.body.data.maxOrderQuantityPerItem === 0, false,
+        `④ ★ 回落值不能是 0（配置 ${JSON.stringify(bad)}）`
+      );
+      // 服务端下单校验必须用**同一判据**，不能出现「下发回落 5、校验按脏值」的错位。
+      const dirtyOrder = await apiOn(extra.url, '/api/orders', {
+        method: 'POST', headers: authHeaders,
+        body: JSON.stringify({ items: [{ productId: 'prod_card_service_003', quantity: 6 }] })
+      });
+      assert.equal(
+        dirtyOrder.response.status, 400,
+        `④ ★ 配置脏值时下单校验仍按回落后的 5 生效（配置 ${JSON.stringify(bad)}）`
+      );
+    }
+    // 判据自测：证明 `Number.isInteger && >= 1 && <= 99` 这条判据确实能区分合法与非法 ——
+    // 否则上面那组断言可能只是「判据恒真」。
+    assert.equal(Number.isInteger(5) && 5 >= 1 && 5 <= 99, true, '④ 判据自测：合法值 5 通过');
+    assert.equal(Number.isInteger(Number('abc')) && Number('abc') >= 1, false, '④ 判据自测：\'abc\' 被拒');
+    assert.equal(Number.isInteger(0) && 0 >= 1, false, '④ 判据自测：0 被拒');
+    assert.equal(Number.isInteger(100) && 100 <= 99, false, '④ 判据自测：100 被拒');
+    assert.equal(Number.isInteger(2.5), false, '④ 判据自测：2.5 被拒');
+  } finally {
+    await new Promise((resolve) => extra.instance.close(resolve));
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('M3-P1-02 老库缺 maxOrderQuantityPerItem 时，store 初始化会补回落值 5', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'campus-go-cap-legacy-'));
+  const file = path.join(directory, 'db.json');
+  try {
+    const fresh = new JsonStore(file);
+    // 前置：全新库的种子里本来就有这个字段 —— 这样下面「删掉再重建」测的才是**归一化**，
+    // 而不是种子。
+    assert.equal(fresh.read().adminSettings.maxOrderQuantityPerItem, 5, '前置：新库种子含该字段且为 5');
+
+    // 模拟老库：把字段整个删掉。
+    fresh.update((data) => { delete data.adminSettings.maxOrderQuantityPerItem; });
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(fresh.read().adminSettings, 'maxOrderQuantityPerItem'), false,
+      '前置判据自测：字段确实已从库里删干净（否则下面那条断言是空过）'
+    );
+
+    // 重建 store → `initialize()` 必须补回落值。
+    const reopened = new JsonStore(file);
+    assert.equal(
+      reopened.read().adminSettings.maxOrderQuantityPerItem, 5,
+      '★ 老库重建后字段被补回 5（与 `financeTaskResponseHours` 同一形式）'
+    );
+
+    // 端到端：老库升级后下发的公开配置同样是 5。
+    const extra = await startExtraServer(reopened);
+    try {
+      const publicConfig = await apiOn(extra.url, '/api/business-config');
+      assert.equal(publicConfig.body.data.maxOrderQuantityPerItem, 5, '★ 老库升级后公开配置同样是 5');
+    } finally {
+      await new Promise((resolve) => extra.instance.close(resolve));
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });

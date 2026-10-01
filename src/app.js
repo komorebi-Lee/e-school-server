@@ -8025,6 +8025,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             if (!Number.isInteger(threshold) || threshold < 0 || threshold > 999) throw new ApiError(400, 'VALIDATION_ERROR', '低库存阈值需为 0-999 的整数');
             current.lowStockThreshold = threshold;
           }
+          // ★ 单笔每商品购买上限（M3-P1-02）。本端点不是整体覆盖，而是**逐字段白名单**，
+          // 所以不在这里登记，运营就永远改不了它。
+          // 上界 99 与下单入口的 `quantity > 99` 硬上界对齐，下界 1 与 `quantity < 1` 对齐。
+          if (body.maxOrderQuantityPerItem !== undefined) {
+            const limit = Number(body.maxOrderQuantityPerItem);
+            if (!Number.isInteger(limit) || limit < 1 || limit > 99) throw new ApiError(400, 'VALIDATION_ERROR', '单笔购买上限需为 1-99 的整数');
+            current.maxOrderQuantityPerItem = limit;
+          }
           if (body.deliveryTimeSlots !== undefined) {
             if (!Array.isArray(body.deliveryTimeSlots) || body.deliveryTimeSlots.length < 1 || body.deliveryTimeSlots.length > 8) throw new ApiError(400, 'VALIDATION_ERROR', '配送时段需为 1-8 个');
             const slots = body.deliveryTimeSlots.map(normalizeTimeSlot).filter(Boolean);
@@ -8145,9 +8153,26 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           let totalInCents = 0;
           const settings = data.adminSettings || {};
           const deliveryFeeInCents = Number(settings.deliveryFeeInCents || 0);
+          // ★ 平台单笔每商品上限（M3-P1-02）。判据与 `publicSettings` 逐字一致：
+          // 配置缺失 / 非整数 / 越界（1~99）一律回落 5。
+          // 服务端**不能**因为配置脏了就退化：若这里是 `undefined`，
+          // `quantity > undefined` 恒为 `false`，等于把校验整个关掉 —— 静默失效比报错更危险。
+          const maxOrderQuantityPerItem = Number.isInteger(settings.maxOrderQuantityPerItem) && settings.maxOrderQuantityPerItem >= 1 && settings.maxOrderQuantityPerItem <= 99
+            ? settings.maxOrderQuantityPerItem
+            : 5;
           for (const [productId, quantity] of mergedQuantities) {
             const product = data.products.find((item) => item.id === productId && item.active);
             if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', `Product ${productId} not found`);
+            // ★ 上限校验放在**合并之后** —— 这里的 `quantity` 是同一商品的**总量**。
+            // 只在上面的逐项循环里校验是不够的：`[{quantity:5},{quantity:5}]` 两项各自合法，
+            // 合并后却是 10，逐项校验完全观测不到。
+            //
+            // 放在 RENT / SALE 分流**之前**，是为了让两条分支共用同一条上限规则
+            // （不出现「租赁 99、售卖 5」的分裂），也与租赁分支内部
+            // 「数量规则（`quantity !== 1`）先于库存」的顺序一致。
+            if (quantity > maxOrderQuantityPerItem) {
+              throw new ApiError(400, 'VALIDATION_ERROR', `每笔订单每件商品最多购买 ${maxOrderQuantityPerItem} 件，当前提交 ${quantity} 件`);
+            }
             if (product.listingType === 'RENT') {
               // 租赁分支与售卖分支完全分流，绝不共用售价逻辑。
               const rentalUnits = requestedRentalUnits.get(productId);

@@ -360,6 +360,10 @@ function initialData() {
       financeTaskResponseHours: 24,
       patrolIntervalMinutes: 10,
       lowStockThreshold: 10,
+      // ★ 单笔每商品购买上限（M3-P1-02）。运营可改，范围 1~99 ——
+      // 上界 99 不是随意取的：下单入口本身就有 `quantity > 99` → 400 的硬上界，
+      // 配置值超过 99 永远被那条先拦住，是死配置。
+      maxOrderQuantityPerItem: 5,
       uploadRateLimitPer24h: 30,
       serviceScoreLimitedThreshold: 80,
       serviceScoreRestrictedThreshold: 60,
@@ -401,6 +405,14 @@ class JsonStore {
         changed = true;
       } else if (data.adminSettings.financeTaskResponseHours === undefined) {
         data.adminSettings.financeTaskResponseHours = defaults.adminSettings.financeTaskResponseHours;
+        changed = true;
+      } else if (data.adminSettings.maxOrderQuantityPerItem === undefined) {
+        // 老库补字段（M3-P1-02）：与上面 `financeTaskResponseHours` 同一形式。
+        //
+        // ⚠️ 不能只靠 `publicSettings` 的回落掩盖：回落只影响**下发**，
+        // 运营在管理端看到的设置里仍会缺这一项，改别的字段时它也不会被写入。
+        // 落库本身补齐，才是「老库升级后行为与全新库一致」。
+        data.adminSettings.maxOrderQuantityPerItem = defaults.adminSettings.maxOrderQuantityPerItem;
         changed = true;
       }
       if (!data.userOpenIds || typeof data.userOpenIds !== 'object') { data.userOpenIds = {}; changed = true; }

@@ -26,6 +26,13 @@ function publicSettings(settings = {}) {
     phoneCardActivationHours: Number.isInteger(settings.phoneCardActivationHours) && settings.phoneCardActivationHours >= 1 && settings.phoneCardActivationHours <= 168 ? settings.phoneCardActivationHours : 24,
     paymentTimeoutMinutes: settings.paymentTimeoutMinutes || 30,
     paymentTimeoutText: `${settings.paymentTimeoutMinutes || 30} 分钟`,
+    // ★ 单笔每商品购买上限（M3-P1-02）。判据与上面的 `leadResponseHours` 同形式：
+    // 非整数或越界（1~99）一律回落 5。
+    //
+    // 这个回落**不是**可有可无的兜底：前端拿到 `undefined` 会算
+    // `Math.min(stock, undefined)` → `NaN` → 被 `|| 1` 压成「只能买 1 件」。
+    // 宁可下发一个明确的 5，也不要让前端去猜。
+    maxOrderQuantityPerItem: Number.isInteger(settings.maxOrderQuantityPerItem) && settings.maxOrderQuantityPerItem >= 1 && settings.maxOrderQuantityPerItem <= 99 ? settings.maxOrderQuantityPerItem : 5,
     settlementPeriodDays: Number.isInteger(settings.settlementPeriodDays) ? settings.settlementPeriodDays : 7,
     deliveryTimeSlots: Array.isArray(settings.deliveryTimeSlots) && settings.deliveryTimeSlots.length ? settings.deliveryTimeSlots : ['尽快配送'],
     platformNotice: settings.platformNotice || '服务范围和办理结果以学校及合作方最终确认为准。'
