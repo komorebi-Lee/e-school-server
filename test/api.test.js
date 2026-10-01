@@ -2776,15 +2776,32 @@ test('order reschedule is refused once the order is finished, cancelled, in afte
     method: 'PATCH', headers: auth,
     body: JSON.stringify({ fulfillment: { address: '荟园学生社区 7 栋', date: dayAfter, timeSlot: '今天 16:00-18:00' } })
   });
-  /** 断言一次改约被拒，并核对错误码与「含当前状态中文标签」的文案。 */
-  const expectRefused = async (label, expectedText) => {
+  /**
+   * 断言一次改约被拒，并核对错误码与「含当前状态中文标签」的文案。
+   *
+   * @param {string} label 断言标签。
+   * @param {string} expectedText 文案里必须出现的中文标签。
+   * @param {{ mustInclude?: string[], mustNotInclude?: string[] }} [options]
+   *   额外的文案约束。`mustNotInclude` 用于锁住**维度措辞**：
+   *   支付状态维度的提示若退回「订单状态」，用户会去订单状态里找一个不存在的状态。
+   */
+  const expectRefused = async (label, expectedText, options = {}) => {
     const refused = await reschedule();
     assert.equal(refused.response.status, 409, `${label}：改约必须被拒绝`);
     assert.equal(refused.body.error.code, 'ORDER_NOT_MODIFIABLE', `${label}：错误码应为 ORDER_NOT_MODIFIABLE`);
-    assert.ok(
-      String(refused.body.error.message).includes(expectedText),
-      `${label}：文案必须含「${expectedText}」而不是笼统的英文，实得：${refused.body.error.message}`
-    );
+    const message = String(refused.body.error.message);
+    for (const text of [expectedText, ...(options.mustInclude || [])]) {
+      assert.ok(
+        message.includes(text),
+        `${label}：文案必须含「${text}」而不是笼统的英文，实得：${message}`
+      );
+    }
+    for (const text of options.mustNotInclude || []) {
+      assert.equal(
+        message.includes(text), false,
+        `${label}：文案不得含「${text}」（维度不同，用户按它去页面上找不到），实得：${message}`
+      );
+    }
     return refused;
   };
 
@@ -2856,11 +2873,22 @@ test('order reschedule is refused once the order is finished, cancelled, in afte
 
   // ==================== ⑥⑦ 支付状态维度：独立于订单状态的一道 ====================
   // ⑥ status 看起来完全正常（PAID），只有 paymentStatus 暴露「钱已经退过了」。
+  //
+  // ★ 文案维度核对：这两条的 `order.status` 仍是 `PAID`，用户**在页面上看到的
+  // 订单状态就是「已支付」**。所以提示必须写「订单支付状态」——若写成
+  // 「订单状态（部分退款）」，用户会去订单状态里找「部分退款」，找不到，
+  // 于是以为页面显示错了。
+  // `mustNotInclude: ['订单状态']` 把这条约束锁死：把措辞改回去就会立刻转红
+  //（「当前订单支付状态（已退款）」里 `订单` 后面跟的是 `支付`，不含「订单状态」）。
   setOrderState({ status: 'PAID', paymentStatus: 'REFUNDED' });
-  await expectRefused('⑥ paymentStatus=REFUNDED', '已退款');
+  await expectRefused('⑥ paymentStatus=REFUNDED', '已退款', {
+    mustInclude: ['订单支付状态'], mustNotInclude: ['订单状态']
+  });
 
   setOrderState({ status: 'PAID', paymentStatus: 'PARTIALLY_REFUNDED' });
-  await expectRefused('⑦ paymentStatus=PARTIALLY_REFUNDED', '部分退款');
+  await expectRefused('⑦ paymentStatus=PARTIALLY_REFUNDED', '部分退款', {
+    mustInclude: ['订单支付状态'], mustNotInclude: ['订单状态']
+  });
 
   // 收尾：把这条测试订单对全局状态的影响全部还原。
   store.update((data) => {
@@ -2873,6 +2901,160 @@ test('order reschedule is refused once the order is finished, cancelled, in afte
     data.settlements = data.settlements.filter((item) => item.orderId !== orderId);
     data.notifications = data.notifications.filter((item) => item.metadata?.focusId !== orderId);
   });
+});
+
+test('public product surfaces expose purchasable so a sold-out item is never offered', async (t) => {
+  // 域函数直接断言用：`purchasable` 的 `active !== false` 那一项在当前 HTTP 路径上
+  // **触发不了**（见下面 ③ 的实测），只有直接调域函数才能证明它真的生效、不是装饰。
+  const { withPurchasable } = require('../src/domain/inventory');
+
+  // ==================== ① 每个商品都含 purchasable 布尔值（逐个断言）====================
+  // 不是「至少一个」：只要有一个商品漏了字段，前端 `purchasable === false` 在那一项上
+  // 就永远是 false，按钮不会被禁用，而用户点下去必然失败 —— 正是要修的那个问题。
+  const listed = await api('/api/products');
+  assert.equal(listed.response.status, 200);
+  assert.ok(listed.body.data.length > 0, '① 前置：公开列表不能为空，否则下面的逐个断言会空转');
+  for (const item of listed.body.data) {
+    assert.equal(
+      typeof item.purchasable, 'boolean',
+      `① ★ 列表商品 ${item.id} 必须含布尔 purchasable，实得 ${typeof item.purchasable}`
+    );
+  }
+
+  const detail = await api('/api/products/prod_ebike_001');
+  assert.equal(detail.response.status, 200);
+  assert.equal(typeof detail.body.data.purchasable, 'boolean', '① ★ 详情主商品必须含布尔 purchasable');
+  assert.ok(detail.body.data.relatedProducts.length > 0, '① 前置：详情应带相关商品，否则下面会空转');
+  for (const item of detail.body.data.relatedProducts) {
+    assert.equal(
+      typeof item.purchasable, 'boolean',
+      `① ★ 详情相关商品 ${item.id} 必须含布尔 purchasable`
+    );
+  }
+
+  // ==================== ② purchasable 等价于 availableStock > 0 ====================
+  // 两个公开端点都先过滤 `active`（列表 `.filter((product) => product.active)`、
+  // 详情对下架商品直接 404），所以能出现在响应里的商品必然 `active !== false`。
+  // 因此在这个端点上 `purchasable` 的判据等价于 `availableStock > 0`，断言就按这个写。
+  for (const item of listed.body.data) {
+    assert.equal(
+      item.purchasable, item.availableStock > 0,
+      `② 列表商品 ${item.id}：purchasable 应等价于 availableStock > 0（availableStock=${item.availableStock}）`
+    );
+  }
+
+  // ★ 必须**人为**制造一个售罄商品：种子数据恰好都充足时，上面那条会在「全是 true」
+  // 上空转，变异「purchasable 恒为 true」就检不出来。
+  const soldOutId = 'prod_card_service_001';
+  const soldOutSnapshot = store.update((data) => {
+    const product = data.products.find((item) => item.id === soldOutId);
+    const snapshot = { stock: product.stock, reservedStock: product.reservedStock, active: product.active };
+    // 库存 4 件**全部**被待支付订单占用 → 可售 0，但商品本身仍在架。
+    product.stock = 4;
+    product.reservedStock = 4;
+    return snapshot;
+  });
+  // ★ 用 `t.after` 还原，而不是在用例末尾写一行 `store.update(...)`。
+  // 断言中途失败时，末尾那行**永远不会执行**，被改脏的全局状态会污染后面所有用例。
+  // 实测代价：第一次跑时它连带打红了 6 个毫不相关的用例（59/63/65/83/90/95）——
+  // 那些用例报的是自己的断言失败，根因却在这里，排查方向会被完全带偏。
+  t.after(() => {
+    store.update((data) => {
+      const product = data.products.find((item) => item.id === soldOutId);
+      product.stock = soldOutSnapshot.stock;
+      product.reservedStock = soldOutSnapshot.reservedStock;
+      product.active = soldOutSnapshot.active;
+    });
+  });
+
+  const soldOutList = await api('/api/products');
+  const soldOutRow = soldOutList.body.data.find((item) => item.id === soldOutId);
+  assert.ok(soldOutRow, '② 前置：售罄商品仍应在公开列表里（它在架，只是没货）');
+  assert.equal(soldOutRow.availableStock, 0, '② 前置：可售库存应为 0');
+  assert.equal(
+    soldOutRow.purchasable, false,
+    '② ★ 可售库存为 0 的商品 purchasable 必须为 false（有库存但全被占用也算）'
+  );
+
+  const soldOutDetail = await api(`/api/products/${soldOutId}`);
+  assert.equal(soldOutDetail.response.status, 200);
+  assert.equal(soldOutDetail.body.data.availableStock, 0, '② 前置：详情可售库存应为 0');
+  assert.equal(soldOutDetail.body.data.purchasable, false, '② ★ 详情端点同样必须为 false');
+
+  // 边界另一侧：可售库存回到 1 件，立刻恢复可下单。
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === soldOutId);
+    product.stock = 4;
+    product.reservedStock = 3;
+  });
+  const backInStockList = await api('/api/products');
+  const backRow = backInStockList.body.data.find((item) => item.id === soldOutId);
+  assert.equal(backRow.availableStock, 1, '② 前置：可售库存应为 1');
+  assert.equal(backRow.purchasable, true, '② ★ 可售库存回到 1 件即恢复可下单（边界另一侧）');
+
+  // ==================== ③ 下架商品在两个公开端点都不可达 ====================
+  // ★ 这条断言的是「不可达」这个事实本身，而**不是**「它在列表里 purchasable === false」。
+  // 实测：`GET /api/products` 先 `.filter((product) => product.active)`，
+  // `GET /api/products/:id` 对下架商品直接 404。所以下架商品根本不会出现在响应里，
+  // 「列表里某项 purchasable 为 false」这个断言**写不出来**（那项不存在）。
+  store.update((data) => {
+    const product = data.products.find((item) => item.id === soldOutId);
+    product.active = false;
+  });
+  const delistedList = await api('/api/products');
+  assert.equal(
+    delistedList.body.data.some((item) => item.id === soldOutId), false,
+    '③ ★ 下架商品不得出现在公开列表里'
+  );
+  assert.equal(
+    delistedList.body.total, listed.body.data.length - 1,
+    '③ 下架后列表总数应减 1（证明过滤真的生效，而不是被别的商品补位）'
+  );
+  const delistedDetail = await api(`/api/products/${soldOutId}`);
+  assert.equal(delistedDetail.response.status, 404, '③ ★ 下架商品的详情必须 404');
+  assert.equal(delistedDetail.body.error.code, 'PRODUCT_NOT_FOUND');
+
+  // ==================== ⑥ `active !== false` 那一项必须真的生效 ====================
+  // ③ 已证明它在当前 HTTP 路径上触发不了。但它不能是装饰性的：直接对域函数断言，
+  // 确保将来某个端点不再过滤 `active` 时 `purchasable` 仍然正确。
+  // 变异（删掉 `active !== false`）会让第一条转红 —— 这就是它存在的价值。
+  assert.equal(
+    withPurchasable({ id: 'x', active: false, stock: 5, reservedStock: 0 }).purchasable, false,
+    '⑥ ★ 下架商品即使有货也不得算作可下单（防御性分支，当前 HTTP 路径不可达）'
+  );
+  assert.equal(
+    withPurchasable({ id: 'x', active: true, stock: 5, reservedStock: 0 }).purchasable, true,
+    '⑥ 在架且有货 → 可下单'
+  );
+  assert.equal(
+    withPurchasable({ id: 'x', stock: 0, reservedStock: 0 }).purchasable, false,
+    '⑥ 无货 → 不可下单'
+  );
+  assert.equal(
+    withPurchasable({ id: 'x', stock: 3, reservedStock: 3 }).purchasable, false,
+    '⑥ 有库存但全被占用 → 不可下单'
+  );
+  // 正向控制：`active` 字段缺失（存量商品没有这个字段）必须按「在架」处理，
+  // 否则整个公开列表会被锁成不可下单。
+  assert.equal(
+    withPurchasable({ id: 'x', stock: 5, reservedStock: 0 }).purchasable, true,
+    '⑥ ★ 正向控制：`active` 缺失的存量商品必须仍算可下单'
+  );
+
+  // ==================== ⑤ 回归：既有字段不受影响 ====================
+  const rentalRow = listed.body.data.find((item) => item.listingType === 'RENT');
+  assert.ok(rentalRow, '⑤ 前置：公开列表里应有租赁商品');
+  assert.equal(typeof rentalRow.availableStock, 'number', '⑤ availableStock 必须保留');
+  assert.equal(typeof rentalRow.rentalPlan, 'object', '⑤ rentalPlan 必须保留（租赁形态的判据）');
+  assert.equal(
+    rentalRow.purchasable, rentalRow.availableStock > 0,
+    '⑤ 租赁车同样要按可售库存给出 purchasable（与售卖车同一判据）'
+  );
+  const saleRow = listed.body.data.find((item) => item.listingType === 'SALE');
+  assert.ok(saleRow, '⑤ 前置：公开列表里应有售卖商品');
+  assert.equal(saleRow.rentalPlan, undefined, '⑤ 售卖车不得带 rentalPlan（withListingType 会剔除）');
+  assert.equal('promotion' in saleRow, true, '⑤ promotion 字段必须保留（可能为 null）');
+  assert.equal(typeof saleRow.effectivePriceInCents, 'number', '⑤ effectivePriceInCents 必须保留');
 });
 
 test('admin overview includes a seven day operations report', async () => {

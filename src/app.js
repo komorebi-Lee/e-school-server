@@ -10,6 +10,7 @@ const { localDateKey, normalizeTimeSlot, normalizeDateValue, financeTaskDueAt } 
 const {
   availableStock,
   withAvailableStock,
+  withPurchasable,
   lowStockThreshold,
   evaluateLowStockAlert,
   recordStockMovement,
@@ -4301,9 +4302,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const now = new Date().toISOString();
         return sendJson(response, 200, {
           // 租赁车与售卖车共用同一个列表与 category 过滤，只靠 listingType 区分形态。
-          data: ranked.map((product) => withListingType(withProductSale(withMerchantScore(
+          // `withPurchasable` 放在最外层：它只读 `active` / `stock` / `reservedStock`，
+          // 与下面几层装饰器的顺序无关，放外层是为了让它对**最终**对象求值。
+          data: ranked.map((product) => withPurchasable(withListingType(withProductSale(withMerchantScore(
             withAvailableStock(withProductSales(product, salesCounts)), data.merchants || []
-          ), now))),
+          ), now)))),
           total: ranked.length,
           requestId
         });
@@ -4612,14 +4615,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           .filter((item) => item.active && item.id !== product.id && item.category === product.category)
         )
         .slice(0, 3)
-          .map((item) => withListingType(withProductSale(withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || [])), data.merchants || []), now)));
+          .map((item) => withPurchasable(withListingType(withProductSale(withMerchantScore(withAvailableStock(withProductReviewSummary(withMerchantName(item, data.merchants || []), data.productReviews || [])), data.merchants || []), now))));
         const productMerchant = (data.merchants || []).find((item) => item.id === product.merchantId);
-        const enrichedProduct = withListingType(withProductSale(withMerchantScore(
+        const enrichedProduct = withPurchasable(withListingType(withProductSale(withMerchantScore(
           withAvailableStock(
             withProductReviewSummary(withMerchantName(product, data.merchants || []), data.productReviews || [])
           ),
           data.merchants || []
-        ), now));
+        ), now)));
         enrichedProduct.serviceArea = productMerchant?.serviceArea || '华中农业大学狮山校区';
         const storeProfile = productStoreProfile(enrichedProduct, {
           deliveryResponseHours: settings.deliveryResponseHours,
@@ -8302,7 +8305,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             throw new ApiError(409, 'ORDER_NOT_MODIFIABLE', `当前订单状态（${statusLabels[order.status] || order.status}）不支持改约`);
           }
           if (['REFUNDED', 'PARTIALLY_REFUNDED'].includes(order.paymentStatus)) {
-            throw new ApiError(409, 'ORDER_NOT_MODIFIABLE', `当前订单状态（${paymentStatusLabels[order.paymentStatus] || order.paymentStatus}）不支持改约`);
+            // ★ 文案必须写「订单支付状态」而不是「订单状态」。
+            // 这条分支命中时 `order.status` 通常仍是 `PAID` / `FULFILLING`，
+            // 用户在页面上看到的订单状态就是「已支付」——如果提示说「当前订单状态
+            // （部分退款）」，他会去订单状态里找「部分退款」这个状态，找不到，
+            // 于是以为页面显示错了。「支付状态」这个词才对得上他实际能看到的维度。
+            throw new ApiError(409, 'ORDER_NOT_MODIFIABLE', `当前订单支付状态（${paymentStatusLabels[order.paymentStatus] || order.paymentStatus}）不支持改约`);
           }
           if (body.fulfillment && typeof body.fulfillment === 'object') {
             const previousSchedule = order.fulfillment?.type === 'DELIVERY' ? `${order.fulfillment.date || '尽快'} ${order.fulfillment.timeSlot || ''}`.trim() : '';

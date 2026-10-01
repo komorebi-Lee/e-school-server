@@ -19,6 +19,38 @@ function withAvailableStock(product) {
   return { ...product, reservedStock: Number(product.reservedStock || 0), availableStock: availableStock(product) };
 }
 
+/**
+ * 为商品补上 `purchasable`（能否下单）。
+ *
+ * 判据：`active !== false && availableStock > 0`。
+ *
+ * ★ `active !== false` 这一项在**当前**的公开端点上恒为真，但必须保留。
+ *
+ * 实测事实（探针验证）：`GET /api/products` 与 `GET /api/products/:id` 都会先过滤
+ * `active`——列表是 `products.filter((product) => product.active)`，
+ * 详情对下架商品直接 404。所以能走到这里被补上 `purchasable` 的商品，
+ * `active` 必然不是 `false`，这一项当前**触发不了**。
+ *
+ * 保留它的理由是**防御性**：将来若某个端点不再过滤 `active`（例如商家后台复用
+ * 这个函数列出自己的全部商品，含已下架），`purchasable` 仍然正确——下架商品
+ * 不会被算成「可下单」。少这一项就会在那时静默地把下架商品标成可买。
+ *
+ * 组合顺序：本函数只读 `active` / `stock` / `reservedStock`，而这三个字段不被
+ * `withAvailableStock` / `withProductSale` / `withListingType` 改写或删除
+ * （它们一律 `{ ...product }` 展开，`withListingType` 只额外剔除 `rentalPlan`）。
+ * 因此放在链条的**任意位置**结果都相同，与既有装饰器的顺序天然兼容。
+ *
+ * @param {object} product 商品记录。
+ * @returns {object} 带 `purchasable` 的商品对象。
+ */
+function withPurchasable(product) {
+  const source = product || {};
+  return {
+    ...source,
+    purchasable: Boolean(source.active !== false && availableStock(source) > 0)
+  };
+}
+
 function lowStockThreshold(data) {
   const value = Number(data?.adminSettings?.lowStockThreshold ?? 10);
   return Number.isInteger(value) && value >= 0 && value <= 999 ? value : 10;
@@ -329,6 +361,7 @@ function restoreOrderStockQuantity(data, order, refundItems = []) {
 module.exports = {
   availableStock,
   withAvailableStock,
+  withPurchasable,
   lowStockThreshold,
   evaluateLowStockAlert,
   recordStockMovement,
