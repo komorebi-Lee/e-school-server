@@ -126,6 +126,10 @@ function publicForumPost(post, viewerId) {
     images: Array.isArray(post.images) ? post.images.slice(0, 3) : [],
     likes: (post.likedBy || []).length,
     liked: viewerId ? (post.likedBy || []).includes(viewerId) : false,
+    // 是否为当前浏览者的帖子（M7-P1-01 作者自管理）。
+    // 前端据此决定要不要显示「隐藏 / 恢复」——**服务端才是真正的防线**，
+    // 这个字段只负责界面，不能当作权限判据（状态端点是独立校验作者的）。
+    isOwner: Boolean(viewerId && post.authorId === viewerId),
     comments: (post.comments || []).map(publicForumComment),
     commentCount: (post.comments || []).length,
     status: post.status,

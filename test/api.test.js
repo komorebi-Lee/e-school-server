@@ -6684,3 +6684,166 @@ test('admin can moderate marketplace listings and forum posts', async () => {
   assert.ok((overview.body.data.marketItems || []).some((entry) => entry.id === itemId), 'admin overview should expose marketplace listings');
   assert.ok((overview.body.data.forumPosts || []).some((entry) => entry.id === postId), 'admin overview should expose forum posts');
 });
+
+test('forum authors can hide and restore their own posts, and nobody else can', async (t) => {
+  const { publicForumPost } = require('../src/domain/public-view');
+
+  // ==================== ① isOwner 的三个方向 ====================
+  const sample = {
+    id: 'post_sample', authorId: 'user-author', board: 'CAMPUS', title: 't',
+    status: 'PUBLISHED', likedBy: [], comments: []
+  };
+  assert.equal(publicForumPost(sample, 'user-author').isOwner, true, '① ★ 作者本人 → isOwner 为 true');
+  assert.equal(publicForumPost(sample, 'user-other').isOwner, false, '① ★ 其他人 → isOwner 为 false');
+  assert.equal(publicForumPost(sample, undefined).isOwner, false, '① ★ 未登录（undefined）→ isOwner 为 false');
+  assert.equal(publicForumPost(sample, null).isOwner, false, '① 未登录（null）→ isOwner 为 false');
+  // 正向控制：同一次调用里的另一个 viewer 感知字段 `liked` 不得被这次改动带偏。
+  const likedSample = { ...sample, likedBy: ['user-other'] };
+  assert.equal(publicForumPost(likedSample, 'user-other').liked, true, '① 回归：liked 仍按 viewerId 判定');
+  assert.equal(publicForumPost(likedSample, 'user-author').liked, false, '① 回归：没点过赞的人 liked 为 false');
+  assert.equal(publicForumPost(likedSample, undefined).liked, false, '① 回归：未登录 liked 为 false');
+
+  const author = await loginWeChat('forum_owner');
+  const other = await loginWeChat('forum_other');
+  const authorAuth = { authorization: `Bearer ${author.token}` };
+  const otherAuth = { authorization: `Bearer ${other.token}` };
+
+  const created = await api('/api/forum/posts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...authorAuth },
+    body: JSON.stringify({ title: '作者自管理回归帖', content: '这条帖子用来验证隐藏与恢复。', board: 'CAMPUS' })
+  });
+  assert.equal(created.response.status, 201);
+  const postId = created.body.data.id;
+  assert.equal(created.body.data.isOwner, true, '① 发帖响应里作者自己就是 isOwner');
+  // ★ 用 t.after 清理，而不是在末尾写一行：断言中途失败时末尾那行永远不会执行，
+  // 留下的帖子会污染后面所有依赖论坛列表的用例。
+  t.after(() => {
+    store.update((data) => {
+      data.forumPosts = (data.forumPosts || []).filter((post) => post.id !== postId);
+    });
+  });
+
+  // 前置：初始可见，且别人也看得到。
+  const listBefore = await api('/api/forum/posts');
+  assert.ok(listBefore.body.data.some((post) => post.id === postId), '前置：新帖应出现在公开列表里');
+  const detailBefore = await api(`/api/forum/posts/${postId}`, { headers: otherAuth });
+  assert.equal(detailBefore.response.status, 200, '前置：别人此时能打开详情');
+  assert.equal(detailBefore.body.data.isOwner, false, '① 别人看详情时 isOwner 为 false');
+
+  // ==================== ③ 非作者 → 403 ====================
+  const forbidden = await api(`/api/forum/posts/${postId}/status`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...otherAuth },
+    body: JSON.stringify({ status: 'HIDDEN' })
+  });
+  assert.equal(forbidden.response.status, 403, '③ ★ 非作者不得隐藏别人的帖子');
+  assert.equal(forbidden.body.error.code, 'FORUM_POST_FORBIDDEN', '③ 错误码应为 FORUM_POST_FORBIDDEN');
+  // ★ 前置：403 之后帖子必须仍是可见的 —— 否则「拒绝」其实没拒绝（先写了再抛）。
+  assert.equal(
+    (await api(`/api/forum/posts/${postId}`)).response.status, 200,
+    '③ ★ 403 之后帖子必须原样可见（证明拒绝是真的拒绝了，没有先写后抛）'
+  );
+
+  // ==================== ② 作者隐藏 → 200，且自己仍能看到 ====================
+  const hidden = await api(`/api/forum/posts/${postId}/status`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...authorAuth },
+    body: JSON.stringify({ status: 'HIDDEN' })
+  });
+  assert.equal(hidden.response.status, 200, '② ★ 作者应能隐藏自己的帖子');
+  assert.equal(hidden.body.data.status, 'HIDDEN', '② 隐藏后返回的状态应为 HIDDEN');
+
+  const mine = await api('/api/forum/posts?mine=1', { headers: authorAuth });
+  assert.equal(mine.response.status, 200, '② ?mine=1 应可用');
+  const minePost = mine.body.data.find((post) => post.id === postId);
+  assert.ok(minePost, '② ★★ 隐藏后作者仍必须在「我的帖子」里看到它 —— 否则「恢复」没有入口');
+  assert.equal(minePost.status, 'HIDDEN', '② 「我的帖子」必须保留真实状态，而不是假装还在发布');
+  assert.equal(minePost.isOwner, true, '② 「我的帖子」里的每一条都应是 isOwner');
+
+  // 作者自己打开详情也必须成功 —— 「恢复」按钮就在详情页上。
+  const authorDetail = await api(`/api/forum/posts/${postId}`, { headers: authorAuth });
+  assert.equal(authorDetail.response.status, 200, '② ★★ 隐藏后作者必须仍能打开自己的帖子详情');
+  assert.equal(authorDetail.body.data.isOwner, true, '② 作者看自己的隐藏帖 isOwner 为 true');
+
+  // ==================== ④ 隐藏后其他人看不到 ====================
+  const listAfterHide = await api('/api/forum/posts');
+  assert.equal(
+    listAfterHide.body.data.some((post) => post.id === postId), false,
+    '④ ★ 隐藏后公开列表里不得再出现它（这才是「隐藏」的实际效果）'
+  );
+  const otherDetail = await api(`/api/forum/posts/${postId}`, { headers: otherAuth });
+  assert.equal(otherDetail.response.status, 404, '④ ★ 隐藏后其他人打开详情必须 404');
+  assert.equal(otherDetail.body.error.code, 'FORUM_POST_NOT_FOUND');
+  const anonDetail = await api(`/api/forum/posts/${postId}`);
+  assert.equal(anonDetail.response.status, 404, '④ 隐藏后匿名访客打开详情同样 404');
+  const otherMine = await api('/api/forum/posts?mine=1', { headers: otherAuth });
+  assert.equal(
+    otherMine.body.data.some((post) => post.id === postId), false,
+    '④ ★ ?mine=1 只返回自己的帖子 —— 别人的隐藏帖不得从这条路径漏出来'
+  );
+
+  // ==================== ⑤ 作者恢复 → 其他人重新可见 ====================
+  const restored = await api(`/api/forum/posts/${postId}/status`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...authorAuth },
+    body: JSON.stringify({ status: 'PUBLISHED' })
+  });
+  assert.equal(restored.response.status, 200, '⑤ 作者应能恢复自己的帖子');
+  assert.equal(restored.body.data.status, 'PUBLISHED', '⑤ ★ 恢复后的状态必须是 PUBLISHED');
+  assert.ok(
+    (await api('/api/forum/posts')).body.data.some((post) => post.id === postId),
+    '⑤ ★★ 恢复后其他人必须重新看得到 —— 若恢复写成了别的取值（如 ACTIVE），这里会红'
+  );
+  assert.equal((await api(`/api/forum/posts/${postId}`)).response.status, 200, '⑤ 恢复后详情对匿名访客也可见');
+
+  // ==================== ⑥ 401 / 404 / 400 ====================
+  const anonymous = await api(`/api/forum/posts/${postId}/status`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ status: 'HIDDEN' })
+  });
+  assert.equal(anonymous.response.status, 401, '⑥ ★ 未登录不得改状态');
+  assert.equal(anonymous.body.error.code, 'USER_UNAUTHORIZED');
+
+  const missing = await api('/api/forum/posts/post_not_exists/status', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...authorAuth },
+    body: JSON.stringify({ status: 'HIDDEN' })
+  });
+  assert.equal(missing.response.status, 404, '⑥ 帖子不存在 → 404');
+  assert.equal(missing.body.error.code, 'FORUM_POST_NOT_FOUND');
+
+  for (const badStatus of ['ACTIVE', 'REMOVED', '', 'hidden']) {
+    const bad = await api(`/api/forum/posts/${postId}/status`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authorAuth },
+      body: JSON.stringify({ status: badStatus })
+    });
+    assert.equal(bad.response.status, 400, `⑥ ★ 非法 status「${badStatus}」必须 400`);
+    assert.equal(bad.body.error.code, 'VALIDATION_ERROR');
+  }
+  // ★ `ACTIVE` 被明确拒绝，而不是被接受成一个「没有读取方认识的隐藏状态」：
+  // 列表/详情/点赞/评论四处都判 `=== 'PUBLISHED'`，接受 ACTIVE 会让帖子对
+  // **所有人**永久消失，连作者都恢复不回来。
+  assert.equal(
+    (await api(`/api/forum/posts/${postId}`)).response.status, 200,
+    '⑥ ★ 400 之后帖子必须原样可见（证明非法请求没有把数据写坏）'
+  );
+
+  // ==================== ⑦ 回归：既有行为不变 ====================
+  const publicList = await api('/api/forum/posts');
+  assert.equal(publicList.response.status, 200, '⑦ 既有公开列表不受影响');
+  assert.ok(publicList.body.data.length > 0, '⑦ 前置：公开列表不应为空');
+  for (const post of publicList.body.data) {
+    assert.equal(post.status, 'PUBLISHED', '⑦ 公开列表里每一条都必须是 PUBLISHED');
+    assert.equal(typeof post.liked, 'boolean', '⑦ liked 字段必须仍在且为布尔');
+    assert.equal(typeof post.isOwner, 'boolean', '⑦ isOwner 字段必须仍在且为布尔');
+    assert.equal(post.isOwner, false, '⑦ 匿名读公开列表时 isOwner 一律 false');
+  }
+  const seeded = publicList.body.data.find((post) => post.id === 'post_seed_2');
+  assert.ok(seeded, '⑦ 前置：种子帖 post_seed_2 应在公开列表里');
+  assert.equal(seeded.isOwner, false, '⑦ 种子帖对匿名访客 isOwner 为 false');
+  assert.equal(seeded.liked, false, '⑦ 种子帖对匿名访客 liked 为 false');
+  assert.equal(seeded.likes, 2, '⑦ 种子帖的 likes 计数不受影响');
+});

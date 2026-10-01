@@ -4431,6 +4431,26 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const query = (url.searchParams.get('q') || '').trim().toLowerCase();
         // 传入可选登录用户，保证列表页能正确回显「我是否点过赞」。
         const viewerId = optionalUser(request)?.userId || null;
+        // ★ `?mine=1`：只返回当前用户的帖子，**含已隐藏的**（M7-P1-01 作者自管理）。
+        //
+        // 这是「恢复」唯一的入口：帖子一旦隐藏，主列表与详情对别人都不可见，
+        // 作者必须有一个地方能看到它、把它恢复回来。
+        // 未登录 → 401（requireUser）—— 「我的帖子」没有匿名语义。
+        if (url.searchParams.get('mine') === '1') {
+          const { userId } = requireUser(request);
+          const mine = (data.forumPosts || [])
+            .filter((post) => post.authorId === userId)
+            .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+            .map((post) => publicForumPost(post, userId));
+          return sendJson(response, 200, { data: mine, total: mine.length, requestId });
+        }
+        // ★ 主列表对**所有人**只显示 `PUBLISHED` —— 包括作者本人。
+        //
+        // 为什么不把作者自己的隐藏帖也放进主列表：点赞 / 评论端点都要求
+        // `status === 'PUBLISHED'`，帖子若出现在主列表里，作者点「赞」或发评论
+        // 会拿到 404「帖子不存在或已隐藏」—— 一个「看得见却点不动」的坏交互。
+        // 作者的隐藏帖统一从「我的帖子」（`?mine=1`）进入，那里只做「恢复」，
+        // 不做点赞 / 评论，语义自洽。
         const posts = (data.forumPosts || [])
           .filter((post) => post.status === 'PUBLISHED')
           .filter((post) => !board || post.board === board)
@@ -4480,7 +4500,16 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         // 详情页同样需要回显当前登录用户的点赞态，避免刷新后回退为未点赞。
         const viewerId = optionalUser(request)?.userId || null;
         const post = (store.read().forumPosts || []).find((entry) => entry.id === forumPostMatch[1]);
-        if (!post || post.status !== 'PUBLISHED') throw new ApiError(404, 'FORUM_POST_NOT_FOUND', '帖子不存在或已隐藏');
+        // ★ 已隐藏的帖子：**作者本人仍可打开**，其他人一律 404。
+        //
+        // 不能只写 `post.status !== 'PUBLISHED'` 一刀切 —— 那会把作者自己也挡在外面，
+        // 于是「我的帖子」里点进去是 404，「恢复」按钮永远够不着，功能等于没有。
+        // `Boolean(viewerId) &&` 这层守卫是必须的：没有它，一条 `authorId` 恰好是
+        // `null`/`undefined` 的脏数据会对匿名访客判成「作者本人」而放行。
+        const visible = Boolean(post) && (
+          post.status === 'PUBLISHED' || (Boolean(viewerId) && post.authorId === viewerId)
+        );
+        if (!visible) throw new ApiError(404, 'FORUM_POST_NOT_FOUND', '帖子不存在或已隐藏');
         return sendJson(response, 200, { data: publicForumPost(post, viewerId), requestId });
       }
 
@@ -4522,6 +4551,39 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           return { post, comment };
         });
         return sendJson(response, 200, { data: publicForumComment(result.comment), requestId });
+      }
+
+      // ★ 作者自管理：隐藏 / 恢复自己的帖子（M7-P1-01）。
+      //
+      // 状态词汇沿用**既有**的 `PUBLISHED` / `HIDDEN`：
+      // - 与管理端 `/api/admin/forum-posts/:id/status` 的取值一致；
+      // - 与列表 / 详情 / 点赞 / 评论四处 `status === 'PUBLISHED'` 的判据一致。
+      //
+      // ⚠️ 不要引入 `ACTIVE` 之类的新取值：所有读取方都判 `=== 'PUBLISHED'`，
+      // 写成 `ACTIVE` 会让帖子对**所有人**永久消失 —— 连作者都再看不到，
+      // 「恢复」也就永远够不着了（一个静默的、不可逆的数据损坏）。
+      const forumStatusMatch = pathname.match(/^\/api\/forum\/posts\/([^/]+)\/status$/);
+      if (request.method === 'POST' && forumStatusMatch) {
+        const { userId } = requireUser(request);
+        const body = await readJson(request);
+        const status = requireString(body.status, 'status', { maxLength: 20 });
+        if (!['PUBLISHED', 'HIDDEN'].includes(status)) {
+          throw new ApiError(400, 'VALIDATION_ERROR', 'status 需为 PUBLISHED 或 HIDDEN');
+        }
+        const updated = store.update((data) => {
+          const post = (data.forumPosts || []).find((entry) => entry.id === forumStatusMatch[1]);
+          if (!post) throw new ApiError(404, 'FORUM_POST_NOT_FOUND', '帖子不存在');
+          // ★ 作者校验 —— 这是 PRD 明确要求的一道，而且**必须在服务端**：
+          // 前端拿到的 `isOwner` 只是界面开关，绕过去照样能直接发请求。
+          if (post.authorId !== userId) {
+            throw new ApiError(403, 'FORUM_POST_FORBIDDEN', '只能管理自己发布的帖子');
+          }
+          post.status = status;
+          post.updatedAt = new Date().toISOString();
+          addAudit(data, status === 'HIDDEN' ? '作者隐藏自己的论坛帖子' : '作者恢复自己的论坛帖子', post.title);
+          return post;
+        });
+        return sendJson(response, 200, { data: publicForumPost(updated, userId), requestId });
       }
 
       // ===== 管理端：市集与论坛内容审核 =====
