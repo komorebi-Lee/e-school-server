@@ -294,6 +294,15 @@ function initialData() {
     paymentReconciliations: [],
     financeTasks: [],
     userOpenIds: {},
+    // ★ 用户维度的实名认证记录（M8-P1-01），keyed by userId。
+    //
+    // 与既有的 `identityVerifications`（app.js 里的内存 Map、15 分钟过期）是两回事：
+    // 那个是**一次性令牌**，只服务于「个人商家入驻」把一次认证结果带过去；
+    // 这个是**认证状态本身** —— 用户维度、不过期、持久化，供「我的」页读取。
+    //
+    // ⚠️ 只存脱敏值：`ownerNameMasked` / `idNumberMasked`。
+    // 完整姓名与完整身份证号**一律不落库**（脱敏后即丢原文）。
+    identityRecords: {},
     adminUsers: [],
     adminSessions: [],
     adminLoginFailures: [],
@@ -395,6 +404,8 @@ class JsonStore {
         changed = true;
       }
       if (!data.userOpenIds || typeof data.userOpenIds !== 'object') { data.userOpenIds = {}; changed = true; }
+      // 老库补字段：与 `userOpenIds` 同一形式（对象型集合不能走上面的数组循环）。
+      if (!data.identityRecords || typeof data.identityRecords !== 'object') { data.identityRecords = {}; changed = true; }
       if (!data.patrolState || typeof data.patrolState !== 'object') { data.patrolState = defaults.patrolState; changed = true; }
       if (changed) this.write(data);
     } catch (error) {

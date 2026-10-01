@@ -7041,3 +7041,224 @@ test('marketplace sellers can soft-delete their own listing, but not one with a 
     '⑤ 400 之后闲置必须原样可见（证明非法请求没有把数据写坏）'
   );
 });
+
+/**
+ * 起一个**额外的**服务实例：同一个数据文件、一个全新的 `JsonStore`。
+ *
+ * 用来验「重启之后还在不在」—— 新 store 只能从磁盘读到数据，所以凡是它能读到的东西
+ * 都确实落了盘。仅重建 store 还不够：`GET /api/my/identity` 有可能（错误地）读内存里的
+ * `identityVerifications`，那样即使磁盘上什么都没有，接口也会答「已认证」。
+ * 走一遍新 app 的 HTTP 才能排除这种巧合。
+ *
+ * @param {import('../src/store').JsonStore} jsonStore 新的 store 实例。
+ * @returns {Promise<{instance: import('node:http').Server, url: string}>} 实例与基地址。
+ */
+async function startExtraServer(jsonStore) {
+  const instance = http.createServer(createApp({
+    store: jsonStore,
+    wechatAuth: async (code) => ({ openid: `openid_${code}`, userId: `wx_${code}` })
+  }));
+  await new Promise((resolve) => instance.listen(0, '127.0.0.1', resolve));
+  return { instance, url: `http://127.0.0.1:${instance.address().port}` };
+}
+
+/**
+ * 对**指定基地址**发一次 JSON 请求（`api` 固定打在全局 `baseUrl` 上）。
+ *
+ * @param {string} url 基地址。
+ * @param {string} pathname 路径。
+ * @param {object} [options] fetch 选项。
+ * @returns {Promise<{response: Response, body: object}>} 响应与解析后的 body。
+ */
+async function apiOn(url, pathname, options) {
+  const response = await fetch(`${url}${pathname}`, options);
+  return { response, body: await response.json() };
+}
+
+test('M8-P1-01 identity verification is persisted per user and never stores the raw id number', async () => {
+  const session = await loginWeChat('identity_persist_user');
+  const ownerName = '验证同学';
+  const idNumber = '420106200102030031';
+  const maskedIdNumber = '4201********0031';
+  const authHeaders = { authorization: `Bearer ${session.token}` };
+  const jsonAuthHeaders = { 'content-type': 'application/json', ...authHeaders };
+
+  // ==================== ③ 未认证用户：200 + { verified: false }，不是 404 ====================
+  // 「还没认证」是一个正常状态，不是「资源不存在」。若这里返回 404，前端就不得不把
+  // 「未认证」与「接口挂了」塞进同一个分支 —— 那是「把失败说成空」的另一种形态。
+  const before = await api('/api/my/identity', { headers: authHeaders });
+  assert.equal(before.response.status, 200, '③ ★★ 未认证必须返回 200');
+  assert.equal(before.body.error, undefined, '③ 未认证不得是错误响应');
+  assert.deepEqual(before.body.data, { verified: false }, '③ 未认证时只返回 { verified: false }');
+  // 判据自测：404 在这个服务里确实可观测（不存在的路径就是 404），
+  // 所以「未认证返回 200」是一条有区分度的断言，而不是恒真断言。
+  assert.equal(
+    (await api('/api/my/identity-typo')).response.status, 404,
+    '③ 判据自测：不存在的路径确实是 404'
+  );
+
+  // ==================== ④ 未登录 → 401 ====================
+  const anonymous = await api('/api/my/identity');
+  assert.equal(anonymous.response.status, 401, '④ ★ 未登录 → 401');
+  assert.equal(anonymous.body.error.code, 'USER_UNAUTHORIZED', '④ 错误码');
+  const badToken = await api('/api/my/identity', { headers: { authorization: 'Bearer not-a-session' } });
+  assert.equal(badToken.response.status, 401, '④ ★ 无效令牌同样 401，不会退化成「未认证」');
+
+  // ==================== ① 认证响应字段逐字段不变 ====================
+  const verified = await api('/api/identity/verify', {
+    method: 'POST', headers: jsonAuthHeaders, body: JSON.stringify({ ownerName, idNumber })
+  });
+  assert.equal(verified.response.status, 200, '① 认证成功');
+  assert.deepEqual(
+    Object.keys(verified.body.data).sort(),
+    ['idNumberMasked', 'ownerNameMasked', 'status', 'token', 'verifiedAt'],
+    '① ★★ 响应字段必须与改造前**逐字段一致** —— `merchant/apply.js` 依赖 `data.token`，'
+    + '本次只是「额外」写了一份用户维度的持久记录，既有契约一个字段都不能少'
+  );
+  assert.equal(verified.body.data.status, 'VERIFIED', '① status 不变');
+  assert.equal(typeof verified.body.data.token, 'string', '① token 仍是字符串');
+  assert.ok(verified.body.data.token.length > 0, '① token 非空（个人入驻靠它换申请）');
+  assert.equal(verified.body.data.ownerNameMasked, '验*', '① 脱敏姓名');
+  assert.equal(verified.body.data.idNumberMasked, maskedIdNumber, '① 脱敏证件号');
+  assert.match(verified.body.data.verifiedAt, /^\d{4}-\d{2}-\d{2}T/, '① verifiedAt 仍是 ISO 时间串');
+
+  // ==================== ⑤ ★ 隐私：落库的只有脱敏值 ====================
+  // 放在 ② 之前：先验「写进去的是什么」，再验「读出来的是什么」。
+  const record = store.read().identityRecords[session.userId];
+  assert.ok(record, '⑤ 前置：用户维度确实写了记录');
+  assert.deepEqual(
+    Object.keys(record).sort(),
+    ['idNumberMasked', 'ownerNameMasked', 'userId', 'verifiedAt'],
+    '⑤ ★★ 字段清单必须**只有**这四项 —— 完整姓名、完整身份证号、一次性 token 一律不落库'
+  );
+
+  // 判据自测：下面用来判定「没有完整证件号」的正则，在**应失败**的输入上确实会失败。
+  //
+  // ★ 这里差点漏掉一种情形：身份证号末位可以是 `X`，此时完整号码里只有 **17 位连续数字**，
+  //   `/\d{18}/` 抓不到它。第一版就是拿 `…004X` 做的判据自测，当场红了 ——
+  //   断言自测逮住的是**判据自身的不足**，不是被测代码的问题。
+  //   所以判据必须同时查 17 位连续数字（`\d{17}` 对末位是数字的 18 位号码同样命中）。
+  assert.equal(/\d{18}/.test(idNumber), true, '⑤ 判据自测：末位为数字的完整身份证号命中 18 位连续数字');
+  assert.equal(/\d{17}/.test(idNumber), true, '⑤ 判据自测：它也命中 17 位连续数字');
+  assert.equal(/\d{17}/.test('42010620010203004X'), true, '⑤ 判据自测：末位为 X 的完整号码命中 17 位连续数字');
+  assert.equal(
+    /\d{18}/.test('42010620010203004X'), false,
+    '⑤ 判据自测：末位为 X 的号码确实逃过 18 位判据 —— 所以必须补上 17 位这一条'
+  );
+  assert.equal(/\d{17}/.test(maskedIdNumber), false, '⑤ 判据自测：脱敏值不命中 17 位连续数字');
+  assert.equal(/\d{18}/.test(maskedIdNumber), false, '⑤ 判据自测：脱敏值不命中 18 位连续数字');
+
+  // ★ 隐私判据放在等值断言**之前**：等值断言（`record.idNumberMasked === maskedIdNumber`）
+  //   在「把完整号码存进去」这种变异下也会红，但它红的是「值不对」，不是「泄露了」。
+  //   把隐私判据放前面，「存了完整号码」这条变异才能**精确地**打在隐私判据上。
+  const serializedRecords = JSON.stringify(store.read().identityRecords);
+  assert.equal(serializedRecords.includes(idNumber), false, '⑤ ★★ identityRecords 里不得出现完整身份证号');
+  assert.equal(serializedRecords.includes(ownerName), false, '⑤ ★★ identityRecords 里不得出现完整姓名');
+  assert.equal(/\d{18}/.test(serializedRecords), false, '⑤ ★★ identityRecords 里不得出现 18 位连续数字');
+  assert.equal(
+    /\d{17}/.test(serializedRecords), false,
+    '⑤ ★★ identityRecords 里不得出现 17 位以上连续数字（覆盖末位为 X 的号码）'
+  );
+  // 直接查落盘原文，绕过 JSON 解析与字符串转义。
+  const rawDatabase = fs.readFileSync(store.filePath, 'utf8');
+  assert.equal(rawDatabase.includes(idNumber), false, '⑤ ★★ 落盘的数据库文件里不得出现完整身份证号');
+  // 注意：不能对**整份**数据库查完整姓名 —— 商家入驻的 `settlementAccountName` 会存真名
+  // （那是另一条业务线，本次不动它）。所以姓名只在 `identityRecords` 范围内断言。
+
+  assert.equal(record.userId, session.userId, '⑤ 记录挂在用户维度上');
+  assert.equal(record.ownerNameMasked, '验*', '⑤ 存的是脱敏姓名');
+  assert.equal(record.idNumberMasked, maskedIdNumber, '⑤ 存的是脱敏证件号');
+
+  // ==================== ② 认证后 GET /api/my/identity ====================
+  const after = await api('/api/my/identity', { headers: authHeaders });
+  assert.equal(after.response.status, 200, '② 认证后仍 200');
+  assert.equal(after.body.data.verified, true, '② ★ 必须读到 verified === true');
+  assert.ok(after.body.data.ownerNameMasked, '② 脱敏姓名非空');
+  assert.ok(after.body.data.idNumberMasked, '② 脱敏证件号非空');
+  assert.equal(after.body.data.ownerNameMasked, '验*', '② 展示的是脱敏姓名');
+  assert.equal(after.body.data.idNumberMasked, maskedIdNumber, '② 展示的是脱敏证件号');
+  assert.equal(after.body.data.verifiedAt, verified.body.data.verifiedAt, '② 认证时间与认证响应一致');
+
+  // ==================== ⑦ 回归：商家入驻的个人认证流程仍可用 ====================
+  // 令牌（15 分钟、内存）逻辑一个字没动，所以认证返回的 token 仍然能换一次入驻申请。
+  const applied = await api('/api/merchants', {
+    method: 'POST', headers: jsonAuthHeaders,
+    body: JSON.stringify({
+      userId: session.userId, merchantType: 'PERSONAL', name: '认证落库后的个人服务',
+      ownerName, phone: '15527110077', category: 'LIFE_SERVICE', serviceArea: '狮山校区',
+      description: '认证落库的回归验证', settlementAccountName: ownerName,
+      settlementBank: '校园演示银行', settlementAccount: '6222000000004321',
+      identityVerificationToken: verified.body.data.token,
+      agreeAgreement: true, agreePrivacy: true
+    })
+  });
+  assert.equal(applied.response.status, 201, '⑦ ★★ 个人入驻仍能用认证返回的 token 提交（既有契约未动）');
+  assert.equal(applied.body.data.merchantType, 'PERSONAL', '⑦ 主体类型');
+  assert.equal(applied.body.data.licenseNo, '', '⑦ 个人主体不需要营业执照');
+  // ★ 这里发现一处**既有的**不一致（不是本次改动引入的，也不在本次范围内）：
+  // 同一份姓名，`identityVerification.ownerNameMasked`（app.js）是 `验*`，
+  // 而商家申请的**响应**（`merchantPublic`，public-view.js:54）是 `验**` ——
+  // 两个脱敏函数、两种结果。本次只把 app.js 里那**三份拷贝**抽成一个函数，
+  // 逐字符等价；`public-view.js` 属 T26/T27 已改文件，不动。
+  assert.equal(applied.body.data.ownerNameMasked, '验**', '⑦ 响应里的姓名来自 `merchantPublic`（** 两个星）');
+  assert.equal(
+    store.read().merchants.find((item) => item.id === applied.body.data.id).identityVerification.ownerNameMasked,
+    '验*',
+    '⑦ ★ 库里存的 `identityVerification.ownerNameMasked` 仍是 `*`（一个星）—— 与上面的响应不同，这是既有行为，本次逐字符未变'
+  );
+});
+
+/**
+ * ⑥ 单独成一条用例，而不是并进上面那条。
+ *
+ * 为什么：并在一起时，「认证成功但不写持久记录」这条变异会先打红**前面**的断言
+ * （上面那条里 `assert.ok(record)` 的位置更靠前），⑥ 自己的判据就没机会被观测到 ——
+ * 这就是「断言遮挡」。拆开之后，这条变异会**精确地**打在 ⑥ 上。
+ */
+test('M8-P1-01 identity verification survives a store rebuild (restart)', async () => {
+  const session = await loginWeChat('identity_restart_user');
+  const ownerName = '重启同学';
+  const idNumber = '420106200102030058';
+  const maskedIdNumber = '4201********0058';
+
+  const verified = await api('/api/identity/verify', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ ownerName, idNumber })
+  });
+  assert.equal(verified.response.status, 200, '⑥ 前置：认证成功');
+  assert.equal(verified.body.data.idNumberMasked, maskedIdNumber, '⑥ 前置：响应里是脱敏值');
+
+  // 新 store：它只能从磁盘读，所以它读到的都确实落了盘。
+  const restartedStore = new JsonStore(store.filePath);
+  const restartedRecord = restartedStore.read().identityRecords[session.userId];
+  assert.ok(
+    restartedRecord, '⑥ ★★ 重建 store 实例后记录仍在 —— 认证状态是持久的，不是内存里的一次性凭证'
+  );
+  assert.equal(restartedRecord.verifiedAt, verified.body.data.verifiedAt, '⑥ 时间一致');
+  assert.equal(restartedRecord.idNumberMasked, maskedIdNumber, '⑥ 重启后仍只有脱敏值');
+
+  // 更强的版本：新 store + 新 app + 重新登录 + 走 HTTP 读一次。
+  // 只重建 store 还不够 —— `GET /api/my/identity` 有可能（错误地）绕过磁盘直接答「已认证」，
+  // 那样即使库里什么都没有，上面那条也会绿。走一遍新 app 的 HTTP 才能排除这种巧合。
+  const restarted = await startExtraServer(restartedStore);
+  try {
+    const relogin = await apiOn(restarted.url, '/api/auth/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'identity_restart_user' })
+    });
+    assert.equal(relogin.response.status, 200, '⑥ 前置：重启后的实例能重新登录');
+    assert.equal(relogin.body.data.userId, session.userId, '⑥ 前置：同一个 code 仍是同一个用户');
+    const afterRestart = await apiOn(restarted.url, '/api/my/identity', {
+      headers: { authorization: `Bearer ${relogin.body.data.token}` }
+    });
+    assert.equal(afterRestart.response.status, 200, '⑥ 重启后仍 200');
+    assert.equal(
+      afterRestart.body.data.verified, true,
+      '⑥ ★★ 重启后仍读到 verified === true —— 状态在磁盘上，不在内存里'
+    );
+    assert.equal(afterRestart.body.data.idNumberMasked, maskedIdNumber, '⑥ 重启后返回的仍只有脱敏值');
+  } finally {
+    await new Promise((resolve) => restarted.instance.close(resolve));
+  }
+});

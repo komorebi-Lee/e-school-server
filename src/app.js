@@ -3557,6 +3557,23 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
     return value.length >= 8 ? `${value.slice(0, 4)}********${value.slice(-4)}` : '********';
   }
 
+  /**
+   * 姓名脱敏：只留首字。
+   *
+   * 抽出来是因为这个表达式原来在**三处**各写了一遍（认证响应、商家入驻的
+   * `identityVerification.ownerNameMasked`、以及现在的持久记录）。三份拷贝里
+   * 任何一份改了另两份不会跟着变，而且不会报错 —— 典型的静默漂移。
+   *
+   * 行为与原来的内联表达式逐字符等价：`'张三' → '张*'`、`'张' → '张'`。
+   *
+   * @param {string} value 姓名原文。
+   * @returns {string} 脱敏姓名。
+   */
+  function maskOwnerName(value) {
+    const name = String(value || '');
+    return `${name.slice(0, 1)}${name.length > 1 ? '*' : ''}`;
+  }
+
   function validateMockIdNumber(value) {
     if (!/^\d{17}[\dXx]$/.test(value)) return false;
     const weights = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
@@ -4091,6 +4108,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const verifiedAt = new Date().toISOString();
         const token = randomUUID();
         const maskedIdNumber = maskIdNumber(normalizedIdNumber);
+        const ownerNameMasked = maskOwnerName(ownerName);
+        // 令牌（15 分钟、内存）—— **契约不变**，`merchant/apply.js` 的个人入驻仍靠它。
         identityVerifications.set(token, {
           userId: identity.userId,
           ownerName,
@@ -4099,13 +4118,49 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           verifiedAt,
           expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
         });
+        // ★ M8-P1-01：额外把「认证状态本身」持久化到用户维度。
+        //
+        // 上面的令牌是**一次性凭证**（15 分钟就失效，且只服务于一次入驻申请），
+        // 它表达不了「这个用户已认证」这个**持久状态** —— 用户刷新页面就无从查起。
+        //
+        // ⚠️ 隐私：只写脱敏值。完整姓名与完整身份证号在这里就被丢弃，
+        // 不会进入 store，也就不会落盘。这是硬要求，不是可选项。
+        store.update((data) => {
+          const records = data.identityRecords = data.identityRecords || {};
+          records[identity.userId] = {
+            userId: identity.userId,
+            ownerNameMasked,
+            idNumberMasked: maskedIdNumber,
+            verifiedAt
+          };
+        });
         return sendJson(response, 200, {
           data: {
             token,
             status: 'VERIFIED',
-            ownerNameMasked: `${ownerName.slice(0, 1)}${ownerName.length > 1 ? '*' : ''}`,
+            ownerNameMasked,
             idNumberMasked: maskedIdNumber,
             verifiedAt
+          },
+          requestId
+        });
+      }
+
+      // ★ M8-P1-01：「我的」页读取认证状态。
+      //
+      // 未认证返回 `200 { verified: false }` 而**不是 404**：「还没认证」是一个
+      // 正常状态，不是「资源不存在」。用 404 会让前端不得不把「未认证」与
+      // 「接口挂了」混在同一个分支里 —— 那正是「把失败说成空」的另一种形态。
+      if (request.method === 'GET' && pathname === '/api/my/identity') {
+        const { userId } = requireUser(request);
+        const record = (store.read().identityRecords || {})[userId];
+        if (!record) return sendJson(response, 200, { data: { verified: false }, requestId });
+        return sendJson(response, 200, {
+          data: {
+            verified: true,
+            ownerNameMasked: record.ownerNameMasked || '',
+            idNumberMasked: record.idNumberMasked || '',
+            verifiedAt: record.verifiedAt || ''
           },
           requestId
         });
@@ -5018,7 +5073,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             reviewNote: '',
             identityVerification: merchantType === 'PERSONAL' ? {
               status: 'VERIFIED',
-              ownerNameMasked: `${ownerName.slice(0, 1)}${ownerName.length > 1 ? '*' : ''}`,
+              ownerNameMasked: maskOwnerName(ownerName),
               idNumberMasked: identityVerifications.get(identityVerificationToken)?.maskedIdNumber || '',
               verifiedAt: identityVerifications.get(identityVerificationToken)?.verifiedAt || new Date().toISOString()
             } : null,
