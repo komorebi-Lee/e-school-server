@@ -38,6 +38,7 @@ const {
   withMerchantName,
   marketCategoryLabels,
   marketConditionLabels,
+  MARKET_ITEM_PUBLIC_STATUSES,
   forumBoardLabels,
   publicMarketItem,
   publicForumComment,
@@ -4396,7 +4397,20 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       const marketItemMatch = pathname.match(/^\/api\/market\/items\/([^/]+)$/);
       if (request.method === 'GET' && marketItemMatch) {
         const item = (store.read().marketItems || []).find((entry) => entry.id === marketItemMatch[1]);
-        if (!item) throw new ApiError(404, 'MARKET_ITEM_NOT_FOUND', '商品不存在或已下架');
+        // ★ 补既有缺口（M6-P1-01）：详情端点此前**没有任何状态过滤**，
+        // 只要拿到 id 就能直接打开一条已被卖家删除（`DELETED`）或已被平台
+        // 违规下架（`REMOVED`）的闲置 —— 而且响应里带着 `contact`
+        //（卖家的手机号 / 微信号）。
+        //
+        // 主列表本来就按 `ACTIVE` 过滤、把这两类都藏掉了，所以这里不是新增限制，
+        // 而是**让详情与列表的可见性一致**：能被直接链接绕过的隐藏等于没隐藏。
+        // 平台下架是因为违规，内容与联系方式都不该继续可达。
+        //
+        // 用 404 而不是 403：对**非卖家**而言，一条已删除的闲置与一条从不存在的
+        // 闲置没有任何可观察区别，返回 403 反而会泄漏「这个 id 曾经存在」。
+        if (!item || !MARKET_ITEM_PUBLIC_STATUSES.includes(item.status)) {
+          throw new ApiError(404, 'MARKET_ITEM_NOT_FOUND', '商品不存在或已下架');
+        }
         const user = optionalUser(request);
         return sendJson(response, 200, {
           data: { ...publicMarketItem(item), isOwner: Boolean(user && user.userId === item.sellerId) },
@@ -4408,7 +4422,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const body = await readJson(request);
         const status = requireString(body.status, 'status', { maxLength: 20 });
-        if (!['ACTIVE', 'RESERVED', 'SOLD'].includes(status)) {
+        // `DELETED` = 卖家软删除（M6-P1-01）。它与 `REMOVED` 不同：
+        // `REMOVED` 是**平台**因违规下架，只能由管理端改回来；`DELETED` 是
+        // 卖家自己收摊，本人可在「我发布的闲置」里看到。
+        if (!['ACTIVE', 'RESERVED', 'SOLD', 'DELETED'].includes(status)) {
           throw new ApiError(400, 'VALIDATION_ERROR', '商品状态不支持');
         }
         const record = store.update((data) => {
@@ -4416,6 +4433,23 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!item) throw new ApiError(404, 'MARKET_ITEM_NOT_FOUND', '商品不存在或已下架');
           if (item.status === 'REMOVED') throw new ApiError(403, 'MARKET_ITEM_REMOVED', '商品已被平台下架，如需申诉请联系客服');
           if (item.sellerId !== userId) throw new ApiError(403, 'MARKET_ITEM_FORBIDDEN', '只有卖家可以更新商品状态');
+          // ★ 已产生交易记录的闲置不允许删除（PRD ④）。
+          //
+          // 判定依据是 `status ∈ {RESERVED, SOLD}`：这套数据模型里**没有**
+          // `buyerId` / `orderId` / `soldAt` 之类字段（全仓 `src/` 0 处命中），
+          // 闲置与订单之间**不存在**任何关联记录。也就是说，「有交易记录」在
+          // 当前模型下唯一的可观测代理就是这两个状态 —— 它们只能由一笔真实的
+          // 交易意图推进到，`ACTIVE` 推不出来。
+          //
+          // 为什么必须拦：`SOLD` / `RESERVED` 的闲置删掉后，买家那一侧的
+          // 「我已预留 / 我已拍下」就指向了一条对外不存在的商品，出了纠纷
+          // 双方都拿不出证据。要让它从市集消失，正解是联系客服走 `REMOVED`。
+          //
+          // 放在 `item.status = status` **之前**：`store.update` 的 mutator 抛错时
+          // 不会执行 `write()`，所以拒绝之后数据一个字节都没动。
+          if (status === 'DELETED' && ['RESERVED', 'SOLD'].includes(item.status)) {
+            throw new ApiError(409, 'MARKET_ITEM_HAS_TRADE', '该闲置已产生交易记录，无法删除；如需下架请联系客服');
+          }
           item.status = status;
           item.updatedAt = new Date().toISOString();
           addAudit(data, '更新二手商品状态', `${item.title} → ${status}`);

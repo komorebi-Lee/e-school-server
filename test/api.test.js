@@ -6847,3 +6847,197 @@ test('forum authors can hide and restore their own posts, and nobody else can', 
   assert.equal(seeded.liked, false, '⑦ 种子帖对匿名访客 liked 为 false');
   assert.equal(seeded.likes, 2, '⑦ 种子帖的 likes 计数不受影响');
 });
+
+test('marketplace sellers can soft-delete their own listing, but not one with a trade record', async (t) => {
+  const seller = await loginWeChat('market_mine_seller');
+  const other = await loginWeChat('market_mine_other');
+  const sellerAuth = { authorization: `Bearer ${seller.token}` };
+  const sellerJson = { 'content-type': 'application/json', ...sellerAuth };
+  const otherJson = { 'content-type': 'application/json', authorization: `Bearer ${other.token}` };
+
+  const createdIds = [];
+  const newItem = async (title, ownerJson = sellerJson) => {
+    const created = await api('/api/market/items', {
+      method: 'POST',
+      headers: ownerJson,
+      body: JSON.stringify({
+        title,
+        description: '用于验证卖家软删除的回归数据',
+        category: 'OTHER',
+        condition: 'GOOD',
+        priceInCents: 1000,
+        contact: '微信 test-soft-delete'
+      })
+    });
+    assert.equal(created.response.status, 201, `前置：应能发布闲置「${title}」`);
+    createdIds.push(created.body.data.id);
+    return created.body.data.id;
+  };
+  const setStatus = (id, status, headers = sellerJson) => api(`/api/market/items/${id}`, {
+    method: 'POST', headers, body: JSON.stringify({ status })
+  });
+
+  // ★ 用 `t.after` 清理，而不是在用例末尾写一行。
+  // 断言中途失败时末尾那行**永远不会执行**，我造的闲置会留在共享 store 里，
+  // 污染后面所有依赖市集列表的用例 —— T26 那次实测连带打红了 6 个无关用例。
+  t.after(() => {
+    store.update((data) => {
+      data.marketItems = (data.marketItems || []).filter((item) => !createdIds.includes(item.id));
+    });
+  });
+
+  // ==================== ⑥ 正向控制：既有三种状态的更新行为不变 ====================
+  const flowId = await newItem('状态流转回归');
+  for (const [status, statusText] of [['RESERVED', '已预留'], ['SOLD', '已出'], ['ACTIVE', '在售']]) {
+    const updated = await setStatus(flowId, status);
+    assert.equal(updated.response.status, 200, `⑥ 既有状态「${status}」的更新不得被这次改动影响`);
+    assert.equal(updated.body.data.statusText, statusText, `⑥ 「${status}」的 statusText 应正确`);
+  }
+
+  // ==================== ① 卖家软删除主路径 ====================
+  const deleteId = await newItem('可以删除的闲置');
+  assert.ok(
+    (await api('/api/market/items')).body.data.some((item) => item.id === deleteId),
+    '① 前置：新闲置应出现在公开列表里'
+  );
+  assert.equal((await api(`/api/market/items/${deleteId}`)).response.status, 200, '① 前置：详情此时可打开');
+
+  const deleted = await setStatus(deleteId, 'DELETED');
+  assert.equal(deleted.response.status, 200, '① ★ 卖家应能删除自己的闲置');
+  assert.equal(deleted.body.data.status, 'DELETED', '① 删除后状态应为 DELETED');
+  // ★ 这一条针对的是一个真实缺陷：`publicMarketItem` 的 statusText 原来是嵌套三元，
+  // **没有 DELETED 分支**，未知状态会掉进兜底的「在售」—— 删掉之后列表里显示「在售」。
+  assert.equal(
+    deleted.body.data.statusText, '已删除',
+    '① ★★ statusText 必须显示「已删除」，不得掉进兜底的「在售」（那是在断言一个假事实）'
+  );
+
+  assert.equal(
+    (await api('/api/market/items')).body.data.some((item) => item.id === deleteId), false,
+    '① ★ 删除后必须从公开列表消失'
+  );
+  const detailAfterDelete = await api(`/api/market/items/${deleteId}`);
+  assert.equal(
+    detailAfterDelete.response.status, 404,
+    '① ★★ 删除后详情必须 404 —— 否则拿到 id 就能绕过隐藏（详情里带着卖家的 contact）'
+  );
+  assert.equal(detailAfterDelete.body.error.code, 'MARKET_ITEM_NOT_FOUND');
+
+  // ==================== ② 非卖家 → 403（既有行为，作回归） ====================
+  const otherItemId = await newItem('别人不能删的闲置');
+  const forbidden = await setStatus(otherItemId, 'DELETED', otherJson);
+  assert.equal(forbidden.response.status, 403, '② ★ 非卖家不得删除别人的闲置');
+  assert.equal(forbidden.body.error.code, 'MARKET_ITEM_FORBIDDEN');
+  // ★ 拒绝必须是真的拒绝 —— 不是「先写了再抛」。
+  assert.equal(
+    (await api(`/api/market/items/${otherItemId}`)).response.status, 200,
+    '② ★ 403 之后闲置必须原样可见（证明没有先写后抛）'
+  );
+
+  // ==================== ③ 已产生交易记录 → 409 ====================
+  const soldId = await newItem('已售出的闲置');
+  assert.equal((await setStatus(soldId, 'SOLD')).response.status, 200, '③ 前置：置为已出');
+  const refusedSold = await setStatus(soldId, 'DELETED');
+  assert.equal(refusedSold.response.status, 409, '③ ★ 已售出的闲置不得删除');
+  assert.equal(refusedSold.body.error.code, 'MARKET_ITEM_HAS_TRADE');
+  // ★ 守卫必须写在 `item.status = status` **之前**：拒绝之后数据一个字节都不该动。
+  const soldStillThere = await api(`/api/market/items/${soldId}`);
+  assert.equal(soldStillThere.response.status, 200, '③ ★★ 409 之后闲置必须仍然存在');
+  assert.equal(soldStillThere.body.data.status, 'SOLD', '③ ★★ 409 之后状态必须仍是 SOLD（证明守卫在写入之前）');
+
+  const reservedId = await newItem('已预留的闲置');
+  assert.equal((await setStatus(reservedId, 'RESERVED')).response.status, 200, '③ 前置：置为已预留');
+  const refusedReserved = await setStatus(reservedId, 'DELETED');
+  assert.equal(refusedReserved.response.status, 409, '③ ★ 已预留的闲置同样不得删除');
+  assert.equal(refusedReserved.body.error.code, 'MARKET_ITEM_HAS_TRADE');
+
+  // ★ 边界另一侧：`ACTIVE` 的闲置**可以**删除（正向控制，证明不是「一律拒绝删除」）。
+  // 上面 ① 已经证明了这一点，这里再对同一批数据做一次对照。
+  const activeId = await newItem('在售的闲置');
+  assert.equal((await setStatus(activeId, 'DELETED')).response.status, 200, '③ ★ 正向控制：在售的闲置必须可以删除');
+
+  // ★ 已知局限（已上报 team-lead，见交付报告）：
+  // 这套数据模型里**没有** `buyerId` / `orderId` / `soldAt` 之类字段
+  //（全仓 `src/` 0 处命中），闲置与订单之间不存在任何关联记录。
+  // 所以「已产生交易记录」唯一的可观测代理就是 `status ∈ {RESERVED, SOLD}` ——
+  // 于是先 `SOLD → ACTIVE` 再 `DELETED` 可以绕过这道守卫。
+  // 这里**刻意把它钉住**：一旦将来补上持久化的交易标记，这条断言会转红，
+  // 逼迫改的人做一次有意识的决定，而不是让这个洞口无声地留着。
+  const reverted = await setStatus(soldId, 'ACTIVE');
+  assert.equal(reverted.response.status, 200, '③ 已知局限的前置：SOLD 可以退回 ACTIVE');
+  const bypassed = await setStatus(soldId, 'DELETED');
+  assert.equal(
+    bypassed.response.status, 200,
+    '③ ★ 已知局限（报告第 4 条）：退回 ACTIVE 后可绕过 MARKET_ITEM_HAS_TRADE —— '
+    + '模型里没有交易记录字段，守卫只能以 status 为代理。若这里转红，说明有人补上了持久化标记'
+  );
+
+  // ==================== ④ 「我发布的闲置」 ====================
+  const mine = await api('/api/my/market-items', { headers: sellerAuth });
+  assert.equal(mine.response.status, 200, '④ 「我发布的闲置」应可用');
+  const mineIds = mine.body.data.map((item) => item.id);
+  for (const id of createdIds) {
+    assert.ok(mineIds.includes(id), `④ ★ 自己发布的每条闲置（含非 ACTIVE）都必须出现在这里：${id}`);
+  }
+  // ★ 这条是这一页存在的意义：删掉 / 售出的必须仍看得到，
+  // 否则用户以为自己的闲置凭空消失了，也无从知道它现在是什么状态。
+  const mineDeleted = mine.body.data.find((item) => item.id === deleteId);
+  assert.ok(mineDeleted, '④ ★★ 已删除的闲置必须仍出现在「我发布的闲置」里');
+  assert.equal(mineDeleted.status, 'DELETED', '④ 「我发布的闲置」必须保留真实状态');
+  assert.equal(mineDeleted.statusText, '已删除', '④ 已删除的文案应为「已删除」');
+  assert.ok(
+    mine.body.data.some((item) => item.id === flowId && item.status === 'ACTIVE'),
+    '④ 在售的也应出现在这里'
+  );
+  // 不泄漏别人的。
+  const otherOwnId = await newItem('别人的闲置', otherJson);
+  const mineAgain = await api('/api/my/market-items', { headers: sellerAuth });
+  assert.equal(
+    mineAgain.body.data.some((item) => item.id === otherOwnId), false,
+    '④ ★ 不得从这条路径漏出别人的闲置'
+  );
+  const otherMine = await api('/api/my/market-items', { headers: otherJson });
+  assert.ok(otherMine.body.data.some((item) => item.id === otherOwnId), '④ 对方能在自己的列表里看到它');
+
+  const anonymous = await api('/api/my/market-items');
+  assert.equal(anonymous.response.status, 401, '④ ★ 未登录 → 401（「我发布的」没有匿名语义）');
+  assert.equal(anonymous.body.error.code, 'USER_UNAUTHORIZED');
+
+  // ==================== ⑤ REMOVED 回归 + 详情可见性 ====================
+  const adminHeaders = await loginAdmin();
+  const moderatedId = await newItem('平台下架回归');
+  const moderated = await api(`/api/admin/market-items/${moderatedId}/status`, {
+    method: 'POST', headers: adminHeaders, body: JSON.stringify({ status: 'REMOVED' })
+  });
+  assert.equal(moderated.response.status, 200, '⑤ 前置：管理端仍能把商品置为 REMOVED');
+  assert.equal(moderated.body.data.statusText, '已下架', '⑤ REMOVED 的文案仍是「已下架」');
+
+  const sellerAfterRemoval = await setStatus(moderatedId, 'SOLD');
+  assert.equal(sellerAfterRemoval.response.status, 403, '⑤ ★ 回归：卖家仍不能绕过平台下架');
+  assert.equal(sellerAfterRemoval.body.error.code, 'MARKET_ITEM_REMOVED');
+
+  // ★ 我新增的行为（详情端点补状态过滤）：REMOVED 的详情对所有人 404。
+  // 理由：平台下架是因为违规，`contact`（卖家的手机号 / 微信号）不该继续可达；
+  // 而且**卖家自己也不需要进这一页** —— 他改不回来（上面那条 403），页面无事可做。
+  const removedDetail = await api(`/api/market/items/${moderatedId}`);
+  assert.equal(
+    removedDetail.response.status, 404,
+    '⑤ ★★ 平台下架的闲置详情必须 404（内容与联系方式不该继续可达）'
+  );
+  assert.equal(removedDetail.body.error.code, 'MARKET_ITEM_NOT_FOUND');
+  assert.equal(
+    (await api(`/api/market/items/${moderatedId}`, { headers: sellerAuth })).response.status, 404,
+    '⑤ 卖家自己也不能打开被平台下架的闲置（他无法在页面上做任何事）'
+  );
+
+  // ==================== ⑤ 回归：既有非法状态仍 400 ====================
+  for (const badStatus of ['REMOVED', 'PUBLISHED', '', 'deleted']) {
+    const bad = await setStatus(flowId, badStatus);
+    assert.equal(bad.response.status, 400, `⑤ ★ 非法 status「${badStatus}」必须 400（卖家不得自行置 REMOVED）`);
+    assert.equal(bad.body.error.code, 'VALIDATION_ERROR');
+  }
+  assert.equal(
+    (await api(`/api/market/items/${flowId}`)).response.status, 200,
+    '⑤ 400 之后闲置必须原样可见（证明非法请求没有把数据写坏）'
+  );
+});

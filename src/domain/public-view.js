@@ -84,6 +84,34 @@ const forumBoardLabels = {
   RIDES: '拼车顺风'
 };
 
+/**
+ * 闲置状态 → 用户可见文案（M6-P1-01）。
+ *
+ * 之前这里是一串嵌套三元，**没有 `DELETED` 分支**，于是未知状态会掉进兜底的
+ * 「在售」—— 卖家删掉自己的闲置后，列表里那一条会显示成「在售」，
+ * 向用户断言了一个假事实。改成显式映射：新增状态时漏写会显示兜底文案，
+ * 而不是被误标成在售。
+ *
+ * `DELETED` = 卖家软删除（本人可在「我发布的闲置」看到）；
+ * `REMOVED` = 平台违规下架（卖家自己也不能改回来，见 `MARKET_ITEM_REMOVED`）。
+ */
+const marketItemStatusLabels = {
+  ACTIVE: '在售',
+  RESERVED: '已预留',
+  SOLD: '已出',
+  DELETED: '已删除',
+  REMOVED: '已下架'
+};
+
+/**
+ * 对**公众**可见的闲置状态。
+ *
+ * 主列表按 `ACTIVE` 过滤；详情端点用这个集合 —— 详情此前没有任何状态过滤，
+ * 拿到 id 就能直接打开，`contact`（卖家的手机号 / 微信号）会照常返回。
+ * 平台下架是因为违规，内容与联系方式都不该继续可达。
+ */
+const MARKET_ITEM_PUBLIC_STATUSES = ['ACTIVE', 'RESERVED', 'SOLD'];
+
 function publicMarketItem(item) {
   const price = Math.round((Number(item.priceInCents) || 0) / 100);
   return {
@@ -100,7 +128,9 @@ function publicMarketItem(item) {
     images: Array.isArray(item.images) ? item.images.slice(0, 6) : [],
     contact: item.contact || '通过平台客服联系',
     status: item.status,
-    statusText: item.status === 'SOLD' ? '已出' : item.status === 'RESERVED' ? '已预留' : item.status === 'REMOVED' ? '已下架' : '在售',
+    // ★ 走显式映射表，不再用嵌套三元。旧写法没有 `DELETED` 分支，
+    // 卖家删除后列表里会显示成「在售」—— 那是在向用户断言一个假事实。
+    statusText: marketItemStatusLabels[item.status] || '在售',
     createdAt: item.createdAt,
     updatedAt: item.updatedAt
   };
@@ -186,4 +216,4 @@ function publicAdminUser(user) {
   };
 }
 
-module.exports = { publicSettings, sanitizeOrderForMerchant, publicApplication, merchantPublic, withMerchantName, marketCategoryLabels, marketConditionLabels, forumBoardLabels, publicMarketItem, publicForumComment, publicForumPost, publicStorefrontReviews, publicAdminUser };
+module.exports = { publicSettings, sanitizeOrderForMerchant, publicApplication, merchantPublic, withMerchantName, marketCategoryLabels, marketConditionLabels, marketItemStatusLabels, MARKET_ITEM_PUBLIC_STATUSES, forumBoardLabels, publicMarketItem, publicForumComment, publicForumPost, publicStorefrontReviews, publicAdminUser };
