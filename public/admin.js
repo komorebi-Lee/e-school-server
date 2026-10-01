@@ -1,7 +1,7 @@
 const savedAdminUser=JSON.parse(localStorage.getItem('shishan_admin_user')||'null');
 const state={data:null,revenueTrend:null,view:'dashboard',query:'',status:'ALL',ownerFilter:'ALL',token:localStorage.getItem('shishan_admin_token')||'',user:savedAdminUser};
 const lowStockThreshold=Number((state.data.settings||{}).lowStockThreshold??10);
-const titles={dashboard:'经营概览',merchants:'商家入驻',qualification:'资质复审',products:'商品中心',stock:'库存流水',promos:'话费活动',reviews:'商品评价',market:'市集商品',forum:'学校论坛',orders:'电瓶车订单',payments:'支付单',phones:'电话卡订单',recharges:'话费权益',finance:'财务流水',broadband:'宽带资格',plates:'牌照辅助',afterSales:'售后工单',notifications:'站内通知',logs:'操作日志',settings:'运营设置',settlements:'商家结算',payouts:'商家提现',patrol:'超时预警',scores:'商家服务分'};
+const titles={dashboard:'经营概览',merchants:'商家入驻',qualification:'资质复审',products:'商品中心',stock:'库存流水',promos:'话费活动',reviews:'商品评价',market:'市集商品',forum:'学校论坛',orders:'电瓶车订单',payments:'支付单',phones:'电话卡订单',recharges:'话费权益',finance:'财务流水',broadband:'宽带资格',plates:'牌照辅助',afterSales:'售后工单',notifications:'站内通知',logs:'操作日志',settings:'运营设置',settlements:'商家结算',payouts:'商家提现',patrol:'超时预警',scores:'商家服务分',rentals:'租赁管理'};
 titles.serviceCollabs='服务单协同';
 const statuses={PENDING_PAYMENT:'待支付',PAID:'已支付',FULFILLING:'配送中',COMPLETED:'已完成',CANCELLED:'已取消',PENDING:'待支付',EXPIRED:'支付超时',PARTIALLY_REFUNDED:'部分退款',REFUNDED:'已退款',PENDING_REALNAME:'待实名',ACTIVATED:'已激活',PENDING_CREDIT:'待到账',CREDITED:'已到账',PENDING_VERIFY:'待核验',APPROVED:'已通过',REJECTED:'未通过',MATERIAL_PENDING:'待材料',REVIEWING:'处理中',SUBMITTED:'待审核',CLOSED:'已关闭',AFTER_SALE:'售后中',REJECTED:'未通过',PUBLISHED:'已展示',HIDDEN:'已隐藏',PENDING_SETTLE:'可结算',SETTLED:'已结算',PENDING_DELIVERY:'待交付核验',IN_ACCOUNT_PERIOD:'账期中',FROZEN:'售后冻结',PAYOUT_REQUESTED:'提现待审核',PENDING_REVIEW:'待审核',OPEN:'待认领',ACKNOWLEDGED:'已认领',RESOLVED:'已关闭',OVERDUE:'已超时',WARNING:'即将超时',NORMAL:'正常经营',LIMITED:'限流整改',RESTRICTED:'暂停上新',EXCELLENT:'优秀',GOOD:'良好',WATCH:'观察',RISK:'高风险',AUTO:'自动上架',MATCHED:'账实相符',DIFFERENCES:'存在差异'};
 const endpointTypes={orders:'orders',phones:'phone-card-orders',recharges:'recharge-orders',broadband:'broadband-applications',plates:'plate-applications',afterSales:'after-sales'};
@@ -21,7 +21,7 @@ async function login(username,password){const response=await fetch('/api/admin/l
 function logout(){localStorage.removeItem('shishan_admin_token');localStorage.removeItem('shishan_admin_user');state.token='';state.user=null;document.querySelector('#appShell').classList.add('hidden');document.querySelector('#loginPage').classList.remove('hidden')}
 function showApp(){renderAdminIdentity();document.querySelector('#loginPage').classList.add('hidden');document.querySelector('#appShell').classList.remove('hidden')}
 function renderAdminIdentity(){const user=state.user||{name:'运营管理员',roleLabel:'管理员'};const box=document.querySelector('.sidebar-user');if(!box)return;box.querySelector('strong').textContent=user.name||user.username||'运营管理员';box.querySelector('small').textContent=user.roleLabel||user.role||'管理员';box.querySelector('.avatar').textContent=(user.name||user.username||'运').slice(0,1)}
-async function load(){document.querySelector('#syncState').textContent='正在同步';state.data=await api('/api/admin/overview');try{state.revenueTrend=await api('/api/admin/revenue-trend?days=7')}catch(error){state.revenueTrend=null}const settings=state.data.settings||{};const school=document.querySelector('#sidebarSchool');const campus=document.querySelector('#sidebarCampus');if(school)school.textContent=settings.schoolName||'华中农业大学';if(campus)campus.textContent=settings.campusName||'狮山校区';document.querySelector('#syncState').textContent=`已同步 ${new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}`;render()}
+async function load(){document.querySelector('#syncState').textContent='正在同步';state.data=await api('/api/admin/overview');try{state.revenueTrend=await api('/api/admin/revenue-trend?days=7')}catch(error){state.revenueTrend=null}try{state.rentalDeposits=await api('/api/admin/rental-deposits');state.rentalDepositsError=''}catch(error){state.rentalDeposits=[];state.rentalDepositsError=error.message}const settings=state.data.settings||{};const school=document.querySelector('#sidebarSchool');const campus=document.querySelector('#sidebarCampus');if(school)school.textContent=settings.schoolName||'华中农业大学';if(campus)campus.textContent=settings.campusName||'狮山校区';document.querySelector('#syncState').textContent=`已同步 ${new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})}`;render()}
 
 const metric=(name,value,note,primary=false)=>`<div class="metric ${primary?'primary-metric':''}"><div class="metric-label">${name}</div><div class="metric-value">${value}</div><div class="metric-note">${note}</div></div>`;
 const task=(name,note,count,view)=>`<div class="task" data-goto="${view}"><div><strong>${name}</strong><p>${note}</p></div><div class="task-count">${count}</div></div>`;
@@ -236,7 +236,7 @@ function orderCollabDetail(order){
 }
 function notifications(){
   const items=(state.data.notifications||[]).filter(match);
-  const rows=items.slice(0,80).map(x=>`<tr><td><strong>${esc(x.title)}</strong><small>${esc(x.type)}</small></td><td>${esc(x.content)}</td><td><span class="badge ${x.read?'green':'orange'}">${x.read?'已读':'未读'}</span></td><td>${fmtDate(x.createdAt)}</td></tr>`).join('');
+  const rows=items.slice(0,80).map(x=>`<tr><td><strong>${esc(x.title)}</strong><small>${esc(x.type)}</small></td><td>${esc(x.content)}</td><td><span class="badge ${x.read?'green':'orange'}">${x.read?'已读':'未读'}</span></td><td>${fmtDate(x.createdAt)}</td></tr>`);
   const stats=state.data.subscribeStats||{queued:0,sent:0,failed:0};
   const messages=(state.data.subscribeMessages||[]).filter(match).slice(0,50);
   const queueRows=messages.map(x=>`<tr><td><strong>${esc(x.title)}</strong><small>${esc(x.templateId)}</small></td><td>${esc(x.content)}</td><td><span class="badge ${x.status==='SENT'?'green':x.status==='FAILED'?'red':'orange'}">${x.status==='SENT'?'已发送':x.status==='FAILED'?'发送失败':'待发送'}</span>${x.error?`<small>${esc(x.error)}</small>`:''}</td><td>${fmtDate(x.createdAt)}</td><td>${fmtDate(x.sentAt)}</td><td>${x.status==='FAILED'?`<button class="text-button retry-subscribe" data-id="${esc(x.id)}">重试</button>`:''}</td></tr>`).join('');
@@ -262,7 +262,7 @@ function merchants(){const q=state.query.toLowerCase();const items=(state.data.m
 function qualificationRenewalsView(){const items=(state.data.qualificationRenewals||[]).filter(match).filter(statusMatch);const pendingCount=items.filter(x=>x.status==='PENDING_REVIEW').length;const approvedCount=items.filter(x=>x.status==='APPROVED').length;const expiringCount=(state.data.merchants||[]).filter(x=>x.status==='APPROVED'&&x.licenseExpireDate&&new Date(`${x.licenseExpireDate}T00:00:00.000Z`).getTime()-Date.now()<30*24*3600*1000).length;const rows=items.map(x=>`<tr><td><strong>${esc(x.merchantName||x.merchantId)}</strong><small>${fmtDate(x.createdAt)}</small></td><td><strong>${esc(x.licenseNo)}</strong><small>当前有效期 ${esc(x.licenseExpireDate||'—')}</small></td><td>${x.licenseUrl?`<a class="license-link" href="${esc(x.licenseUrl)}" target="_blank">查看执照</a>`:'—'}${x.note?`<small>${esc(x.note)}</small>`:''}</td><td><span class="badge ${x.status==='APPROVED'?'green':x.status==='REJECTED'?'red':'orange'}">${label(x.status)}</span>${x.reviewNote?`<small>${esc(x.reviewNote)}</small>`:''}</td><td>${x.status==='PENDING_REVIEW'?`<div class="row-actions"><button class="text-button qualification-approve" data-id="${x.id}">通过</button><button class="text-button danger qualification-reject" data-id="${x.id}">驳回</button></div>`:'已处理'}</td></tr>`);return `<div class="metric-grid">${metric('待平台审核',pendingCount,'商家提交的新执照复审',true)}${metric('已复审通过',approvedCount,'通过后才更新正式资质')}${metric('30天内到期',expiringCount,'含到期当天')}</div>`+toolbar(items.length,{statusesList:['PENDING_REVIEW','APPROVED','REJECTED']})+table(['商家','新执照 / 有效期','凭证与说明','复审状态','操作'],rows,items.length)}
 function marketView(){const items=(state.data.marketItems||[]).filter(match).filter(statusMatch);const rows=items.map(item=>`<tr><td><strong>${esc(item.title)}</strong><small>${esc(item.sellerName)} · ${esc(item.id)}</small></td><td>${esc(item.categoryText)}</td><td>${esc(item.conditionText)}</td><td>${esc(item.priceText)}</td><td>${esc(item.contact)}</td><td>${fmtDate(item.createdAt)}</td><td><span class="badge ${item.status==='ACTIVE'?'green':'red'}">${esc(item.statusText)}</span></td><td><button class="table-button toggle-market" data-id="${esc(item.id)}" data-status="${item.status==='ACTIVE'?'REMOVED':'ACTIVE'}">${item.status==='ACTIVE'?'下架':'恢复'}</button></td></tr>`);return toolbar(items.length,{statusesList:['ACTIVE','RESERVED','SOLD','REMOVED']})+table(['商品','分类','成色','价格','联系方式','发布时间','状态','操作'],rows,items.length)}
 function forumView(){const posts=(state.data.forumPosts||[]).filter(match).filter(statusMatch);const rows=posts.map(post=>`<tr><td><strong>${esc(post.title)}</strong><small>${esc(post.authorName)} · ${esc(post.id)}</small></td><td>${esc(post.boardText)}</td><td>${esc(post.content)}</td><td>${post.likes} / ${post.commentCount}</td><td>${fmtDate(post.createdAt)}</td><td><span class="badge ${post.status==='PUBLISHED'?'green':'red'}">${post.status==='PUBLISHED'?'已发布':'已隐藏'}</span></td><td><button class="table-button toggle-forum" data-id="${esc(post.id)}" data-status="${post.status==='PUBLISHED'?'HIDDEN':'PUBLISHED'}">${post.status==='PUBLISHED'?'隐藏':'恢复'}</button></td></tr>`);return toolbar(posts.length,{statusesList:['PUBLISHED','HIDDEN']})+table(['帖子','板块','内容','赞/评论','时间','状态','操作'],rows,posts.length)}
-function render(){document.querySelector('#pageTitle').textContent=titles[state.view];document.querySelector('#breadcrumb').textContent=titles[state.view];const views={dashboard,merchants,qualification:qualificationRenewalsView,leads,products,stock:stockMovementsView,promos,reviews,market:marketView,forum:forumView,orders,payments,phones,recharges,finance,serviceCollabs,settlements:settlementsView,payouts:payoutsView,patrol:patrolView,scores:scoresView,broadband,plates,afterSales,notifications,logs,settings};document.querySelector('#content').innerHTML=views[state.view]();bindView()}
+function render(){document.querySelector('#pageTitle').textContent=titles[state.view];document.querySelector('#breadcrumb').textContent=titles[state.view];const views={dashboard,merchants,qualification:qualificationRenewalsView,leads,products,stock:stockMovementsView,promos,reviews,market:marketView,forum:forumView,orders,payments,phones,recharges,finance,serviceCollabs,settlements:settlementsView,payouts:payoutsView,rentals:rentalsView,patrol:patrolView,scores:scoresView,broadband,plates,afterSales,notifications,logs,settings};document.querySelector('#content').innerHTML=views[state.view]();bindView()}
 function bindView(){document.querySelector('#listSearch')?.addEventListener('input',e=>{state.query=e.target.value;render();document.querySelector('#listSearch')?.focus()});document.querySelector('#statusFilter')?.addEventListener('change',e=>{state.status=e.target.value;render()});document.querySelector('#addProduct')?.addEventListener('click',()=>openProduct());document.querySelectorAll('.edit-product').forEach(b=>b.addEventListener('click',()=>openProduct(state.data.products.find(p=>p.id===b.dataset.id))));document.querySelector('#addPromo')?.addEventListener('click',()=>openPromo());document.querySelectorAll('.edit-promo').forEach(b=>b.addEventListener('click',()=>openPromo((state.data.rechargePromos||[]).find(p=>p.id===b.dataset.id))));document.querySelectorAll('.toggle-promo').forEach(b=>b.addEventListener('click',async()=>{const promo=(state.data.rechargePromos||[]).find(p=>p.id===b.dataset.id);if(!promo)return;await api('/api/admin/recharge-promos',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...promo,payInCents:promo.pay*100,receiveInCents:promo.receive*100,active:b.dataset.active==='true'})});showToast('活动状态已更新');await load()}));document.querySelectorAll('.save-status').forEach(b=>b.addEventListener('click',()=>saveStatus(b)));document.querySelectorAll('[data-merchant]').forEach(b=>b.addEventListener('click',async()=>{const status=b.dataset.status;const note=status==='REJECTED'?prompt('请填写驳回原因')||'资质材料不符合要求':prompt('请填写审核备注','资质信息已核对')||'';await api(`/api/admin/merchants/${b.dataset.merchant}/status`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({status,reviewNote:note})});showToast('商家状态已更新');await load()}));document.querySelectorAll('.detail-button').forEach(b=>b.addEventListener('click',()=>openDetail(b.dataset.view,b.dataset.id)));document.querySelector('#exportButton')?.addEventListener('click',exportCurrent);document.querySelector('#settingsForm')?.addEventListener('submit',saveSettings);document.querySelectorAll('[data-goto]').forEach(x=>x.addEventListener('click',()=>goView(x.dataset.goto)))}
 function bindCollab(){document.querySelectorAll('.platform-collab').forEach(b=>b.addEventListener('click',async()=>{const action=b.dataset.action;const note=prompt(action==='INTERVENE'?'请填写平台介入说明':'请填写平台处理结果',action==='INTERVENE'?'已联系商家和用户，核实订单问题。':'已确认解决方案，订单继续履约。');if(!note)return;await api('/api/order-collab',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({role:'PLATFORM',action,orderId:b.dataset.id,note})});showToast('平台协同已记录');await load()}))}
 const baseBindServiceCollab=bindView;
@@ -1255,5 +1255,138 @@ bindView = function () {
       showToast(status === 'HIDDEN' ? '帖子已隐藏，用户端不再展示' : '帖子已恢复展示');
       await load();
     }).catch((error) => showToast(error.message));
+  }));
+};
+
+// ── 租赁押金管理视图 ──────────────────────────────────────────────────────────
+// 补的是租赁功能**最后一个真实缺口**。T32~T40 已经把
+// 「下单冻结押金 → 归还后转 REFUND_PENDING → 平台结算」这条链路建好了，
+// 服务端两个端点也都在（`GET /api/admin/rental-deposits`、
+// `POST /api/admin/rental-deposits/:id/settle`，权限均为 FINANCE_MANAGE），
+// 但管理端**没有任何界面**去消费它们 —— 押金会永远停在 `REFUND_PENDING`，
+// 用户的钱退不回来。本视图就是那条链路的最后一步。
+//
+// 取数方式：`/api/admin/overview` **不含** `rentalDeposits`，所以数据由 `load()`
+// 单独拉取后挂在 `state.rentalDeposits` 上 —— 与 `state.revenueTrend` 同一处置方式
+// （overview 之外的专用端点数据不塞进 `state.data`，避免制造第二个数据来源）。
+//
+// 角色感知：本视图**不做**按角色隐藏。`admin.js` 目前没有任何「按 role 隐藏视图/导航」
+// 的机制（`state.user` 只用于侧边栏身份显示与「不许停用自己」两处判断），
+// 权限由服务端的 FINANCE_MANAGE 兜底：非 FINANCE/SUPER_ADMIN 点开会拿到 401/403 提示。
+// 为这一处新造一套前端权限体系，收益远小于它带来的分叉风险。
+const rentalDepositStatusLabels = {
+  HELD: '冻结中',
+  REFUND_PENDING: '待结算',
+  REFUNDED: '已退回',
+  PARTIALLY_REFUNDED: '扣款后已退回'
+};
+
+// 分组口径与状态机的可结算条件严格对齐：`settleRentalDeposit` 只接受
+// `REFUND_PENDING`（`rental.js` 的 `RENTAL_DEPOSIT_SETTLEABLE_STATUS`），
+// 所以「需要管理员动手」的组有且只有这一个状态。
+// 三个分组对 `RENTAL_DEPOSIT_STATUSES` 的四个状态**穷尽且互斥**，一个不漏。
+const rentalDepositGroups = [
+  { key: 'PENDING', title: '待处理押金', hint: '用户已归还车辆，等待平台结算：全额退回或扣款后退回', statuses: ['REFUND_PENDING'] },
+  { key: 'SETTLED', title: '已结算', hint: '钱已结清，状态不可再改动', statuses: ['REFUNDED', 'PARTIALLY_REFUNDED'] },
+  { key: 'HELD', title: '冻结中', hint: '车辆尚未归还，押金仍在冻结', statuses: ['HELD'] }
+];
+
+function rentalDepositBadge(status) {
+  if (status === 'REFUND_PENDING') return 'orange';
+  if (status === 'REFUNDED') return 'green';
+  if (status === 'PARTIALLY_REFUNDED') return 'blue';
+  return '';
+}
+
+function rentalDepositRow(item) {
+  const amountInCents = Number(item.amountInCents) || 0;
+  const deductionInCents = Number(item.deductionInCents) || 0;
+  const settled = item.status === 'REFUNDED' || item.status === 'PARTIALLY_REFUNDED';
+  // ★ 金额一律走 `money()` —— 本文件**唯一**的金额格式化入口。
+  // 这里绝不另写定点小数格式化、也不手拼货币符号：两份实现迟早漂移，
+  // 而 `admin.js` 也无法 require 小程序侧的 `formatYuan`。
+  const amountCell = settled
+    ? `<strong>${money(item.refundedInCents)}</strong><small>退回 / 押金 ${money(amountInCents)}${deductionInCents ? ` · 已扣 ${money(deductionInCents)}` : ''}</small>`
+    : `<strong>${money(amountInCents)}</strong><small>${item.status === 'HELD' ? '待用户归还车辆' : '等待平台结算'}</small>`;
+  const actions = item.status === 'REFUND_PENDING'
+    ? `<div class="row-actions"><button class="text-button settle-deposit" data-id="${esc(item.id)}" data-amount="${amountInCents}">全额退回</button><button class="text-button danger settle-deposit-partial" data-id="${esc(item.id)}" data-amount="${amountInCents}">扣款后退回</button></div>`
+    : '<span class="muted-empty">已处理</span>';
+  return `<tr>
+      <td><strong>${esc(item.orderNo || item.orderId)}</strong><small>${esc(item.id)}</small></td>
+      <td>${esc(item.merchantName || item.merchantId || '—')}<small>${esc(item.userName || item.userId || '')}</small></td>
+      <td>${amountCell}</td>
+      <td><span class="badge ${rentalDepositBadge(item.status)}">${esc(rentalDepositStatusLabels[item.status] || item.status)}</span>${item.deductionNote ? `<small>${esc(item.deductionNote)}</small>` : ''}</td>
+      <td>${fmtDate(item.settledAt || item.createdAt)}${item.settledBy ? `<small>${esc(item.settledBy)}</small>` : ''}</td>
+      <td>${actions}</td>
+    </tr>`;
+}
+
+function rentalsView() {
+  // 读取失败必须显式说出来：静默渲染成「没有押金」会让管理员以为账是平的。
+  if (state.rentalDepositsError) {
+    return `<div class="metric-grid">${metric('押金读取失败', '—', esc(state.rentalDepositsError), true)}</div>`;
+  }
+  const all = (state.rentalDeposits || []).filter(match);
+  const sumBy = (statuses) => all.filter((item) => statuses.includes(item.status)).reduce((total, item) => total + (Number(item.amountInCents) || 0), 0);
+  const countBy = (statuses) => all.filter((item) => statuses.includes(item.status)).length;
+  const settledStatuses = ['REFUNDED', 'PARTIALLY_REFUNDED'];
+  const cards = `<div class="metric-grid">
+    ${metric('待结算押金', money(sumBy(['REFUND_PENDING'])), `${countBy(['REFUND_PENDING'])} 笔等待平台处理`, true)}
+    ${metric('冻结中押金', money(sumBy(['HELD'])), `${countBy(['HELD'])} 笔车辆未归还`)}
+    ${metric('已结算押金', money(sumBy(settledStatuses)), `${countBy(settledStatuses)} 笔已结清`)}
+    ${metric('累计扣款', money(all.reduce((total, item) => total + (Number(item.deductionInCents) || 0), 0)), '扣款所得暂挂平台待分配')}
+  </div>`;
+  // 分组而不是平铺：管理员打开这一页只需要看「哪几笔该我动手」。
+  // 不给 `toolbar` 传 statusesList —— 分组本身已经按状态切好了，
+  // 再加一个状态下拉会在同一页里出现两套状态口径（分组用中文别名、下拉走 statuses 表）。
+  const sections = rentalDepositGroups.map((group) => {
+    const items = all.filter((item) => group.statuses.includes(item.status));
+    return `<section class="panel rental-deposit-group" data-group="${group.key}" style="margin-top:16px"><div class="panel-head"><h2>${group.title}</h2><span>${group.hint}</span></div>${table(['押金单 / 订单', '商家 / 用户', '金额', '状态', '时间', '操作'], items.map(rentalDepositRow), items.length)}</section>`;
+  }).join('');
+  return cards + toolbar(all.length, {}) + sections;
+}
+
+const baseBindRentalsView = bindView;
+bindView = function () {
+  baseBindRentalsView();
+  document.querySelectorAll('.settle-deposit').forEach((button) => button.addEventListener('click', async () => {
+    const amountInCents = Number(button.dataset.amount) || 0;
+    const note = prompt(`确认向用户全额退回押金 ${money(amountInCents)}？\n该操作不可撤销，确认后押金状态变为「已退回」。\n\n可填写备注`, '用户已按期归还车辆，车况正常');
+    if (note === null) return;
+    try {
+      await api(`/api/admin/rental-deposits/${encodeURIComponent(button.dataset.id)}/settle`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deductionInCents: 0, note: String(note).trim() })
+      });
+      showToast(`已全额退回 ${money(amountInCents)}`);
+      await load();
+    } catch (error) {
+      showToast(error.message);
+    }
+  }));
+  document.querySelectorAll('.settle-deposit-partial').forEach((button) => button.addEventListener('click', async () => {
+    const amountInCents = Number(button.dataset.amount) || 0;
+    // ★ 输入口径为「元」，提交口径为「分」：`admin.js` 里所有金额输入框
+    // （牌照费 / 配送费 / 起提金额）都是「元显示、分提交」，唯一数值型 prompt 先例
+    // 也走 `Number(...)`。后端 `settleRentalDeposit` 要的是**非负整数分**，
+    // 所以这里 `Math.round(Number(输入) * 100)` 之后再提交。
+    const input = prompt(`填写扣款金额（元），将从押金 ${money(amountInCents)} 中扣除，余额退回用户。\n金额需为不小于 0 的数字；全额退回请改用「全额退回」。`, '0');
+    if (input === null) return;
+    const yuan = Number(input);
+    if (!Number.isFinite(yuan) || yuan < 0) return showToast('扣款金额需为不小于 0 的数字（元）');
+    const deductionInCents = Math.round(yuan * 100);
+    if (deductionInCents > amountInCents) return showToast(`扣款不得超过押金 ${money(amountInCents)}`);
+    const note = prompt('填写扣款说明（会记入押金记录，可留空）', '车辆归还时存在损坏，按平台定损扣除');
+    if (note === null) return;
+    try {
+      await api(`/api/admin/rental-deposits/${encodeURIComponent(button.dataset.id)}/settle`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ deductionInCents, note: String(note).trim() })
+      });
+      showToast(deductionInCents === 0 ? `已全额退回 ${money(amountInCents)}` : `已扣 ${money(deductionInCents)}，退回 ${money(amountInCents - deductionInCents)}`);
+      await load();
+    } catch (error) {
+      showToast(error.message);
+    }
   }));
 };
