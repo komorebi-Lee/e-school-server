@@ -109,6 +109,9 @@ const seedMerchants = [
     merchantType: 'INDIVIDUAL',
     name: '狮山校园车行',
     ownerName: '范毅',
+    // 这是**演示商家的对外联系电话**，与 `adminSettings.servicePhone`
+    // （客服联系方式权威值，见下方 `seedAdminState.adminSettings`）恰好同号，
+    // 但两者语义不同：本字段属于商家资料，随入驻/资料修改变化，**不是客服号**。
     phone: '15527111396',
     licenseNo: 'DEMO_LICENSE_001',
     category: 'E_BIKE',
@@ -342,6 +345,12 @@ function initialData() {
       brandName: '狮山智生活',
       schoolName: '华中农业大学',
       campusName: '狮山校区',
+      // ★ 客服联系方式的**权威值**。`POST /api/admin/settings` 的字段白名单
+      //   （`src/app.js`）含 `servicePhone` / `serviceWechat`，管理员改的就是这里；
+      //   小程序端 `GET /api/business-config` 读到的也是这里。
+      //   客户端 `services/business.js` 另有一份同号的**兜底常量**
+      //   （`FALLBACK_SERVICE_CONTACT`），仅在配置读取失败时使用。
+      //   两者**刻意保持独立**，不得互相引用：跨进程、且权威性不同。
       servicePhone: '15527111396',
       serviceWechat: '15527111396',
       externalPlateFeeInCents: 4900,
