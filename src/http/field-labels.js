@@ -44,6 +44,7 @@ const FIELD_LABELS = {
   type: '类型',
   decision: '审核决定',
   visibility: '可见性',
+  // `note` 覆盖财务工单确认、SLA 告警确认、退款备注、售后备注。
   note: '备注',
   reason: '原因说明',
   reasonType: '申诉原因',
@@ -80,7 +81,7 @@ const FIELD_LABELS = {
   title: '标题',
   description: '描述',
   content: '内容',
-  // `note` 覆盖财务工单确认、SLA 告警确认、退款备注、售后备注。
+  // `platformNotice` 是管理端下发、展示在小程序首页的公告正文。
   platformNotice: '平台公告',
 
   // ---- 市集 / 论坛 ----

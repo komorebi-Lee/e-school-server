@@ -6,6 +6,7 @@ const { createPaymentProvider } = require('./payment-provider');
 const { ApiError } = require('./http/api-error');
 const { sendJson, normalizeCorsOrigins, resolveCorsOrigin, sendStatic } = require('./http/respond');
 const { requireString } = require('./http/body');
+const { notFoundMessage, productNotFoundMessage } = require('./http/error-messages');
 const { localDateKey, normalizeTimeSlot, normalizeDateValue, financeTaskDueAt } = require('./utils/time');
 const {
   availableStock,
@@ -238,7 +239,7 @@ async function readJson(request) {
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-  if (size > 8 * 1024 * 1024) throw new ApiError(413, 'PAYLOAD_TOO_LARGE', 'Request body exceeds 8 MB');
+  if (size > 8 * 1024 * 1024) throw new ApiError(413, 'PAYLOAD_TOO_LARGE', '请求体超过 8 MB 上限');
     chunks.push(chunk);
   }
   if (chunks.length === 0) return {};
@@ -248,7 +249,7 @@ async function readJson(request) {
     request.rawBody = rawBody;
     return body;
   } catch {
-    throw new ApiError(400, 'INVALID_JSON', 'Request body must be valid JSON');
+    throw new ApiError(400, 'INVALID_JSON', '请求体必须是合法的 JSON');
   }
 }
 
@@ -377,7 +378,7 @@ function createApp({
     return store.update((data) => {
       if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
       const paymentOrder = data.paymentOrders.find((item) => item.id === paymentId);
-      if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+      if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
       if (paymentOrder.status === 'REFUNDED') return { paymentOrder, duplicate: true };
       if (paymentOrder.status !== 'PAID') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅已支付单可退款');
       const now = new Date().toISOString();
@@ -451,7 +452,7 @@ function createApp({
   async function handleLatePaymentCallback(paymentOrder, providerPayment) {
     const captured = store.update((data) => {
       const currentPayment = (data.paymentOrders || []).find((item) => item.id === paymentOrder.id);
-      if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+      if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
       if (currentPayment.status !== 'CANCELLED') return { paymentOrder: currentPayment, duplicate: true };
 
       const now = new Date().toISOString();
@@ -528,7 +529,7 @@ function createApp({
   function settlePaymentOrder(paymentId, providerPayment, source = 'USER_CONFIRM') {
     return store.update((data) => {
       const paymentOrder = (data.paymentOrders || []).find((item) => item.id === paymentId);
-      if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+      if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
       if (paymentOrder.status !== 'PENDING') return { paymentOrder, duplicate: true };
 
       const order = data.orders.find((item) => item.id === paymentOrder.orderId && item.userId === paymentOrder.userId);
@@ -536,7 +537,7 @@ function createApp({
       const phoneCardOrder = data.phoneCardOrders.find((item) => item.id === paymentOrder.businessId && item.userId === paymentOrder.userId);
       const plateApplication = (data.plateApplications || []).find((item) => item.id === paymentOrder.businessId && item.userId === paymentOrder.userId && item.paymentOrderId === paymentOrder.id);
       if (!order && !rechargeOrder && !phoneCardOrder && !plateApplication) {
-        throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+        throw new ApiError(404, 'ORDER_NOT_FOUND', notFoundMessage('ORDER_NOT_FOUND'));
       }
 
       const now = new Date().toISOString();
@@ -1491,7 +1492,7 @@ function createApp({
   }
 
   function settleMerchant(data, merchantId, now, reference) {
-    if (!Array.isArray(data.settlements)) throw new ApiError(404, 'SETTLEMENT_NOT_FOUND', 'Settlement record not found');
+    if (!Array.isArray(data.settlements)) throw new ApiError(404, 'SETTLEMENT_NOT_FOUND', notFoundMessage('SETTLEMENT_NOT_FOUND'));
     releaseMaturedSettlements(data, now);
     const settlements = data.settlements.filter((item) => item.merchantId === merchantId && item.settlementStatus === 'PENDING_SETTLE');
     if (!settlements.length) {
@@ -1509,7 +1510,7 @@ function createApp({
         const detail = [...new Set(blocked.map((item) => reasons[item.settlementStatus]))].join('、');
         throw new ApiError(409, 'SETTLEMENT_NOT_RELEASED', `暂无可结算金额：${detail}`);
       }
-      throw new ApiError(404, 'PENDING_SETTLEMENT_NOT_FOUND', 'No pending settlement');
+      throw new ApiError(404, 'PENDING_SETTLEMENT_NOT_FOUND', notFoundMessage('PENDING_SETTLEMENT_NOT_FOUND'));
     }
     let totalInCents = 0;
     for (const settlement of settlements) {
@@ -3611,7 +3612,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const requested = pathname === '/admin' ? 'admin.html' : pathname.slice('/admin/'.length);
         const safeName = path.basename(requested);
         if (sendStatic(response, path.join(publicRoot, safeName))) return;
-        throw new ApiError(404, 'ADMIN_ASSET_NOT_FOUND', 'Admin asset not found');
+        throw new ApiError(404, 'ADMIN_ASSET_NOT_FOUND', notFoundMessage('ADMIN_ASSET_NOT_FOUND'));
       }
 
       if (request.method === 'POST' && pathname === '/api/admin/login') {
@@ -3765,7 +3766,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const campusName = body.campusName === undefined ? undefined : String(body.campusName || '').trim().slice(0, 40);
           const updated = store.update((data) => {
             const item = (data.addresses || []).find((row) => row.id === addressMatch[1] && row.userId === userId);
-            if (!item) throw new ApiError(404, 'ADDRESS_NOT_FOUND', 'Address not found');
+            if (!item) throw new ApiError(404, 'ADDRESS_NOT_FOUND', notFoundMessage('ADDRESS_NOT_FOUND'));
             if (address !== undefined) item.address = address;
             if (contactName !== undefined) item.contactName = contactName;
             if (contactPhone !== undefined) item.contactPhone = contactPhone;
@@ -3787,7 +3788,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             data.addresses ||= [];
             const before = data.addresses.length;
             data.addresses = data.addresses.filter((item) => !(item.id === addressMatch[1] && item.userId === userId));
-            if (data.addresses.length === before) throw new ApiError(404, 'ADDRESS_NOT_FOUND', 'Address not found');
+            if (data.addresses.length === before) throw new ApiError(404, 'ADDRESS_NOT_FOUND', notFoundMessage('ADDRESS_NOT_FOUND'));
             const remaining = data.addresses.filter((item) => item.userId === userId);
             if (remaining.length && !remaining.some((item) => item.isDefault)) {
               const nextDefault = sortAddresses(remaining)[0];
@@ -3860,7 +3861,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const productId = requireString(body.productId, 'productId', { maxLength: 80 });
         const result = store.update((data) => {
           const product = data.products.find((item) => item.id === productId && item.active);
-          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', notFoundMessage('PRODUCT_NOT_FOUND'));
           data.productFootprints = data.productFootprints || [];
           data.productFootprints = data.productFootprints.filter((item) => !(
             item.productId === product.id && item.userId === userId
@@ -3976,7 +3977,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           const result = store.update((data) => {
             const product = data.products.find((item) => item.id === productFavoriteMatch[1] && item.active);
-            if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+            if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', notFoundMessage('PRODUCT_NOT_FOUND'));
             data.productFavorites = data.productFavorites || [];
             const existing = data.productFavorites.find((item) => (
               item.productId === product.id && item.userId === userId
@@ -3997,7 +3998,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const data = store.read();
         const product = data.products.find((item) => item.id === restockAlertMatch[1] && item.active);
-        if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+        if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', notFoundMessage('PRODUCT_NOT_FOUND'));
         const item = (data.productRestockAlerts || []).find((row) => (
           row.productId === product.id && row.userId === userId && row.status === 'WAITING'
         ));
@@ -4020,7 +4021,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }
         const result = store.update((data) => {
           const product = (data.products || []).find((item) => item.id === restockAlertMatch[1] && item.active);
-          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', notFoundMessage('PRODUCT_NOT_FOUND'));
           if (availableStock(product) > 0) throw new ApiError(409, 'PRODUCT_IN_STOCK', '商品当前可购，无需登记到货提醒');
           data.productRestockAlerts ||= [];
           const existing = data.productRestockAlerts.find((item) => (
@@ -4075,7 +4076,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && adminUploadMatch) {
         const fileName = path.basename(adminUploadMatch[1]);
         const filePath = path.join(path.dirname(store.filePath), 'admin-receipts', fileName);
-        if (!fs.existsSync(filePath)) throw new ApiError(404, 'UPLOAD_NOT_FOUND', 'Upload not found');
+        if (!fs.existsSync(filePath)) throw new ApiError(404, 'UPLOAD_NOT_FOUND', notFoundMessage('UPLOAD_NOT_FOUND'));
         const extension = path.extname(filePath).toLowerCase();
         const mimeType = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }[extension] || 'application/octet-stream';
         response.writeHead(200, { 'content-type': mimeType, 'cache-control': 'private, max-age=3600' });
@@ -4087,7 +4088,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && uploadMatch) {
         const fileName = path.basename(uploadMatch[1]);
         const filePath = path.join(uploadsDirectory, fileName);
-        if (!fs.existsSync(filePath)) throw new ApiError(404, 'UPLOAD_NOT_FOUND', 'Upload not found');
+        if (!fs.existsSync(filePath)) throw new ApiError(404, 'UPLOAD_NOT_FOUND', notFoundMessage('UPLOAD_NOT_FOUND'));
         const extension = path.extname(filePath).toLowerCase();
         const mimeType = { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }[extension] || 'application/octet-stream';
         response.writeHead(200, { 'content-type': mimeType, 'cache-control': 'private, max-age=3600' });
@@ -4759,7 +4760,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         refreshScoresNow();
         const data = store.read();
         const product = data.products.find((item) => item.id === productMatch[1] && item.active);
-        if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+        if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', notFoundMessage('PRODUCT_NOT_FOUND'));
         const now = new Date().toISOString();
         const settings = publicSettings(data.adminSettings);
         const relatedProducts = orderProductsByExposure(data, data.products
@@ -4838,17 +4839,17 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const productId = requireString(body.productId, 'productId', { maxLength: 100 });
         const rating = Number(body.rating);
         const content = requireString(body.content, 'content', { maxLength: 500 });
-        if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new ApiError(400, 'VALIDATION_ERROR', 'rating must be an integer between 1 and 5');
+        if (!Number.isInteger(rating) || rating < 1 || rating > 5) throw new ApiError(400, 'VALIDATION_ERROR', '评分必须是 1 到 5 之间的整数');
         const images = Array.isArray(body.images) ? body.images.slice(0, 3).map((image) => String(image || '').trim()) : [];
         if (images.some((image) => !image.startsWith('/api/uploads/'))) throw new ApiError(400, 'VALIDATION_ERROR', '评价图片必须来自平台上传目录');
         const review = store.update((data) => {
           const order = data.orders.find((item) => item.id === orderId && item.userId === userId);
-          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
-          if (order.status !== 'COMPLETED') throw new ApiError(409, 'ORDER_NOT_COMPLETED', 'Only completed orders can be reviewed');
-          if (!order.items.some((item) => item.productId === productId)) throw new ApiError(404, 'PRODUCT_NOT_IN_ORDER', 'Product not found in order');
+          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', notFoundMessage('ORDER_NOT_FOUND'));
+          if (order.status !== 'COMPLETED') throw new ApiError(409, 'ORDER_NOT_COMPLETED', '只有已完成的订单可以评价');
+          if (!order.items.some((item) => item.productId === productId)) throw new ApiError(404, 'PRODUCT_NOT_IN_ORDER', notFoundMessage('PRODUCT_NOT_IN_ORDER'));
           const records = data.productReviews = data.productReviews || [];
           if (records.some((item) => item.orderId === orderId && item.productId === productId)) {
-            throw new ApiError(409, 'REVIEW_ALREADY_EXISTS', 'This order product has already been reviewed');
+            throw new ApiError(409, 'REVIEW_ALREADY_EXISTS', '该订单商品已评价过');
           }
           const now = new Date().toISOString();
           const record = {
@@ -4905,7 +4906,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const action = requireString(body.action, 'action', { maxLength: 40 });
         const orderId = requireString(body.orderId, 'orderId', { maxLength: 80 });
         const note = requireString(body.note, 'note', { maxLength: 300 });
-        if (!['USER','MERCHANT','PLATFORM'].includes(role)) throw new ApiError(400,'VALIDATION_ERROR','Unsupported role');
+        if (!['USER','MERCHANT','PLATFORM'].includes(role)) throw new ApiError(400,'VALIDATION_ERROR','不支持的协作角色');
         const userSession = role === 'USER' ? requireUser(request) : null;
         if (role === 'USER' && body.userId && body.userId !== userSession.userId) {
           throw new ApiError(403, 'ORDER_FORBIDDEN', '不能以其他用户身份提交订单消息');
@@ -4919,7 +4920,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const serviceResult = store.update((data) => {
             const match = serviceRecordOwner(data, orderId);
             const item = match?.item;
-            if (!item) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+            if (!item) throw new ApiError(404, 'ORDER_NOT_FOUND', notFoundMessage('ORDER_NOT_FOUND'));
             if (role === 'USER' && item.userId !== userSession.userId) throw new ApiError(403, 'ORDER_FORBIDDEN', '无权操作该服务单');
             if (role === 'USER' && !['NOTE', 'APPEAL'].includes(action)) {
               throw new ApiError(409, 'ACTION_NOT_ALLOWED', '当前服务单不支持该用户动作');
@@ -4948,7 +4949,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }
         const order = store.update((data) => {
           const item = data.orders.find((row) => row.id === orderId);
-          if (!item) throw new ApiError(404,'ORDER_NOT_FOUND','Order not found');
+          if (!item) throw new ApiError(404,'ORDER_NOT_FOUND',notFoundMessage('ORDER_NOT_FOUND'));
           if (role === 'USER' && item.userId !== userSession.userId) throw new ApiError(403,'ORDER_FORBIDDEN','无权操作该订单');
           item.collaboration ||= createCollaboration(item, item.items[0]?.merchantId || '');
           if (role === 'MERCHANT') {
@@ -5010,7 +5011,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const identity = requireUser(request);
         const body = await readJson(request);
         const merchantType = requireString(body.merchantType, 'merchantType', { maxLength: 20 });
-        if (!allowedMerchantTypes.has(merchantType)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant type');
+        if (!allowedMerchantTypes.has(merchantType)) throw new ApiError(400, 'VALIDATION_ERROR', '不支持的入驻主体类型');
         const name = requireString(body.name, 'name', { maxLength: 80 });
         if (name.length < 2) throw new ApiError(400, 'VALIDATION_ERROR', '店铺名称至少 2 个字符');
         const ownerName = requireString(body.ownerName, 'ownerName', { maxLength: 40 });
@@ -5018,7 +5019,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const phone = requireString(body.phone, 'phone', { maxLength: 20 });
         if (!/^1\d{10}$/.test(phone)) throw new ApiError(400, 'VALIDATION_ERROR', 'phone 格式不正确');
         const category = requireString(body.category, 'category', { maxLength: 30 });
-        if (!allowedMerchantCategories.has(category)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant category');
+        if (!allowedMerchantCategories.has(category)) throw new ApiError(400, 'VALIDATION_ERROR', '不支持的经营类目');
         const serviceArea = requireString(body.serviceArea, 'serviceArea', { maxLength: 100 });
         const description = requireString(body.description, 'description', { maxLength: 300 });
         const settlementAccountName = requireString(body.settlementAccountName, 'settlementAccountName', { maxLength: 80 });
@@ -5160,7 +5161,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const note = typeof body.note === 'string' ? body.note.trim().slice(0, 300) : '';
         const merchant = store.update((data) => {
           const item = (data.merchants || []).find((row) => row.id === merchantResubmitMatch[1] && row.userId === identity.userId);
-          if (!item) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          if (!item) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
           if (item.status !== 'REJECTED') {
             throw new ApiError(409, 'MERCHANT_NOT_REJECTED', '仅被驳回的商家可以补充资料复审');
           }
@@ -5274,7 +5275,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         refreshScoreSnapshotsNow();
         const data = store.read();
         const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
-        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
         data.products
           .filter((item) => item.merchantId === merchant.id)
           .forEach((item) => evaluateLowStockAlert(data, item, new Date().toISOString()));
@@ -5470,7 +5471,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const dayCount = requestedDays >= 7 && requestedDays <= 90 ? requestedDays : 7;
         const data = store.read();
         const merchant = (data.merchants || []).find((item) => item.id === merchantSession.merchantId);
-        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
         const products = data.products.filter((item) => item.merchantId === merchant.id);
         const merchantProductIds = new Set(products.map((product) => product.id));
         const orders = data.orders.filter((order) =>
@@ -5505,7 +5506,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
 
       if (pathname.startsWith('/api/merchant/settlement-statement')) {
         const merchant = (store.read().merchants || []).find((item) => item.id === merchantSession.merchantId);
-        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
         const monthQuery = url.searchParams.get('month') || '';
         if (monthQuery && !/^\d{4}-\d{2}$/.test(monthQuery)) {
           throw new ApiError(400, 'VALIDATION_ERROR', '账单月份需为 YYYY-MM');
@@ -5566,7 +5567,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         if (productId && !items.some((item) => item.productId === productId)) {
           throw new ApiError(404, 'PRODUCT_NOT_FOUND', '未找到本店库存商品');
         }
-        if (movementType && !allowedTypes.has(movementType)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported stock movement type');
+        if (movementType && !allowedTypes.has(movementType)) throw new ApiError(400, 'VALIDATION_ERROR', '不支持的库存变动类型');
         if (!Number.isInteger(limitRaw) || limitRaw < 1 || limitRaw > 100) throw new ApiError(400, 'VALIDATION_ERROR', 'limit 需为 1-100 的整数');
         if (productId) items = items.filter((item) => item.productId === productId);
         if (movementType) items = items.filter((item) => item.movementType === movementType);
@@ -5578,7 +5579,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/merchant/notifications') {
         const data = store.read();
         const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
-        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
         const items = (data.notifications || [])
           .filter((item) => item.userId === merchant.userId)
           .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
@@ -5589,7 +5590,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && pathname === '/api/merchant/notifications/read') {
         const updated = store.update((data) => {
           const merchant = data.merchants.find((item) => item.id === merchantSession.merchantId);
-          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
           let count = 0;
           for (const item of data.notifications || []) {
             if (item.userId === merchant.userId && !item.read) {
@@ -5605,7 +5606,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (pathname === '/api/merchant/message-subscriptions') {
         const dataStore = store.read();
         const merchant = dataStore.merchants.find((item) => item.id === merchantSession.merchantId);
-        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+        if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
         if (request.method === 'GET') {
           return sendJson(response, 200, {
             data: { subscribed: (dataStore.serviceMessageSubscribers || []).includes(merchant.userId) },
@@ -5647,10 +5648,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && pathname === '/api/merchant/score-cases') {
         const body = await readJson(request);
         const type = requireString(body.type, 'type', { maxLength: 20 });
-        if (!['APPEAL', 'RECTIFY'].includes(type)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported service score case type');
+        if (!['APPEAL', 'RECTIFY'].includes(type)) throw new ApiError(400, 'VALIDATION_ERROR', '不支持的服务分工单类型');
         const reasonType = type === 'APPEAL' ? requireString(body.reasonType, 'reasonType', { maxLength: 40 }) : '';
         if (reasonType && !allowedScoreComplaintTypes.has(reasonType)) {
-          throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported appeal reason type');
+          throw new ApiError(400, 'VALIDATION_ERROR', '不支持的申诉原因类型');
         }
         const reason = requireString(body.reason, 'reason', { maxLength: 500 });
         const plan = type === 'RECTIFY' ? requireString(body.plan, 'plan', { maxLength: 500 }) : '';
@@ -5785,7 +5786,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const product = store.update((data) => {
           const item = data.products.find((row) => row.id === merchantProductMatch[1] && row.merchantId === merchantSession.merchantId);
-          if (!item) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          if (!item) throw new ApiError(404, 'PRODUCT_NOT_FOUND', notFoundMessage('PRODUCT_NOT_FOUND'));
           const stage = merchantServiceStage(data, merchantSession.merchantId);
           // 待复核和暂停上新期间商家不能自己把商品重新挂上架。
           if (body.active === true && item.active === false) {
@@ -5872,13 +5873,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && merchantOrderMatch) {
         const body = await readJson(request);
         const status = requireString(body.status, 'status', { maxLength: 30 });
-        if (!allowedMerchantOrderStatuses.has(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant order status');
+        if (!allowedMerchantOrderStatuses.has(status)) throw new ApiError(400, 'VALIDATION_ERROR', '不支持的商家订单状态');
         const order = store.update((data) => {
           const item = data.orders.find((row) => row.id === merchantOrderMatch[1] && row.items.some((orderItem) => {
             const product = data.products.find((candidate) => candidate.id === orderItem.productId);
             return product?.merchantId === merchantSession.merchantId;
           }));
-          if (!item) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+          if (!item) throw new ApiError(404, 'ORDER_NOT_FOUND', notFoundMessage('ORDER_NOT_FOUND'));
           if (!['PAID', 'FULFILLING'].includes(item.status)) throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '当前订单状态不可更新');
           if (status === 'COMPLETED') {
             const providedCode = typeof body.deliveryCode === 'string' ? requireString(body.deliveryCode, 'deliveryCode', { maxLength: 6 }) : '';
@@ -5908,16 +5909,16 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && merchantAfterSaleMatch) {
         const body = await readJson(request);
         const status = requireString(body.status, 'status', { maxLength: 30 });
-        if (!['SUBMITTED', 'REVIEWING', 'CLOSED', 'REJECTED'].includes(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant after-sale status');
+        if (!['SUBMITTED', 'REVIEWING', 'CLOSED', 'REJECTED'].includes(status)) throw new ApiError(400, 'VALIDATION_ERROR', '不支持的商家售后状态');
         const resolutionNote = ['CLOSED', 'REJECTED'].includes(status) ? requireString(body.resolutionNote, 'resolutionNote', { maxLength: 500 }) : '';
         const afterSale = store.update((data) => {
           const item = (data.afterSales || []).find((record) => record.id === merchantAfterSaleMatch[1]);
-          if (!item) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', 'After-sale record not found');
+          if (!item) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', notFoundMessage('AFTER_SALE_NOT_FOUND'));
           const order = data.orders.find((row) => row.id === item.orderId && row.items.some((orderItem) => {
             const product = data.products.find((candidate) => candidate.id === orderItem.productId);
             return product?.merchantId === merchantSession.merchantId;
           }));
-          if (!order) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', 'After-sale record not found');
+          if (!order) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', notFoundMessage('AFTER_SALE_NOT_FOUND'));
           item.status = status;
           item.updatedAt = new Date().toISOString();
           if (['CLOSED', 'REJECTED'].includes(status)) item.resolutionNote = resolutionNote;
@@ -6279,7 +6280,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       const adminPaymentRefundRefreshMatch = pathname.match(/^\/api\/admin\/payment-orders\/([^/]+)\/refund\/refresh$/);
       if (request.method === 'POST' && adminPaymentRefundRefreshMatch) {
         const currentPayment = store.read().paymentOrders.find((item) => item.id === adminPaymentRefundRefreshMatch[1]);
-        if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
         if (currentPayment.status !== 'PAID' || currentPayment.refund?.status !== 'PENDING') {
           throw new ApiError(409, 'PAYMENT_REFUND_NOT_PENDING', '仅渠道处理中的退款可查询结果');
         }
@@ -6290,7 +6291,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         }
         const updated = store.update((data) => {
           const paymentOrder = data.paymentOrders.find((item) => item.id === adminPaymentRefundRefreshMatch[1]);
-          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
           if (paymentOrder.status !== 'PAID' || paymentOrder.refund?.status !== 'PENDING') {
             throw new ApiError(409, 'PAYMENT_REFUND_NOT_PENDING', '仅渠道处理中的退款可查询结果');
           }
@@ -6309,7 +6310,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const refundNote = requireString(body.note, 'note', { maxLength: 200 });
         const currentPayment = store.read().paymentOrders.find((item) => item.id === adminPaymentRefundMatch[1]);
-        if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
         if (currentPayment.status !== 'PAID') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅已支付单可退款');
         let providerRefund;
         try {
@@ -6323,7 +6324,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         if (providerRefund.status !== 'REFUNDED') {
           const pending = store.update((data) => {
             const paymentOrder = data.paymentOrders.find((item) => item.id === adminPaymentRefundMatch[1]);
-            if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+            if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
             if (paymentOrder.status !== 'PAID') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅已支付单可退款');
             const now = new Date().toISOString();
             const refundNo = providerRefund.refundNo || `RF_${paymentOrder.paymentNo}`;
@@ -6343,8 +6344,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const updated = store.update((data) => {
           if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
           const paymentOrder = data.paymentOrders.find((item) => item.id === adminPaymentRefundMatch[1]);
-          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
-          if (paymentOrder.status !== 'PAID') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5df2\u652f\u4ed8\u5355\u53ef\u9000\u6b3e');
+          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
+          if (paymentOrder.status !== 'PAID') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅已支付单可退款');
           const now = new Date().toISOString();
           paymentOrder.status = 'REFUNDED';
           paymentOrder.refundedAt = now;
@@ -6653,7 +6654,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const settlementReference = requireString(body.reference || '平台线下打款', 'reference', { maxLength: 120 });
         const result = store.update((data) => {
           const merchant = data.merchants.find((item) => item.id === adminSettlementMatch[1]);
-          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
           if (!merchant.settlementAccountName || !merchant.settlementBank || !merchant.settlementAccount) {
             throw new ApiError(409, 'SETTLEMENT_ACCOUNT_INCOMPLETE', '商家收款账户资料不完整，暂不能结算');
           }
@@ -7022,7 +7023,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const paymentTimeoutMinutes = Number(store.read().adminSettings?.paymentTimeoutMinutes || 30);
         const result = store.update(data=>{
           const order = body.orderId ? (data.orders||[]).find(item=>item.id===body.orderId && item.userId===userId) : null;
-          if (body.orderId && !order) throw new ApiError(404,'ORDER_NOT_FOUND','Order not found');
+          if (body.orderId && !order) throw new ApiError(404,'ORDER_NOT_FOUND',notFoundMessage('ORDER_NOT_FOUND'));
           const platformOrder = Boolean(
             order
             && order.status === 'PAID'
@@ -7100,7 +7101,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         });
         const application = store.update((data) => {
           const item = (data.plateApplications || []).find(row => row.id === plateMaterialMatch[1] && row.userId === userId);
-          if (!item) throw new ApiError(404,'PLATE_APPLICATION_NOT_FOUND','Plate application not found');
+          if (!item) throw new ApiError(404,'PLATE_APPLICATION_NOT_FOUND',notFoundMessage('PLATE_APPLICATION_NOT_FOUND'));
           if (!['MATERIAL_PENDING','REVIEWING'].includes(item.status)) throw new ApiError(409,'PLATE_STATUS_NOT_ALLOWED','当前状态暂不能上传材料');
           const existing = Array.isArray(item.materials) ? item.materials : [];
           if (existing.length + images.length > 9) throw new ApiError(409,'PLATE_MATERIAL_LIMIT','每个牌照工单最多上传 9 张材料');
@@ -7164,7 +7165,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             }
             break;
           }
-          throw new ApiError(404,'SERVICE_RECORD_NOT_FOUND','Service record not found');
+          throw new ApiError(404,'SERVICE_RECORD_NOT_FOUND',notFoundMessage('SERVICE_RECORD_NOT_FOUND'));
         });
         return sendJson(response,200,{data:result.record,type:result.type,requestId});
       }
@@ -7174,11 +7175,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const actor = requireAdmin(request, 'ORDER_MANAGE');
         const body = await readJson(request);
         if (body.status !== undefined && !allowedLeadStatuses.has(body.status)) {
-          throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported lead status. Use SUBMITTED, FOLLOW_UP, COMPLETED or INVALID.');
+          throw new ApiError(400, 'VALIDATION_ERROR', '线索状态仅支持 SUBMITTED、FOLLOW_UP、COMPLETED、INVALID');
         }
         const updated = store.update((data) => {
           const item = (data.leads || []).find((x) => x.id === leadMatch[1]);
-          if (!item) throw new ApiError(404, 'LEAD_NOT_FOUND', 'Lead not found');
+          if (!item) throw new ApiError(404, 'LEAD_NOT_FOUND', notFoundMessage('LEAD_NOT_FOUND'));
           for (const k of ['status','assignee','interest','expectedTime','deliveryNeed','note']) {
             if (body[k] !== undefined) item[k] = String(body[k]).slice(0, 500);
           }
@@ -7192,11 +7193,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && followMatch) {
         const actor = requireAdmin(request, 'ORDER_MANAGE');
         const body = await readJson(request);
-        if (body.status !== undefined && !allowedLeadStatuses.has(body.status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported lead status. Use SUBMITTED, FOLLOW_UP, COMPLETED or INVALID.');
+        if (body.status !== undefined && !allowedLeadStatuses.has(body.status)) throw new ApiError(400, 'VALIDATION_ERROR', '线索状态仅支持 SUBMITTED、FOLLOW_UP、COMPLETED、INVALID');
         const now = new Date().toISOString();
         const updated = store.update((data) => {
           const item = (data.leads || []).find((x) => x.id === followMatch[1]);
-          if (!item) throw new ApiError(404, 'LEAD_NOT_FOUND', 'Lead not found');
+          if (!item) throw new ApiError(404, 'LEAD_NOT_FOUND', notFoundMessage('LEAD_NOT_FOUND'));
           const text = requireString(body.content, 'content', { maxLength: 500 });
           const operator = actor.displayName || actor.username;
           if (!item.assignee) item.assignee = operator;
@@ -7235,7 +7236,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const actor = requireAdmin(request, 'ORDER_MANAGE');
         const result = store.update((data) => {
           const review = (data.productReviews || []).find((record) => record.id === adminReviewUrgeMatch[1]);
-          if (!review) throw new ApiError(404, 'REVIEW_NOT_FOUND', 'Review not found');
+          if (!review) throw new ApiError(404, 'REVIEW_NOT_FOUND', notFoundMessage('REVIEW_NOT_FOUND'));
           if (Number(review.rating) > 2 || review.reply?.content || review.visibility === 'HIDDEN') {
             throw new ApiError(409, 'REVIEW_NOT_PENDING_REPLY', '仅待回复的公开差评可以催办');
           }
@@ -7274,7 +7275,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const content = requireString(body.content, 'content', { maxLength: 300 });
         const review = store.update((data) => {
           const item = (data.productReviews || []).find((record) => record.id === merchantReviewReplyMatch[1]);
-          if (!item) throw new ApiError(404, 'REVIEW_NOT_FOUND', 'Review not found');
+          if (!item) throw new ApiError(404, 'REVIEW_NOT_FOUND', notFoundMessage('REVIEW_NOT_FOUND'));
           const ownsProduct = data.products.some((product) => product.id === item.productId && product.merchantId === merchantSession.merchantId);
           if (!ownsProduct) throw new ApiError(403, 'REVIEW_FORBIDDEN', '只能回复自己店铺的商品评价');
           const repliedProduct = data.products.find((product) => product.id === item.productId);
@@ -7304,10 +7305,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && adminReviewVisibilityMatch) {
         const body = await readJson(request);
         const visibility = requireString(body.visibility, 'visibility', { maxLength: 20 });
-        if (!['PUBLISHED', 'HIDDEN'].includes(visibility)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported review visibility');
+        if (!['PUBLISHED', 'HIDDEN'].includes(visibility)) throw new ApiError(400, 'VALIDATION_ERROR', '不支持的审核可见性');
         const review = store.update((data) => {
           const item = (data.productReviews || []).find((record) => record.id === adminReviewVisibilityMatch[1]);
-          if (!item) throw new ApiError(404, 'REVIEW_NOT_FOUND', 'Review not found');
+          if (!item) throw new ApiError(404, 'REVIEW_NOT_FOUND', notFoundMessage('REVIEW_NOT_FOUND'));
           item.visibility = visibility;
           item.updatedAt = new Date().toISOString();
           addAudit(data, visibility === 'HIDDEN' ? '隐藏商品评价' : '恢复商品评价', item.productId);
@@ -7366,10 +7367,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             REJECTED:['AFTER_SALE','售后申请未通过','商家未通过本次售后申请，您可申请平台协助。']
           }
         };
-        if (!adminOrderStatuses[adminStatusMatch[1]].has(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported status');
+        if (!adminOrderStatuses[adminStatusMatch[1]].has(status)) throw new ApiError(400, 'VALIDATION_ERROR', '不支持的订单状态');
         const updated = store.update((data) => {
           const item = data[collectionMap[adminStatusMatch[1]]].find((record) => record.id === adminStatusMatch[2]);
-          if (!item) throw new ApiError(404, 'ADMIN_RECORD_NOT_FOUND', 'Record not found');
+          if (!item) throw new ApiError(404, 'ADMIN_RECORD_NOT_FOUND', notFoundMessage('ADMIN_RECORD_NOT_FOUND'));
           const isOrder = adminStatusMatch[1] === 'orders';
           const isPendingPaymentCollection = ['orders', 'phone-card-orders', 'recharge-orders', 'plate-applications'].includes(adminStatusMatch[1]);
           if (isOrder) {
@@ -7488,11 +7489,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && adminMerchantStatusMatch) {
         const body = await readJson(request);
         const status = requireString(body.status, 'status', { maxLength: 30 });
-        if (!allowedMerchantStatuses.has(status)) throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported merchant status');
+        if (!allowedMerchantStatuses.has(status)) throw new ApiError(400, 'VALIDATION_ERROR', '不支持的商家状态');
         const reviewNote = typeof body.reviewNote === 'string' ? body.reviewNote.trim().slice(0, 300) : '';
         const merchant = store.update((data) => {
           const item = (data.merchants || []).find((row) => row.id === adminMerchantStatusMatch[1]);
-          if (!item) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          if (!item) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
           item.status = status;
           item.reviewNote = reviewNote;
           item.timeline = item.timeline || [];
@@ -7524,7 +7525,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!item) throw new ApiError(404, 'QUALIFICATION_RENEWAL_NOT_FOUND', '资质复审申请不存在');
           if (item.status !== 'PENDING_REVIEW') throw new ApiError(409, 'QUALIFICATION_RENEWAL_CLOSED', '该资质复审申请已处理');
           const merchant = (data.merchants || []).find((row) => row.id === item.merchantId);
-          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
           const now = new Date().toISOString();
           item.status = decision === 'APPROVE' ? 'APPROVED' : 'REJECTED';
           item.reviewNote = reviewNote || (decision === 'APPROVE' ? '资质复审通过' : '');
@@ -7563,7 +7564,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         if (decision === 'REJECTED' && !note) throw new ApiError(400, 'VALIDATION_ERROR', '驳回需要填写原因');
         const updated = store.update((data) => {
           const product = data.products.find((item) => item.id === adminProductReviewMatch[1]);
-          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', notFoundMessage('PRODUCT_NOT_FOUND'));
           if (product.publishReviewStatus !== 'PENDING_REVIEW') throw new ApiError(409, 'PRODUCT_REVIEW_NOT_PENDING', '该商品不在待复核状态');
           const now = new Date().toISOString();
           product.publishReviewStatus = decision;
@@ -7625,7 +7626,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const reason = requireString(body.reason, 'reason', { maxLength: 200 });
         const result = store.update((data) => {
           const merchant = (data.merchants || []).find((item) => item.id === adminScoreAdjustMatch[1]);
-          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
           if (merchant.status !== 'APPROVED') throw new ApiError(409, 'MERCHANT_NOT_APPROVED', '只能为已通过审核的商家调整服务分');
           const now = new Date().toISOString();
           const previous = merchant.serviceScore || computeMerchantScore(data, merchant, now);
@@ -7662,7 +7663,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           if (!caseRecord) throw new ApiError(404, 'SCORE_CASE_NOT_FOUND', '工单不存在');
           if (caseRecord.status !== 'SUBMITTED') throw new ApiError(409, 'SCORE_CASE_CLOSED', '工单已处理完成');
           const merchant = data.merchants.find((item) => item.id === caseRecord.merchantId);
-          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          if (!merchant) throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
           const now = new Date().toISOString();
           caseRecord.status = decision === 'APPROVE' ? 'COMPLETED' : 'REJECTED';
           caseRecord.adminNote = note.trim();
@@ -7721,7 +7722,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const note = requireString(body.note, 'note', { maxLength: 300 });
         const result = store.update((data) => {
           const merchant = (data.merchants || []).find((item) => item.id === serviceRiskUrgeMatch[1]);
-          if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(404, 'MERCHANT_NOT_FOUND', 'Merchant not found');
+          if (!merchant || merchant.status !== 'APPROVED') throw new ApiError(404, 'MERCHANT_NOT_FOUND', notFoundMessage('MERCHANT_NOT_FOUND'));
           const now = new Date().toISOString();
           if (!Array.isArray(data.serviceRiskFollowUps)) data.serviceRiskFollowUps = [];
           const recent = data.serviceRiskFollowUps.find((item) => item.merchantId === merchant.id
@@ -7825,13 +7826,13 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const updated = store.update((data) => {
           const product = data.products.find((item) => item.id === adminProductMatch[1]);
-          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', notFoundMessage('PRODUCT_NOT_FOUND'));
           if (body.stock !== undefined) {
-            const stock = Number(body.stock); if (!Number.isInteger(stock) || stock < 0) throw new ApiError(400, 'VALIDATION_ERROR', 'stock must be a non-negative integer'); product.stock = stock;
+            const stock = Number(body.stock); if (!Number.isInteger(stock) || stock < 0) throw new ApiError(400, 'VALIDATION_ERROR', '库存必须是非负整数'); product.stock = stock;
           }
           if (body.name !== undefined) product.name = requireString(body.name, 'name', { maxLength: 80 });
           if (body.description !== undefined) product.description = requireString(body.description, 'description', { maxLength: 300 });
-          if (body.priceInCents !== undefined) { const price = Number(body.priceInCents); if (!Number.isInteger(price) || price < 0) throw new ApiError(400, 'VALIDATION_ERROR', 'priceInCents must be non-negative'); product.priceInCents = price; }
+          if (body.priceInCents !== undefined) { const price = Number(body.priceInCents); if (!Number.isInteger(price) || price < 0) throw new ApiError(400, 'VALIDATION_ERROR', '价格不能为负数'); product.priceInCents = price; }
           if (body.category !== undefined) product.category = requireString(body.category, 'category', { maxLength: 50 });
           // 形态字段仅在显式提交时改写，避免存量商品被无谓地补上 listingType。
           if (body.listingType !== undefined || body.rentalPlan !== undefined) {
@@ -7861,7 +7862,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const note = requireString(body.note, 'note', { maxLength: 300 });
         const result = store.update((data) => {
           const product = data.products.find((item) => item.id === adminProductComplianceMatch[1]);
-          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', 'Product not found');
+          if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', notFoundMessage('PRODUCT_NOT_FOUND'));
           if (!['LOW_QUALITY', 'SERVICE_RISK'].includes(product.autoDelistRule)) {
             throw new ApiError(409, 'PRODUCT_NOT_AUTO_DELISTED', '仅风控自动下架的商品可以人工恢复');
           }
@@ -7895,7 +7896,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           const active = body.active !== false;
           if (body.id) {
             const item = records.find((record) => record.id === body.id);
-            if (!item) throw new ApiError(404, 'PROMO_NOT_FOUND', 'Promo not found');
+            if (!item) throw new ApiError(404, 'PROMO_NOT_FOUND', notFoundMessage('PROMO_NOT_FOUND'));
             item.pay = Math.round(payInCents / 100);
             item.receive = Math.round(receiveInCents / 100);
             item.badge = badge;
@@ -8072,10 +8073,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const serviceType = requireString(body.serviceType, 'serviceType');
         if (!allowedCardServices.has(serviceType)) {
-          throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported campus card service type');
+          throw new ApiError(400, 'VALIDATION_ERROR', '不支持的校园卡服务类型');
         }
         if (body.consent !== true) {
-          throw new ApiError(400, 'CONSENT_REQUIRED', 'Privacy and service consent is required');
+          throw new ApiError(400, 'CONSENT_REQUIRED', '请先同意隐私政策与服务协议');
         }
         const now = new Date().toISOString();
         const application = {
@@ -8106,10 +8107,10 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const body = await readJson(request);
         if (!Array.isArray(body.items) || body.items.length === 0) {
-          throw new ApiError(400, 'VALIDATION_ERROR', 'items must be a non-empty array');
+          throw new ApiError(400, 'VALIDATION_ERROR', '订单商品不能为空');
         }
         const idempotencyKey = (request.headers['idempotency-key'] || '').trim();
-        if (idempotencyKey.length > 128) throw new ApiError(400, 'VALIDATION_ERROR', 'Idempotency-Key is too long');
+        if (idempotencyKey.length > 128) throw new ApiError(400, 'VALIDATION_ERROR', 'Idempotency-Key 过长（最多 128 个字符）');
         if (body.fulfillment !== undefined) {
           if (!body.fulfillment || typeof body.fulfillment !== 'object') throw new ApiError(400, 'VALIDATION_ERROR', 'fulfillment 格式不正确');
           if (body.fulfillment.type === 'DELIVERY') {
@@ -8137,7 +8138,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             const productId = requireString(requestedItem.productId, 'items[].productId');
             const quantity = Number(requestedItem.quantity);
             if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
-              throw new ApiError(400, 'VALIDATION_ERROR', 'Each quantity must be an integer from 1 to 99');
+              throw new ApiError(400, 'VALIDATION_ERROR', '每件商品的购买数量必须是 1 到 99 的整数');
             }
             if (requestedItem.rentalUnits !== undefined) {
               if (requestedRentalUnits.has(productId)) {
@@ -8162,7 +8163,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             : 5;
           for (const [productId, quantity] of mergedQuantities) {
             const product = data.products.find((item) => item.id === productId && item.active);
-            if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', `Product ${productId} not found`);
+            if (!product) throw new ApiError(404, 'PRODUCT_NOT_FOUND', productNotFoundMessage(productId));
             // ★ 上限校验放在**合并之后** —— 这里的 `quantity` 是同一商品的**总量**。
             // 只在上面的逐项循环里校验是不够的：`[{quantity:5},{quantity:5}]` 两项各自合法，
             // 合并后却是 10，逐项校验完全观测不到。
@@ -8319,7 +8320,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && orderMatch) {
         const { userId } = requireUser(request);
         const order = store.read().orders.find((item) => item.id === orderMatch[1] && item.userId === userId);
-        if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+        if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', notFoundMessage('ORDER_NOT_FOUND'));
         return sendJson(response, 200, { data: order, requestId });
       }
 
@@ -8329,7 +8330,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const data = store.read();
         const order = (data.orders || []).find((item) => item.id === userPaymentMatch[1] && item.userId === userId);
         const paymentOrder = order ? (data.paymentOrders || []).find((item) => item.id === order.paymentOrderId) : null;
-        if (!order || !paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        if (!order || !paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
         if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅待支付单可支付');
         const providerPayment = await confirmProviderPayment(paymentOrder);
         const result = settlePaymentOrder(paymentOrder.id, providerPayment, 'USER_CONFIRM');
@@ -8340,7 +8341,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && providerCallbackMatch) {
         const providerName = decodeURIComponent(providerCallbackMatch[1]);
         if (providerName !== paymentProvider.name) {
-          throw new ApiError(404, 'PAYMENT_PROVIDER_NOT_FOUND', 'Payment provider not found');
+          throw new ApiError(404, 'PAYMENT_PROVIDER_NOT_FOUND', notFoundMessage('PAYMENT_PROVIDER_NOT_FOUND'));
         }
         const body = await readJson(request);
         let callbackResult;
@@ -8362,7 +8363,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           }
           const paymentOrder = (store.read().paymentOrders || [])
             .find((item) => item.refund?.refundNo === callbackResult.refundNo);
-          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
           const result = completePaymentRefund(paymentOrder.id, callbackResult, 'REFUND_CALLBACK');
           return sendJson(response, 200, { data: result, requestId });
         }
@@ -8371,7 +8372,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           throw new ApiError(400, 'PAYMENT_CALLBACK_UNSUPPORTED', '当前仅支持支付成功回调');
         }
         const paymentOrder = (store.read().paymentOrders || []).find((item) => item.providerTradeNo === callbackResult.providerTradeNo);
-        if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
         if (paymentOrder.status === 'CANCELLED') {
           const result = await handleLatePaymentCallback(paymentOrder, callbackResult);
           return sendJson(response, 200, { data: result, requestId });
@@ -8385,7 +8386,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const paymentOrder = (store.read().paymentOrders || [])
           .find((item) => item.id === reloadPaymentMatch[1] && item.userId === userId);
-        if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+        if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
         return sendJson(response, 200, { data: paymentOrder, requestId });
       }
 
@@ -8393,11 +8394,11 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'POST' && paymentMatch) {
         const { userId } = requireUser(request);
         const action = paymentMatch[2];
-        if (!action) throw new ApiError(404, 'NOT_FOUND', 'Payment action is required');
+        if (!action) throw new ApiError(404, 'NOT_FOUND', '缺少支付动作');
         await sweepExpiredOrders();
         if (action === 'confirm') {
           const currentPayment = store.read().paymentOrders.find((item) => item.id === paymentMatch[1] && item.userId === userId);
-          if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+          if (!currentPayment) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
           if (currentPayment.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅待支付单可操作');
           const providerPayment = await confirmProviderPayment(currentPayment);
           const result = settlePaymentOrder(currentPayment.id, providerPayment, 'USER_CONFIRM');
@@ -8406,15 +8407,15 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const updated = store.update((data) => {
           if (!Array.isArray(data.paymentOrders)) data.paymentOrders = [];
           const paymentOrder = data.paymentOrders.find((item) => item.id === paymentMatch[1] && item.userId === userId);
-          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', 'Payment order not found');
+          if (!paymentOrder) throw new ApiError(404, 'PAYMENT_NOT_FOUND', notFoundMessage('PAYMENT_NOT_FOUND'));
           const order = data.orders.find((item) => item.id === paymentOrder.orderId && item.userId === userId);
           const rechargeOrder = data.rechargeOrders.find((item) => item.id === paymentOrder.businessId && item.userId === userId);
           const phoneCardOrder = data.phoneCardOrders.find((item) => item.id === paymentOrder.businessId && item.userId === userId);
           const plateApplication = (data.plateApplications || []).find((item) => item.id === paymentOrder.businessId && item.userId === userId && item.paymentOrderId === paymentOrder.id);
-          if (!order && !rechargeOrder && !phoneCardOrder && !plateApplication) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+          if (!order && !rechargeOrder && !phoneCardOrder && !plateApplication) throw new ApiError(404, 'ORDER_NOT_FOUND', notFoundMessage('ORDER_NOT_FOUND'));
           const now = new Date().toISOString();
           if (action === 'cancel') {
-            if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u5355\u53ef\u64cd\u4f5c');
+            if (paymentOrder.status !== 'PENDING') throw new ApiError(409, 'PAYMENT_STATUS_NOT_ALLOWED', '仅待支付单可操作');
             paymentOrder.status = 'CANCELLED';
             paymentOrder.providerCloseStatus = 'PENDING';
             paymentOrder.providerCloseRequestedAt = now;
@@ -8452,7 +8453,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             addNotification(data, userId, 'ORDER', '\u8ba2\u5355\u5df2\u53d6\u6d88', `\u8ba2\u5355 ${order.orderNo} \u5df2\u53d6\u6d88\uff0c\u82e5\u9700\u8981\u53ef\u91cd\u65b0\u4e0b\u5355\u3002`, { focusId: order.id });
             return { order, paymentOrder };
           }
-          throw new ApiError(403, 'FORBIDDEN', '\u4ec5\u7ba1\u7406\u7aef\u53ef\u9000\u6b3e');
+          throw new ApiError(403, 'FORBIDDEN', '仅管理端可退款');
         });
         await processProviderCloseQueue();
         const closedPaymentOrder = store.read().paymentOrders
@@ -8465,7 +8466,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const body = await readJson(request);
         const updated = store.update((data) => {
           const order = data.orders.find((item) => item.id === orderMatch[1] && item.userId === userId);
-          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', notFoundMessage('ORDER_NOT_FOUND'));
           // 改约前置校验。两个维度都要看，因为 `status` 与 `paymentStatus` 互相独立：
           //
           // ① 订单状态已进入终态 / 售后流程中 —— 不可改履约信息。
@@ -8520,8 +8521,8 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { userId } = requireUser(request);
         const updated = store.update((data) => {
           const order = data.orders.find((item) => item.id === orderCancelMatch[1] && item.userId === userId);
-          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
-          if (order.status !== 'PENDING_PAYMENT') throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '\u4ec5\u5f85\u652f\u4ed8\u8ba2\u5355\u53ef\u53d6\u6d88');
+          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', notFoundMessage('ORDER_NOT_FOUND'));
+          if (order.status !== 'PENDING_PAYMENT') throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '仅待支付订单可取消');
           const now = new Date().toISOString();
           order.status = 'CANCELLED';
           order.paymentStatus = 'CANCELLED';
@@ -8549,7 +8550,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const orderId = requireString(body.orderId, 'orderId', { maxLength: 100 });
         const type = requireString(body.type, 'type');
         if (!allowedAfterSaleTypes.has(type)) {
-          throw new ApiError(400, 'VALIDATION_ERROR', 'Unsupported after-sale type');
+          throw new ApiError(400, 'VALIDATION_ERROR', '不支持的售后类型');
         }
         const reason = requireString(body.reason, 'reason', { maxLength: 500 });
         const images = Array.isArray(body.images) ? body.images.slice(0, 3) : [];
@@ -8560,12 +8561,12 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         });
         const afterSale = store.update((data) => {
           const order = data.orders.find((item) => item.id === orderId && item.userId === userId);
-          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'Order not found');
+          if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', notFoundMessage('ORDER_NOT_FOUND'));
           if (!['PAID', 'FULFILLING', 'COMPLETED'].includes(order.status)) {
-            throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', 'Current order status does not support after-sale requests');
+            throw new ApiError(409, 'ORDER_STATUS_NOT_ALLOWED', '当前订单状态不支持申请售后');
           }
           const duplicate = data.afterSales.find((item) => item.orderId === orderId && item.status !== 'CLOSED');
-          if (duplicate) throw new ApiError(409, 'ACTIVE_AFTER_SALE_EXISTS', 'An active after-sale request already exists');
+          if (duplicate) throw new ApiError(409, 'ACTIVE_AFTER_SALE_EXISTS', '已存在处理中的售后申请');
           const refundableItems = (order.items || []).filter((item) => {
             const product = (data.products || []).find((candidate) => candidate.id === item.productId);
             return product?.category === 'E_BIKE_NEW';
@@ -8662,7 +8663,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         });
         const afterSale = store.update((data) => {
           const item = (data.afterSales || []).find((record) => record.id === afterSaleMaterialMatch[1] && record.userId === userId);
-          if (!item) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', 'After-sale record not found');
+          if (!item) throw new ApiError(404, 'AFTER_SALE_NOT_FOUND', notFoundMessage('AFTER_SALE_NOT_FOUND'));
           if (item.status === 'CLOSED') throw new ApiError(409, 'AFTER_SALE_STATUS_NOT_ALLOWED', '售后已关闭，不能补充图片');
           const existing = Array.isArray(item.images) ? item.images : [];
           if (existing.length + images.length > 9) throw new ApiError(409, 'AFTER_SALE_IMAGE_LIMIT', '售后图片最多 9 张');
@@ -8674,7 +8675,7 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         return sendJson(response, 200, { data: afterSale, requestId });
       }
 
-      throw new ApiError(404, 'ROUTE_NOT_FOUND', 'Route not found');
+      throw new ApiError(404, 'ROUTE_NOT_FOUND', notFoundMessage('ROUTE_NOT_FOUND'));
     } catch (error) {
       const statusCode = error instanceof ApiError ? error.statusCode : 500;
       const code = error instanceof ApiError ? error.code : 'INTERNAL_ERROR';
