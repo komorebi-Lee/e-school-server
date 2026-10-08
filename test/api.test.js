@@ -6391,6 +6391,154 @@ test('footprints feed category-aware recommendations', async () => {
   assert.equal(list.body.data[0].category, 'PHONE_PLAN', 'viewed category should rank first');
 });
 
+test('footprints 必须按「最近浏览倒序」返回，而不是商品目录顺序（M8-P1-03）', async () => {
+  const session = await loginWeChat('footprint_order_user');
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+
+  // 种子商品的**目录顺序**是 001 → 002 → 003（见 `store.js` 的 seedProducts）。
+  // 这里刻意**不按目录顺序**浏览：先 002，再 001，最后 003。
+  // 于是「最近浏览倒序」= 003, 001, 002，而「目录顺序」= 001, 002, 003 ——
+  // 两者不同，这条断言才能把「迭代 `data.products`」那种实现钉死。
+  const viewedOrder = ['prod_card_service_002', 'prod_card_service_001', 'prod_card_service_003'];
+  for (const productId of viewedOrder) {
+    const recorded = await api('/api/my/footprints', {
+      method: 'POST', headers: auth, body: JSON.stringify({ productId })
+    });
+    assert.equal(recorded.response.status, 200, `前置：${productId} 的足迹应记录成功`);
+  }
+
+  const footprints = await api('/api/my/footprints', { headers: auth });
+  assert.equal(footprints.response.status, 200);
+  assert.deepEqual(
+    footprints.body.data.map((item) => item.id),
+    ['prod_card_service_003', 'prod_card_service_001', 'prod_card_service_002'],
+    '★ 足迹必须按 createdAt 倒序返回；按商品目录顺序返回会让页面上的「最近浏览」变成假话'
+  );
+  assert.equal(footprints.body.total, 3, '★ total 必须是真实总数（3），不是截断后的长度');
+});
+
+test('footprints 一次最多返回 20 条，但 total 必须是真实总数（M8-P1-03）', async (t) => {
+  const adminHeaders = await loginAdmin();
+  const session = await loginWeChat('footprint_paging_user');
+  const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };
+
+  // 种子商品只有 6 件，凑不出「超过 20 条」，所以用管理端接口现造 21 件。
+  // ★ 用 `t.after` 清理，而不是在用例末尾写清理代码：断言中途失败时末尾那行
+  //   永远不执行，造出来的 21 件商品会污染后面所有用例。
+  const createdNamePrefix = '足迹分页专用';
+  t.after(() => {
+    store.update((data) => {
+      const createdIds = new Set((data.products || [])
+        .filter((item) => String(item.name || '').startsWith(createdNamePrefix))
+        .map((item) => item.id));
+      data.products = (data.products || []).filter((item) => !createdIds.has(item.id));
+      data.productFootprints = (data.productFootprints || []).filter((item) => !createdIds.has(item.productId));
+    });
+  });
+
+  const productIds = [];
+  for (let index = 0; index < 21; index += 1) {
+    const created = await api('/api/admin/products', {
+      method: 'POST', headers: adminHeaders,
+      body: JSON.stringify({
+        name: `${createdNamePrefix}车 ${index}`, category: 'E_BIKE_NEW',
+        description: '足迹分页回归测试专用', priceInCents: 100000, stock: 5
+      })
+    });
+    assert.equal(created.response.status, 201, `前置：第 ${index} 件测试商品应创建成功`);
+    productIds.push(created.body.data.id);
+  }
+  // ★ 刻意**按创建顺序的倒序**浏览（最后创建的 p20 最先看、p0 最后看）。
+  //
+  // 为什么要绕这一下：`POST /api/admin/products` 是 `data.products.unshift(item)`
+  // —— 新商品排在**目录最前**。若按创建顺序（p0 → p20）浏览，「最近浏览倒序」
+  // 恰好**等于**「商品目录顺序」，本用例就区分不出两种实现（实测：在变异
+  // 「迭代 `data.products`」下它**照样全绿** —— 那是一次空过）。
+  // 倒着浏览之后：最近浏览倒序 = p0,p1,…,p20，而目录顺序 = p20,p19,…,p0，两者相反。
+  const viewedOrder = productIds.slice().reverse();
+  for (const productId of viewedOrder) {
+    const recorded = await api('/api/my/footprints', {
+      method: 'POST', headers: auth, body: JSON.stringify({ productId })
+    });
+    assert.equal(recorded.response.status, 200);
+  }
+
+  const page = await api('/api/my/footprints', { headers: auth });
+  assert.equal(page.response.status, 200);
+  assert.equal(page.body.data.length, 20, '★ 一次最多返回 20 条（读取上限）');
+  assert.equal(
+    page.body.total, 21,
+    '★★ total 必须是**真实总数**（21），而不是 items.length（20）—— 前端只能靠它知道自己被截断了'
+  );
+  assert.equal(
+    page.body.data[0].id, productIds[0],
+    '★ 第一件必须是**最近**浏览的那件（最后浏览的 p0），否则「最近浏览」这个措辞就是假的'
+  );
+  assert.equal(
+    page.body.data.some((item) => item.id === productIds[20]), false,
+    '★ 被截掉的必须是**最早**浏览的那件（最先看的 p20），而不是任意一件'
+  );
+});
+
+test('footprints 清空必须只删自己的记录（隔离），且返回真实删除条数（M8-P1-03）', async () => {
+  const sessionA = await loginWeChat('footprint_clear_a');
+  const sessionB = await loginWeChat('footprint_clear_b');
+  const authA = { 'content-type': 'application/json', authorization: `Bearer ${sessionA.token}` };
+  const authB = { 'content-type': 'application/json', authorization: `Bearer ${sessionB.token}` };
+
+  // 未登录必须 401，且**不得**删掉任何东西。
+  const unauthorized = await api('/api/my/footprints', { method: 'DELETE' });
+  assert.equal(unauthorized.response.status, 401, '未登录清空必须 401');
+
+  // A 用电话卡（3 条），B 用租赁/售卖车（2 条），刻意不重叠。
+  const productsOfA = ['prod_card_service_001', 'prod_card_service_002', 'prod_card_service_003'];
+  const productsOfB = ['prod_ebike_rent_001', 'prod_ebike_rent_002'];
+  for (const productId of productsOfA) {
+    const recorded = await api('/api/my/footprints', {
+      method: 'POST', headers: authA, body: JSON.stringify({ productId })
+    });
+    assert.equal(recorded.response.status, 200, `前置：A 的 ${productId} 应记录成功`);
+  }
+  for (const productId of productsOfB) {
+    const recorded = await api('/api/my/footprints', {
+      method: 'POST', headers: authB, body: JSON.stringify({ productId })
+    });
+    assert.equal(recorded.response.status, 200, `前置：B 的 ${productId} 应记录成功`);
+  }
+
+  const beforeA = await api('/api/my/footprints', { headers: authA });
+  const beforeB = await api('/api/my/footprints', { headers: authB });
+  assert.equal(beforeA.body.data.length, 3, '前置：A 应有 3 条足迹（否则下面的隔离断言会空转）');
+  assert.equal(beforeB.body.data.length, 2, '前置：B 应有 2 条足迹（否则下面的隔离断言会空转）');
+
+  const cleared = await api('/api/my/footprints', { method: 'DELETE', headers: authA });
+  assert.equal(cleared.response.status, 200, '清空应 200');
+
+  // ★★ 本用例的核心：**隔离**。
+  //
+  // ★ 它必须排在「A 自己的结果」与 `removed` **之前**，这是刻意的：
+  //   变异「拿掉 `userId` 过滤」会让 `removed` 变成**全局**记录数（实测 9 ≠ 3），
+  //   若那条排在前面，用例会先在它上面中断，**核心的隔离判据根本没被求值** ——
+  //   于是「隔离断言真的生效吗」这个问题拿不到证据。实测过一次，故前移。
+  const afterB = await api('/api/my/footprints', { headers: authB });
+  assert.deepEqual(
+    afterB.body.data.map((item) => item.id).sort(),
+    ['prod_ebike_rent_001', 'prod_ebike_rent_002'],
+    '★★ 清空 A 的足迹**不得**动到 B 的记录 —— 漏掉 userId 过滤会在这里变红'
+  );
+  assert.equal(afterB.body.total, 2, '★ B 的真实总数应仍是 2');
+
+  const afterA = await api('/api/my/footprints', { headers: authA });
+  assert.equal(afterA.body.data.length, 0, '★ A 清空后自己的列表应为空');
+  assert.equal(afterA.body.total, 0, '★ A 清空后真实总数应为 0');
+  assert.equal(cleared.body.data.removed, 3, '★ 应返回真实删除条数（A 的 3 条记录）');
+
+  // 幂等：本来就没有记录时返回 removed: 0，不报 404。
+  const again = await api('/api/my/footprints', { method: 'DELETE', headers: authA });
+  assert.equal(again.response.status, 200, '清空是幂等的，第二次仍应 200');
+  assert.equal(again.body.data.removed, 0, '★ 已清空后再清空应返回 removed: 0');
+});
+
 test('marketplace supports publish, list, detail, ownership status, and my listings', async () => {
   const session = await loginWeChat('market_user');
   const auth = { 'content-type': 'application/json', authorization: `Bearer ${session.token}` };

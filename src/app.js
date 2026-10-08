@@ -103,6 +103,18 @@ const adminOrderStatuses = {
   'after-sales': new Set(['SUBMITTED', 'REVIEWING', 'CLOSED', 'REJECTED'])
 };
 const allowedPaymentStatuses = new Set(['PENDING', 'PAID', 'CANCELLED', 'PARTIALLY_REFUNDED', 'REFUNDED']);
+/**
+ * 浏览足迹一次最多返回的条数（`GET /api/my/footprints`）。
+ *
+ * ★ 这个 20 与 `POST /api/my/footprints` 里那个 200 是**两件事**，不要合并理解：
+ *   - `200`（`POST` 分支）是**存储**上限，砍的是 `data.productFootprints` ——
+ *     那是**所有用户共享**的一个数组，不是「每个用户 200 条」；
+ *   - `20`（本常量）是**读取**上限，只决定一次返回多少条。
+ *   所以用户实际能看到的最多条数 = 本常量，**不是** 200。任何用户可见文案
+ *   都不能写 200 —— 那会让用户以为「我能翻到 200 条」，而实际上永远只有 20 条。
+ */
+const FOOTPRINT_PAGE_SIZE = 20;
+
 const identityVerifications = new Map();
 let weChatAccessToken = { token: '', expiresAt: 0 };
 
@@ -3877,16 +3889,35 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
       if (request.method === 'GET' && pathname === '/api/my/footprints') {
         const { userId } = requireUser(request);
         const data = store.read();
-        const footprintProductIds = new Set(
-          (data.productFootprints || [])
-            .filter((item) => item.userId === userId)
-            .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
-            .map((item) => item.productId)
-        );
+        // ★ 必须**按足迹的 createdAt 倒序**逐个解析商品，再截断 ——
+        //   不能像改造前那样先算出 id 集合、再 `data.products.filter(...)`。
+        //
+        //   改造前是：
+        //     const ids = new Set(足迹.filter(userId).sort(createdAt desc).map(productId));
+        //     const items = data.products.filter(p => p.active && ids.has(p.id)).slice(0, 20);
+        //   `Array.prototype.filter` 保持的是 **`data.products` 的目录顺序**，把
+        //   `Set` 的迭代顺序（= 足迹倒序）整个丢掉了。于是「取前 20」取到的是
+        //   「**目录顺序**里前 20 个已浏览商品」，**不是最近 20 件** ——
+        //   用户最近看的那件可能根本不在列表里，而页面顶部却写着「最近浏览」。
+        const recentProductIds = [];
+        const seenProductIds = new Set();
+        for (const record of (data.productFootprints || [])
+          .filter((item) => item.userId === userId)
+          .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))) {
+          // 同一商品只留最近一次（`POST` 已经去过重，这里是防御性兜底）。
+          if (!record.productId || seenProductIds.has(record.productId)) continue;
+          seenProductIds.add(record.productId);
+          recentProductIds.push(record.productId);
+        }
+        const productById = new Map(data.products.map((product) => [product.id, product]));
+        // 下架 / 已删的商品不展示（与改造前一致），但它的足迹记录**仍在**存储里，
+        // 仍占着 `POST` 那个全局 200 的名额。
+        const visibleProducts = recentProductIds
+          .map((productId) => productById.get(productId))
+          .filter((product) => Boolean(product) && product.active);
         const now = new Date().toISOString();
-        const items = data.products
-          .filter((product) => product.active && footprintProductIds.has(product.id))
-          .slice(0, 20)
+        const items = visibleProducts
+          .slice(0, FOOTPRINT_PAGE_SIZE)
           .map((product) => withProductSale(
             withMerchantScore(
               withAvailableStock(withMerchantName(product, data.merchants || [])),
@@ -3894,7 +3925,30 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
             ),
             now
           ));
-        return sendJson(response, 200, { data: items, total: items.length, requestId });
+        // ★ `total` 必须是**真实总数**（该用户仍可见的足迹条数），而不是 `items.length`。
+        //   前端靠 `total > data.length` 判断「有没有被截断」，才敢如实说
+        //   「最多显示 20 件」。改造前 `total` 就是截断后的长度（恒 ≤ 20），
+        //   前端**在协议层就无法知道**自己被截断了 —— 只能对用户少报。
+        return sendJson(response, 200, { data: items, total: visibleProducts.length, requestId });
+      }
+      if (request.method === 'DELETE' && pathname === '/api/my/footprints') {
+        const { userId } = requireUser(request);
+        const result = store.update((data) => {
+          data.productFootprints ||= [];
+          const before = data.productFootprints.length;
+          // ★★ 必须**同时**按 `userId` 过滤，这是本端点唯一的「数据丢失级」风险。
+          //
+          // `data.productFootprints` 是**所有用户共享**的一个数组（每条记录上带
+          // `userId`）。只要漏掉这一个条件 —— 无论是不写、还是写成只按
+          // `productId` —— 都会把**别的用户**的足迹一起删掉，而且**不可逆**。
+          // `server/test/api.test.js` 里有专门的隔离断言：A 清空后 B 的记录必须还在、
+          // 且 B 自己的 `GET` 仍读得到。
+          data.productFootprints = data.productFootprints.filter((item) => item.userId !== userId);
+          return { removed: before - data.productFootprints.length };
+        });
+        // 幂等：本来就没有记录时返回 `{ removed: 0 }`，不报 404 ——
+        // 「清空」这个动作对用户而言没有「目标不存在」这一说。
+        return sendJson(response, 200, { data: result, requestId });
       }
       if (request.method === 'GET' && pathname === '/api/my/recommendations') {
         const { userId } = requireUser(request);
