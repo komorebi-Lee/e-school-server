@@ -47,13 +47,16 @@ async function loginWeChat() {
  * 本环境 node 无法 spawn node（EBUSY，先例 `test/miniapp.test.js:86`），
  * 因此不再起子进程，而是在 `vm` 里跑**同一份脚本源码**，只把 `process` 换成桩。
  *
- * 桩的三条保真性质（**均已实测**，B1/B2）：
- *   ① `exit` 必须**终止控制流** —— 用哨兵异常中断。若只记录不中断，`main()` 会继续往下
- *      算出一个哈希并写出，制造「短口令也产出哈希」这种真实世界不存在的行为（**假绿**）。
+ * 桩的三条保真性质（**均已实测**）：
+ *   ① `exit` 必须**终止控制流** —— 用哨兵异常中断，让 `main()` 在 `exit` 处**真的停下**。
+ *      实测：单独去掉 ①（只留 ②）用例**仍绿** —— 因为 ② 拦下了退出后的那次写出；
+ *      但那样等于「继续跑一段真实世界里永远不会执行的代码」。① 与 ② 是**互补**的两道，
+ *      合起来才等价于「进程在 exit 处死掉」。
  *   ② **退出后的写入必须丢弃** —— `process.exit` 之后再 `stdout/stderr.write` 一律不落账，
- *      与真实 Node（进程已死、不可能再写）一致。
+ *      与真实 Node（进程已死、不可能再写）一致。实测：去掉 ② 后负例转红 ——
+ *      catch 分支的 `process.exit(1)` 会往 stderr 多写一行。
  *   ③ **`await` 是承重的** —— `main()` 是 async，脚本同步返回时它只跑到第一个 `await`；
- *      不 await 就取 `stdout`，拿到的是**空串**（实测 B1/B2 已确认）。
+ *      不 await 就取 `stdout`，拿到的是**空串**。实测：去掉 await 后正例转红。
  */
 class ProcessExit extends Error {
   constructor(code) {
