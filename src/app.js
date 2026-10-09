@@ -4272,7 +4272,14 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
           // ★ 资金归属口径：扣款所得本轮不分配、暂挂平台待分配。
           // 只记流水（含口径说明），**绝不触碰 settlements** —— 车是商家的、损失也是商家的，
           // 记为平台收入会引发商家抗议，且下一轮真实分账时这批历史数据要回头洗。
-          const financeEvent = addFinanceEvent(data, 'DEPOSIT_SETTLEMENT', `DEPOSIT_SETTLE_${deposit.id}`, deposit.deductionInCents, {
+          // ★ 金额符号（资金口径，勿改成正数）：这条流水记的是**结算时真正离开平台的钱**，
+          // 即退给用户的 `refundedInCents`，所以必须为负 —— 与全平台「出账为负」的约定一致
+          // （见 recordPayout 记 PAYOUT 用的是 `-totalInCents`）。
+          // 不是 `deductionInCents`：扣款是平台**留下**的钱（暂挂待分配），把它当成负向出账
+          // 会让「资金净额」账实不符（实测：全额退款时 29900 分实实在在出去了，净额却纹丝不动）。
+          // 该金额会被**两处**无过滤聚合直接求和，所以符号必须与事实方向一致：
+          // `financeSummary.netInCents`（管理端总览）与日报的 `netInCents`。
+          const financeEvent = addFinanceEvent(data, 'DEPOSIT_SETTLEMENT', `DEPOSIT_SETTLE_${deposit.id}`, -deposit.refundedInCents, {
             userId: deposit.userId,
             orderNo: order?.orderNo || '',
             merchantId: deposit.merchantId,

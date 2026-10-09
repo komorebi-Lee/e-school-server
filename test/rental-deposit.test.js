@@ -43,6 +43,7 @@ process.env.ADMIN_PASSWORD = 'rental-dep-admin-password-123';
  * | ⑫ | ⑫ | 扣款所得不进商家余额 |
  * | ⑬ | ⑬ | 重复结算 → 409 |
  * | ⑭ | — | 额外：管理端押金台账（列表 / 过滤 / 权限），覆盖新端点的 GET 面 |
+ * | ⑮ | — | 额外：押金结算流水的**资金口径**（负向出账 + `netInCents` 现金守恒，两个消费方） |
  */
 
 const RENTAL_PRODUCT_ID = 'prod_ebike_rent_002';
@@ -167,6 +168,30 @@ async function listDeposits(query = '', token) {
   return api(`/api/admin/rental-deposits${query}`, {
     headers: { authorization: `Bearer ${token ?? adminTokens.FINANCE}` }
   });
+}
+
+/**
+ * 一次请求同时读**两个** `netInCents` 消费方。
+ *
+ * `netInCents` 是「全部资金流水金额之和」，平台上有**两处**各自独立地算它：
+ * - 消费方② `financeSummary.netInCents`（`app.js:6537`，管理端总览，无过滤求和）
+ * - 消费方① `operationsReport.totals.netInCents`（`app.js:2994`，日报，无过滤累加）
+ *
+ * 两处都是无过滤累加，所以同一条流水的符号会**同时**影响它们 ——
+ * 只断言其中一个，就会漏掉另一个。
+ *
+ * @returns {Promise<{summary: object, dailyTotals: object}>} 两个口径的读数。
+ */
+async function readNetInCents() {
+  const result = await api('/api/admin/overview', {
+    headers: { authorization: `Bearer ${adminTokens.FINANCE}` }
+  });
+  assert.equal(result.response.status, 200, 'FINANCE 持有 REPORT_VIEW，必须能读总览');
+  assert.ok(result.body.data.operationsReport?.totals, '日报 totals 必须存在，否则消费方①无法被断言');
+  return {
+    summary: result.body.data.financeSummary,
+    dailyTotals: result.body.data.operationsReport.totals
+  };
 }
 
 function snapshot() {
@@ -455,7 +480,9 @@ test('⑧ ★ 每次结算恰好产生 1 条 auditLogs + 1 条 financeEvents', a
   const events = financeEventsAbout(depositId);
   assert.equal(events.length, 1, '必须恰好 1 条资金流水');
   assert.equal(events[0].eventType, 'DEPOSIT_SETTLEMENT');
-  assert.equal(events[0].amountInCents, 5000, '流水金额必须是扣款金额');
+  // ★ 金额是**负向出账**：结算时真正离开平台的是退给用户的 24900（29900 − 扣款 5000），
+  // 不是扣款额。原断言写 `5000`（正数）等于把实现自己的写法当成了事实，见用例⑮。
+  assert.equal(events[0].amountInCents, -24900, '流水金额必须是负向出账：等于实际退给用户的 24900');
   assert.equal(events[0].orderNo, order.orderNo);
   assert.equal(events[0].merchantId, MERCHANT_ID);
   assert.equal(events[0].businessType, 'RENTAL_DEPOSIT');
@@ -561,7 +588,7 @@ test('⑫ ★★ 扣款所得不进商家余额：结算前后该商家 settleme
   // 扣款只体现在 financeEvents（且带口径说明），这是「记了钱但没分钱」的唯一凭证。
   const events = financeEventsAbout(depositId);
   assert.equal(events.length, 1);
-  assert.equal(events[0].amountInCents, 5000);
+  assert.equal(events[0].amountInCents, -24900);
   assert.equal(events[0].note, DEPOSIT_DEDUCTION_ATTRIBUTION_NOTE);
   // 对照：该商家在结算前后都没有任何 DEPOSIT_SETTLEMENT 之外的新增分账。
   const settlementTouched = (snapshot().settlements || [])
@@ -650,4 +677,71 @@ test('⑭ ★ 管理端押金台账：列表 + status 过滤 + 关联订单号/�
   }
   const financeList = await listDeposits('', adminTokens.FINANCE);
   assert.equal(financeList.response.status, 200);
+});
+
+test('⑮ ★★ 押金结算流水的资金口径：负向出账，且 netInCents 现金守恒（两个消费方）', async () => {
+  const order = await createPaidRentalOrder('rental_dep_netincents');
+  const depositId = await driveToRefundPending(order);
+
+  const before = await readNetInCents();
+  const settled = await settle(depositId, { deductionInCents: 5000, note: '车损扣款 5000，其余退回。' });
+  assert.equal(settled.response.status, 200);
+  const after = await readNetInCents();
+
+  const deposit = depositById(depositId);
+  assert.equal(deposit.deductionInCents, 5000);
+  assert.equal(deposit.refundedInCents, 24900);
+
+  const events = financeEventsAbout(depositId);
+  assert.equal(events.length, 1);
+
+  // ① 口径：结算时**真正离开平台**的钱是「退给用户的 refundedInCents」，不是「平台留下的
+  //    deductionInCents」（后者按 R11 口径暂挂待分配，是平台留着的钱，不该表现为出账）。
+  //    流水必须记成**负向出账** —— 与全平台符号约定一致（`app.js:1430` 记 PAYOUT 写的是
+  //    `-totalInCents`）。记成正数会把「资金净额」抬高，即账实不符。
+  assert.equal(
+    events[0].amountInCents,
+    -deposit.refundedInCents,
+    `押金结算流水必须等于负的实际出账额（expected ${-deposit.refundedInCents}，actual ${events[0].amountInCents}）`
+  );
+  assert.equal(events[0].amountInCents, -24900, '扣 5000 退 24900，流水应为 -24900');
+
+  // ② 聚合守恒（消费方② `app.js:6537`）：`netInCents` 的增量必须等于真实现金变动。
+  //    这里**直接钉住聚合本身** —— 押金的每个字段都有断言，不等于「聚合是对的」。
+  const summaryDelta = after.summary.netInCents - before.summary.netInCents;
+  assert.equal(
+    summaryDelta,
+    -deposit.refundedInCents,
+    `总览 netInCents 增量必须等于 -${deposit.refundedInCents}（expected ${-deposit.refundedInCents}，actual ${summaryDelta}）`
+  );
+
+  // ③ 同一个聚合的**第二个消费方**（`app.js:2994` 日报）必须同步 —— 只断言一个会漏掉另一个。
+  const dailyDelta = after.dailyTotals.netInCents - before.dailyTotals.netInCents;
+  assert.equal(
+    dailyDelta,
+    -deposit.refundedInCents,
+    `日报 netInCents 增量必须等于 -${deposit.refundedInCents}（expected ${-deposit.refundedInCents}，actual ${dailyDelta}）`
+  );
+
+  // ④ 口径恒等式 + 文案守卫：`netInCents` 是**全部**事件之和，而 `refundOutCents` 只过滤
+  //    `eventType === 'REFUND'`，所以押金退款**不进**退款列。于是
+  //    `netInCents === paymentInCents + refundOutCents + payoutOutCents + Σ(押金结算流水)`。
+  //    这正是 `public/admin.js` 里「支付 - 退款 - 打款」这个公式文案必须改的原因。
+  const depositSettlementSum = (snapshot().financeEvents || [])
+    .filter((item) => item.eventType === 'DEPOSIT_SETTLEMENT')
+    .reduce((sum, item) => sum + Number(item.amountInCents || 0), 0);
+  // ★ 防空转：本轮必须已产生非零押金结算流水，否则下面的恒等式退化为「0 === 0」。
+  assert.notEqual(depositSettlementSum, 0, '必须已有非零押金结算流水，否则本条断言无意义');
+  const bucketSum = after.summary.paymentInCents + after.summary.refundOutCents + after.summary.payoutOutCents;
+  assert.equal(
+    after.summary.netInCents,
+    bucketSum + depositSettlementSum,
+    'netInCents 必须等于三个展示分项之和再加上押金结算流水之和'
+  );
+  assert.notEqual(
+    bucketSum,
+    after.summary.netInCents,
+    '三个展示分项之和不得等于 netInCents —— 押金退款不在 refundOutCents 里，文案不能写成「支付 - 退款 - 打款」'
+  );
+  assert.equal(after.summary.refundOutCents, 0, '押金退款不进 refundOutCents（它只过滤 REFUND）');
 });
