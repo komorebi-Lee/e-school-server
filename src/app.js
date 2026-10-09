@@ -2989,7 +2989,15 @@ function createApp({
     }
     for (const item of data.financeEvents || []) {
       if (item.eventType === 'PAYMENT') add(item.createdAt, 'paymentInCents', item.amountInCents);
-      if (item.eventType === 'REFUND') add(item.createdAt, 'refundOutCents', Math.abs(item.amountInCents));
+      // ★ 出账为负：`refundOutCents` 这里曾用 `Math.abs` 记成**正数**，导致同一个「退款支出」
+      //   在总览是 `-249.00`、在日报是 `249.00`（同名反号，且两边都到用户眼前）。
+      //   本字段与总览 `financeSummary.refundOutCents`、以及 `recordPayout` 记 PAYOUT 用
+      //   `-totalInCents` 的既有约定统一为「带符号」。
+      //   展示层需要正数时由**展示层自己**取绝对值（见 operations-report CSV 写出处）。
+      // ⚠️ 下一行 `payoutOutCents` **仍**用 `Math.abs` 记正数，与总览
+      //   `financeSummary.payoutOutCents`（负向）同名反号 —— 这是同类缺陷的**姊妹项**，
+      //   不在本轮批准范围内，已单独上报，不要在这里顺手改（改它必须同时改 CSV 写出处）。
+      if (item.eventType === 'REFUND') add(item.createdAt, 'refundOutCents', item.amountInCents);
       if (item.eventType === 'PAYOUT') add(item.createdAt, 'payoutOutCents', Math.abs(item.amountInCents));
       add(item.createdAt, 'netInCents', item.amountInCents);
     }
@@ -6684,16 +6692,23 @@ function requirePositiveInteger(value, field, { max = 100000000 } = {}) {
         const { reports, totals } = dailyOperationsReports(data, 14);
         const headers = ['日期', '电瓶车订单', '电话卡订单', '话费权益', '牌照申请', '完成电瓶车订单', '新增售后', '完成售后', '新增评价', '自动下架', '恢复上架', '服务分分档变化', '整改工单', '整改通过', '支付超时', '支付收入(元)', '退款支出(元)', '商家打款(元)', '净额(元)'];
         const money = (value) => ((Number(value) || 0) / 100).toFixed(2);
+        // ★ 展示层约定：CSV 的「退款支出(元)」列读作**正数**（金额列不带符号），
+        //   所以在这里取绝对值。数据层（日报 `refundOutCents`）自本次起统一为「出账为负」，
+        //   正负转换属于**展示层**的选择 —— 不该由数据层替展示层决定。
+        //   ⇒ 本次改动**不改变任何用户可见输出**：该列此前也一直是正数。
+        //   ⚠️ 「商家打款(元)」列此处**故意没有** `Math.abs`：日报 `payoutOutCents` 目前仍由
+        //   数据层取绝对值记为正数（见上方日报循环），该字段与总览同名反号，属已单独上报的
+        //   姊妹项；等它统一为带符号后，这里要**同步**补 `Math.abs`，否则该列会翻成负数。
         const rows = reports.map((item) => [
           item.date, item.ebikeOrders, item.phoneCardOrders, item.rechargeOrders, item.plateApplications,
           item.completedEbikeOrders, item.afterSalesCreated, item.afterSalesClosed, item.reviewsCreated,
           item.autoDelists, item.complianceRestores, item.scoreStageChanges, item.rectifyCasesCreated, item.rectifyCasesApproved, item.paymentTimeouts,
-          money(item.paymentInCents), money(item.refundOutCents), money(item.payoutOutCents), money(item.netInCents)
+          money(item.paymentInCents), money(Math.abs(item.refundOutCents)), money(item.payoutOutCents), money(item.netInCents)
         ]);
         rows.push(['近14天合计', totals.ebikeOrders, totals.phoneCardOrders, totals.rechargeOrders, totals.plateApplications,
           totals.completedEbikeOrders, totals.afterSalesCreated, totals.afterSalesClosed, totals.reviewsCreated,
           totals.autoDelists, totals.complianceRestores, totals.scoreStageChanges, totals.rectifyCasesCreated, totals.rectifyCasesApproved, totals.paymentTimeouts,
-          money(totals.paymentInCents), money(totals.refundOutCents), money(totals.payoutOutCents), money(totals.netInCents)]);
+          money(totals.paymentInCents), money(Math.abs(totals.refundOutCents)), money(totals.payoutOutCents), money(totals.netInCents)]);
         const csv = [headers, ...rows].map((row) => row.map((value) => {
           const text = String(value ?? '');
           return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;

@@ -2190,6 +2190,29 @@ test('payment lifecycle creates notifications and supports cancel or refund', as
   assert.ok(adminOverviewAfterRefund.body.data.financeSummary.paymentInCents > 0);
   assert.ok(adminOverviewAfterRefund.body.data.financeSummary.refundOutCents < 0);
 
+  // ★ 同名反号守卫（refundOutCents）：日报那一支此前**零断言**，且用 `Math.abs` 记成
+  //   **正数**，与总览（负数）同名反号 —— 同一笔退款，财务视图显示 `¥-249.00`，
+  //   导出的 CSV 里却是 `249.00`，做对账的人会以为自己看错了。
+  //   数据层必须统一为「出账为负」，与全平台既有约定一致（`recordPayout` 记 PAYOUT
+  //   用的是 `-totalInCents`）。
+  const refundDailyTotals = adminOverviewAfterRefund.body.data.operationsReport.totals;
+  assert.ok(
+    refundDailyTotals.refundOutCents < 0,
+    `日报 refundOutCents 必须与总览同为负向（actual ${refundDailyTotals.refundOutCents}）`
+  );
+  // 两个消费方必须同号（不比较金额：总览是全时段、日报是近 7 天，口径宽度不同，
+  // 比较金额会写出一条依赖窗口巧合的脆弱断言）。
+  assert.equal(
+    Math.sign(refundDailyTotals.refundOutCents),
+    Math.sign(adminOverviewAfterRefund.body.data.financeSummary.refundOutCents),
+    '总览与日报的退款支出必须同号'
+  );
+  // ★ 幅度守卫：符号对了但金额被写坏（例如变成 -1）也要能被抓到。
+  assert.ok(
+    Math.abs(refundDailyTotals.refundOutCents) >= -refundFinanceEvent.amountInCents,
+    `日报退款支出幅度不得小于本笔退款 ${-refundFinanceEvent.amountInCents}（actual ${refundDailyTotals.refundOutCents}）`
+  );
+
   const notifications = await api('/api/my/notifications', {
     headers: { authorization: `Bearer ${session.token}` }
   });
@@ -3156,6 +3179,18 @@ test('operations report provides trends and csv export', async () => {
   assert.ok(csv.includes('日期,电瓶车订单,电话卡订单,话费权益,牌照申请'));
   assert.ok(csv.includes('自动下架,恢复上架,服务分分档变化,整改工单,整改通过'));
   assert.ok(csv.includes('近14天合计'));
+
+  // ★ 展示层守卫：数据层统一为「出账为负」后，CSV 的「退款支出(元)」列**必须仍是正数**
+  //   —— 本次改动的目标是「不改变任何用户可见输出」，这一条把那个目标钉住。
+  const csvLines = csv.replace(/^\uFEFF/, '').split('\r\n');
+  const refundColumnIndex = csvLines[0].split(',').indexOf('退款支出(元)');
+  assert.ok(refundColumnIndex >= 0, 'CSV 必须含「退款支出(元)」列');
+  const csvRefundTotalCell = csvLines[csvLines.length - 1].split(',')[refundColumnIndex];
+  const csvRefundTotal = Number(csvRefundTotalCell);
+  assert.ok(Number.isFinite(csvRefundTotal), `CSV 合计行的退款支出必须是数字（actual ${csvRefundTotalCell}）`);
+  // ★ 防空转：本场景必须真的有退款，否则下面的「非负」断言退化为 0 >= 0。
+  assert.ok(csvRefundTotal > 0, `CSV 退款支出合计必须为正的展示值（actual ${csvRefundTotalCell}）`);
+  assert.ok(!csvRefundTotalCell.includes('-'), `CSV 退款支出列不得出现负号（actual ${csvRefundTotalCell}）`);
 
   const unauthorized = await fetch(`${baseUrl}/api/admin/operations-report/export`);
   assert.equal(unauthorized.status, 401);
