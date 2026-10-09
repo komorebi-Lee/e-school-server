@@ -743,5 +743,12 @@ test('⑮ ★★ 押金结算流水的资金口径：负向出账，且 netInCen
     after.summary.netInCents,
     '三个展示分项之和不得等于 netInCents —— 押金退款不在 refundOutCents 里，文案不能写成「支付 - 退款 - 打款」'
   );
-  assert.equal(after.summary.refundOutCents, 0, '押金退款不进 refundOutCents（它只过滤 REFUND）');
+  //    ★ 增量式（不用全局 `=== 0`）：将来任何人往本文件加一条**产生退款**的用例，
+  //    「全仓 REFUND 流水之和为 0」都会无故变红。本条真正要守的性质是
+  //    「押金结算**不得改变** refundOutCents」，所以只看增量。
+  assert.equal(
+    after.summary.refundOutCents - before.summary.refundOutCents,
+    0,
+    '押金结算不得改变 refundOutCents（押金退款不记为 REFUND 事件）'
+  );
 });
