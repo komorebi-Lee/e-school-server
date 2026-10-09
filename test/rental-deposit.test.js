@@ -738,11 +738,11 @@ test('⑮ ★★ 押金结算流水的资金口径：负向出账，且 netInCen
     bucketSum + depositSettlementSum,
     'netInCents 必须等于三个展示分项之和再加上押金结算流水之和'
   );
-  assert.notEqual(
-    bucketSum,
-    after.summary.netInCents,
-    '三个展示分项之和不得等于 netInCents —— 押金退款不在 refundOutCents 里，文案不能写成「支付 - 退款 - 打款」'
-  );
+  //    ★ 这里**刻意不再**断言 `assert.notEqual(bucketSum, netInCents, …)`：
+  //      它可被上面那条等式 + `:734` 的「非零」守卫**算术蕴含**，不增加分辨力；
+  //      而它把「三个分项之和不等于净额」当成事实钉住 —— 那是**当前设计决定**
+  //      （押金退款不进 `refundOutCents`），将来若真的实现「把押金退款并入退款列」，
+  //      它会**无故变红**，把一次正当的口径调整报成回归。
   //    ★ 增量式（不用全局 `=== 0`）：将来任何人往本文件加一条**产生退款**的用例，
   //    「全仓 REFUND 流水之和为 0」都会无故变红。本条真正要守的性质是
   //    「押金结算**不得改变** refundOutCents」，所以只看增量。
@@ -750,5 +750,47 @@ test('⑮ ★★ 押金结算流水的资金口径：负向出账，且 netInCen
     after.summary.refundOutCents - before.summary.refundOutCents,
     0,
     '押金结算不得改变 refundOutCents（押金退款不记为 REFUND 事件）'
+  );
+});
+
+test('⑯ ★★ 全额退款（扣款 0）：netInCents 必须下降整笔押金 —— 用户报告的那个现象本身', async () => {
+  // ★ 这条用例存在的理由：最初报告的现象就是**全额退款** ——
+  //   「29900 分实实在在退给了用户，而 netInCents 一动不动」。
+  //   ⑮ 用 `d = 5000` 已能区分正确/错误实现；只有 `d = 0` 把**报告本身**编码成判据：
+  //   它钉住的是「整笔押金流出必须如实反映」，而不是「某个比例下算式对不对」。
+  //   （`d = 0` 也是唯一能让「只改符号、不改金额」那类错误实现彻底暴露的参数点：
+  //    那种实现在此处记 `-0 = 0`，账上一动不动 —— 正是原缺陷的形态。）
+  const order = await createPaidRentalOrder('rental_dep_full_refund');
+  const depositId = await driveToRefundPending(order);
+
+  const before = await readNetInCents();
+  const settled = await settle(depositId, { deductionInCents: 0, note: '车辆无损，全额退还。' });
+  assert.equal(settled.response.status, 200);
+  const after = await readNetInCents();
+
+  const deposit = depositById(depositId);
+  assert.equal(deposit.deductionInCents, 0, '前置条件：全额退款（无扣款）');
+  assert.equal(deposit.refundedInCents, DEPOSIT_IN_CENTS, '前置条件：整笔押金退回');
+
+  const events = financeEventsAbout(depositId);
+  assert.equal(events.length, 1, '结算只新增一条流水');
+  assert.equal(
+    events[0].amountInCents,
+    -DEPOSIT_IN_CENTS,
+    `全额退款时流水必须记整笔押金流出（expected ${-DEPOSIT_IN_CENTS}，actual ${events[0].amountInCents}）`
+  );
+
+  // ★ 两个消费方都必须下降整笔押金 —— 只钉一个会漏掉另一个。
+  const summaryDelta = after.summary.netInCents - before.summary.netInCents;
+  assert.equal(
+    summaryDelta,
+    -DEPOSIT_IN_CENTS,
+    `总览 netInCents 必须下降 ${DEPOSIT_IN_CENTS}（expected ${-DEPOSIT_IN_CENTS}，actual ${summaryDelta}）`
+  );
+  const dailyDelta = after.dailyTotals.netInCents - before.dailyTotals.netInCents;
+  assert.equal(
+    dailyDelta,
+    -DEPOSIT_IN_CENTS,
+    `日报 netInCents 必须下降 ${DEPOSIT_IN_CENTS}（expected ${-DEPOSIT_IN_CENTS}，actual ${dailyDelta}）`
   );
 });
