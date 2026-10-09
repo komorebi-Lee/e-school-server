@@ -3,7 +3,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { spawnSync } = require('node:child_process');
+const vm = require('node:vm');
+const { createRequire } = require('node:module');
 const { after, before, test } = require('node:test');
 const { JsonStore } = require('../src/store');
 const { ApiError, createApp } = require('../src/app');
@@ -38,6 +39,84 @@ async function loginWeChat() {
   });
   assert.equal(result.response.status, 200);
   return result.body.data;
+}
+
+/**
+ * `hash-admin-password.js` 的**进程内替身**（方案 B）。
+ *
+ * 本环境 node 无法 spawn node（EBUSY，先例 `test/miniapp.test.js:86`），
+ * 因此不再起子进程，而是在 `vm` 里跑**同一份脚本源码**，只把 `process` 换成桩。
+ *
+ * 桩的三条保真性质（**均已实测**，B1/B2）：
+ *   ① `exit` 必须**终止控制流** —— 用哨兵异常中断。若只记录不中断，`main()` 会继续往下
+ *      算出一个哈希并写出，制造「短口令也产出哈希」这种真实世界不存在的行为（**假绿**）。
+ *   ② **退出后的写入必须丢弃** —— `process.exit` 之后再 `stdout/stderr.write` 一律不落账，
+ *      与真实 Node（进程已死、不可能再写）一致。
+ *   ③ **`await` 是承重的** —— `main()` 是 async，脚本同步返回时它只跑到第一个 `await`；
+ *      不 await 就取 `stdout`，拿到的是**空串**（实测 B1/B2 已确认）。
+ */
+class ProcessExit extends Error {
+  constructor(code) {
+    super(`process.exit(${code})`);
+    this.exitCode = code;
+  }
+}
+
+async function runHelperScript(input) {
+  const helperPath = path.join(__dirname, '..', 'scripts', 'hash-admin-password.js');
+  const source = fs.readFileSync(helperPath, 'utf8');
+
+  let stdout = '';
+  let stderr = '';
+  let exitCode = null;
+  let exited = false;
+
+  // ② 退出之后的一切写入都丢弃。
+  const writeInto = (sink) => (chunk) => {
+    if (!exited) sink(String(chunk));
+    return true;
+  };
+
+  const fakeProcess = {
+    argv: ['node', helperPath],
+    env: process.env,
+    stdin: (async function* readStdin() {
+      yield input;
+    })(),
+    stdout: { write: writeInto((text) => { stdout += text; }) },
+    stderr: { write: writeInto((text) => { stderr += text; }) },
+    exit(code) {
+      // 已经「退出」过：真实进程里这一行根本不会被执行到。
+      if (exited) return;
+      exited = true;                                   // ②
+      exitCode = code === undefined ? 0 : code;
+      throw new ProcessExit(exitCode);                 // ①
+    }
+  };
+
+  const context = vm.createContext({
+    require: createRequire(helperPath),
+    process: fakeProcess,
+    console,
+    Buffer,
+    module: { exports: {} },
+    exports: {},
+    __dirname: path.dirname(helperPath),
+    __filename: helperPath
+  });
+
+  try {
+    new vm.Script(source, { filename: helperPath }).runInContext(context);
+  } catch (error) {
+    if (error instanceof ProcessExit) exitCode = error.exitCode;
+    else throw error;
+  }
+
+  // ③ 排空微任务，让 `main()` 的 await 链跑完（stdin 异步迭代 → 写 stdout/stderr）。
+  await new Promise((resolve) => setImmediate(resolve));
+
+  // 正常跑完（从未调用 exit）等价于退出码 0，与真实 Node 一致。
+  return { status: exitCode === null ? 0 : exitCode, stdout, stderr };
 }
 
 before(async () => {
@@ -216,10 +295,7 @@ test('admin login verifies a configured scrypt password hash', async () => {
 });
 
 test('admin password hash helper reads the secret from stdin', async () => {
-  const helper = spawnSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'hash-admin-password.js')], {
-    input: 'stdin-admin-password-2026\n',
-    encoding: 'utf8'
-  });
+  const helper = await runHelperScript('stdin-admin-password-2026\n');
   assert.equal(helper.status, 0);
   assert.match(helper.stdout.trim(), /^scrypt\$[0-9a-f]+\$[0-9a-f]+$/);
 
@@ -241,6 +317,15 @@ test('admin password hash helper reads the secret from stdin', async () => {
     await new Promise((resolve) => helperServer.close(resolve));
     fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   }
+});
+
+test('admin password hash helper rejects a password shorter than 12 characters', async () => {
+  const helper = await runHelperScript('too-short\n');
+  assert.equal(helper.status, 1);
+  assert.equal(helper.stdout, '');
+  // ★ 退出后的写入必须被丢弃：stderr 里**只有**那句拒绝原因，
+  //   不得混入 `process.exit` 之后产生的任何输出（真实 Node 里进程已死，不可能再写）。
+  assert.equal(helper.stderr, '管理员密码至少需要 12 位\n');
 });
 
 test('admin sessions survive a service restart from the persistent store', async () => {
