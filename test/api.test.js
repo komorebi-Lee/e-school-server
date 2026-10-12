@@ -1212,6 +1212,35 @@ test('merchant can be approved and manage its own products and orders', async ()
   assert.ok(payoutFinanceEvent);
   assert.equal(payoutFinanceEvent.amountInCents, -2300);
   assert.equal(payoutFinanceEvent.merchantId, applied.body.data.id);
+
+  // ★ 同名反号守卫（payoutOutCents）：与 refundOutCents 是同一段日报循环里的**姊妹项**，
+  //   但更糟 —— 这个字段此前**两侧断言都是零**（refundOutCents 总览侧至少有一条）。
+  //   形态：总览 `financeSummary.payoutOutCents` 带符号（负），日报那一支用 `Math.abs`（正）。
+  //   ① 聚合本身：上面 :1213 钉的是**单笔事件**的 amountInCents，**不是聚合**。
+  //      若聚合的 filter 写错（例如 'PAYOUTS'、或漏状态），事件断言照样通过 ⇒ 聚合必须自己有一条。
+  const payoutSummary = payoutOverview.body.data.financeSummary;
+  assert.ok(
+    payoutSummary.payoutOutCents <= -2300,
+    `总览聚合 payoutOutCents 必须为负且至少含本笔 -2300（actual ${payoutSummary.payoutOutCents}）`
+  );
+  //   ② 日报侧：数据层此处用 `Math.abs` 记成**正数**，与总览同名反号 —— 这就是本轮的**红源**。
+  const payoutDailyTotals = payoutOverview.body.data.operationsReport.totals;
+  assert.ok(
+    payoutDailyTotals.payoutOutCents < 0,
+    `日报 payoutOutCents 必须与总览同为负向（actual ${payoutDailyTotals.payoutOutCents}）`
+  );
+  // 两个消费方必须同号（不比较金额：总览是全时段、日报是近 7 天，口径宽度不同，
+  // 比较金额会写出一条依赖窗口巧合的脆弱断言）。
+  assert.equal(
+    Math.sign(payoutDailyTotals.payoutOutCents),
+    Math.sign(payoutSummary.payoutOutCents),
+    '总览与日报的商家打款必须同号'
+  );
+  // ★ 幅度守卫：符号对了但金额被写坏（例如变成 -1）也要能被抓到。
+  assert.ok(
+    Math.abs(payoutDailyTotals.payoutOutCents) >= 2300,
+    `日报商家打款幅度不得小于本笔打款 2300（actual ${payoutDailyTotals.payoutOutCents}）`
+  );
   const resetRate = await api('/api/admin/settings', {
     method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${adminLogin.body.data.token}` },
     body: JSON.stringify({ commissionRatePercent: 2 })
@@ -3191,6 +3220,19 @@ test('operations report provides trends and csv export', async () => {
   // ★ 防空转：本场景必须真的有退款，否则下面的「非负」断言退化为 0 >= 0。
   assert.ok(csvRefundTotal > 0, `CSV 退款支出合计必须为正的展示值（actual ${csvRefundTotalCell}）`);
   assert.ok(!csvRefundTotalCell.includes('-'), `CSV 退款支出列不得出现负号（actual ${csvRefundTotalCell}）`);
+
+  // ★ 展示层守卫（payoutOutCents，与退款列**对称**）：数据层统一为「出账为负」后，
+  //   CSV 的「商家打款(元)」列**必须仍是正数** —— 本次改动的目标是「不改变任何用户可见输出」。
+  //   ★ 为什么这一列必须显式补 `Math.abs`：它此前没有，之所以显示正数**纯粹**因为数据层已经 abs 过；
+  //     数据层一旦去掉 abs，这一列会**立刻翻成负数**（用户可见变化）⇒ 必须同步补上。
+  const payoutColumnIndex = csvLines[0].split(',').indexOf('商家打款(元)');
+  assert.ok(payoutColumnIndex >= 0, 'CSV 必须含「商家打款(元)」列');
+  const csvPayoutTotalCell = csvLines[csvLines.length - 1].split(',')[payoutColumnIndex];
+  const csvPayoutTotal = Number(csvPayoutTotalCell);
+  assert.ok(Number.isFinite(csvPayoutTotal), `CSV 合计行的商家打款必须是数字（actual ${csvPayoutTotalCell}）`);
+  // ★ 防空转：本场景必须真的有打款，否则「为正」断言会退化成没有判别力的比较。
+  assert.ok(csvPayoutTotal > 0, `CSV 商家打款合计必须为正的展示值（actual ${csvPayoutTotalCell}）`);
+  assert.ok(!csvPayoutTotalCell.includes('-'), `CSV 商家打款列不得出现负号（actual ${csvPayoutTotalCell}）`);
 
   const unauthorized = await fetch(`${baseUrl}/api/admin/operations-report/export`);
   assert.equal(unauthorized.status, 401);
