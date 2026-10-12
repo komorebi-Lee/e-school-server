@@ -506,3 +506,47 @@ test('T41 ⑦ 金额格式化必须复用 money()，不得引入第二个格式�
   const html = renderView(app, elements, 'rentals');
   assert.ok(html.includes('¥300.00'), '⑦ 视图金额必须是 money() 的两位小数形态');
 });
+
+// ── #63 `money()` 负值形态：负号必须在币种【之前】 ────────────────────────────
+//
+// 现状 `money(-12000)` → `¥-120.00`（负号在 `¥` **之后**）；中文财务惯例是 `-¥120.00`。
+// 这是**通用**缺陷：`money()` 是唯一的金额格式化入口（⑦ 已把这一点钉死），
+// 所以每一处负值渲染都受影响 —— 总览的「退款支出」「商家打款」「资金净额」在常见数据下都是负的。
+//
+// 形态要求（与 ⑦ 的三条约束**同时**成立）：
+//   ① 全文件 `¥` 仍只有 1 处；② 含 `¥` 那行仍以 `const money=` 开头（**不能有空格**）；③ 仍不用 `toFixed`。
+
+test('#63 负值金额必须渲染成 -¥X（负号在币种之前），且正数形态不变', () => {
+  const data = overviewShape();
+  // 财务面板直接消费 `financeSummary` 的出账字段（两者带符号、为负）。
+  data.financeSummary = {
+    paymentInCents: 120000,
+    refundOutCents: -24900,
+    payoutOutCents: -2300,
+    netInCents: 92800
+  };
+  const { app, elements } = loadAdminApp({ data });
+  const html = renderView(app, elements, 'finance');
+
+  // ① 正数形态**不得**被改变 —— 这是回归保护，不是本次的目标。
+  assert.ok(html.includes('¥1,200.00'), '正数必须仍是 ¥1,200.00（本次不得改动正数形态）');
+  assert.ok(html.includes('¥928.00'), '正数必须仍是 ¥928.00（本次不得改动正数形态）');
+
+  // ② ★ 负值：负号必须在币种【之前】。
+  assert.ok(html.includes('-¥249.00'), '退款支出必须渲染成 -¥249.00（负号在币种之前）');
+  assert.ok(html.includes('-¥23.00'), '商家打款必须渲染成 -¥23.00（负号在币种之前）');
+
+  // ③ ★ 不得残留「¥-」形态。
+  assert.ok(!html.includes('¥-'), '不得出现「¥-」形态（负号在币种之后）');
+
+  // ④ 边界：1 分（最小单位）也必须是 -¥0.01，而不是 ¥-0.01。
+  const cent = overviewShape();
+  cent.financeSummary = { paymentInCents: 0, refundOutCents: -1, payoutOutCents: 0, netInCents: -1 };
+  const second = loadAdminApp({ data: cent });
+  const centHtml = renderView(second.app, second.elements, 'finance');
+  assert.ok(centHtml.includes('-¥0.01'), '1 分必须渲染成 -¥0.01（负号在币种之前）');
+  assert.ok(!centHtml.includes('¥-'), '1 分场景也不得出现「¥-」形态');
+  // 零仍是 ¥0.00（不得被写成 -¥0.00）。
+  assert.ok(centHtml.includes('¥0.00'), '零必须仍是 ¥0.00，不得写成 -¥0.00');
+  assert.ok(!centHtml.includes('-¥0.00'), '零不得渲染成 -¥0.00');
+});
