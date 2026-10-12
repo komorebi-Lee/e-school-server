@@ -85,7 +85,10 @@ function overviewShape() {
  * @returns {{app: object, elements: Map, calls: Array}}
  */
 function loadAdminApp(options = {}) {
-  const source = readAdminSource();
+  const baseSource = readAdminSource();
+  // ★ `sourceTransform` 供「给 label() 打桩」这类**渲染级**判据使用；
+  //   不传时行为与从前完全一致（默认路径不受影响）。
+  const source = options.sourceTransform ? options.sourceTransform(baseSource) : baseSource;
   const elements = new Map();
   const element = (selector) => {
     if (!elements.has(selector)) {
@@ -116,9 +119,10 @@ function loadAdminApp(options = {}) {
     }),
     alert() {},
     prompt: () => (prompts.length ? prompts.shift() : null),
-    setTimeout: () => 0
+    setTimeout: () => 0,
+    __unknown: []
   };
-  const app = vm.runInNewContext(`${source}; ({ state, render })`, context, { timeout: 5000 });
+  const app = vm.runInNewContext(`${source}; ({ state, render, statuses, options, leadStatuses, __unknown })`, context, { timeout: 5000 });
   app.state.data = options.data || overviewShape();
   app.state.rentalDeposits = options.rentalDeposits || [];
   if (options.rentalDepositsError) app.state.rentalDepositsError = options.rentalDepositsError;
@@ -517,6 +521,15 @@ test('T41 ⑦ 金额格式化必须复用 money()，不得引入第二个格式�
 //   ① 全文件 `¥` 仍只有 1 处；② 含 `¥` 那行仍以 `const money=` 开头（**不能有空格**）；③ 仍不用 `toFixed`。
 
 test('#63 负值金额必须渲染成 -¥X（负号在币种之前），且正数形态不变', () => {
+  // ★ 判据自测（放在最前，与渲染无关）：收集器必须只记录**不满足**项。
+  //   若收集器恒空，下面那条 `violations.length === 0` 就是装饰。
+  const probe = [];
+  const probeExpect = (ok, message) => { if (!ok) probe.push(message); };
+  probeExpect(false, 'A');
+  probeExpect(true, 'B');
+  probeExpect(false, 'C');
+  assert.deepEqual(probe, ['A', 'C'], '#63 判据自测：收集器必须只记录不满足项');
+
   const data = overviewShape();
   // 财务面板直接消费 `financeSummary` 的出账字段（两者带符号、为负）。
   data.financeSummary = {
@@ -528,25 +541,219 @@ test('#63 负值金额必须渲染成 -¥X（负号在币种之前），且正�
   const { app, elements } = loadAdminApp({ data });
   const html = renderView(app, elements, 'finance');
 
-  // ① 正数形态**不得**被改变 —— 这是回归保护，不是本次的目标。
-  assert.ok(html.includes('¥1,200.00'), '正数必须仍是 ¥1,200.00（本次不得改动正数形态）');
-  assert.ok(html.includes('¥928.00'), '正数必须仍是 ¥928.00（本次不得改动正数形态）');
-
-  // ② ★ 负值：负号必须在币种【之前】。
-  assert.ok(html.includes('-¥249.00'), '退款支出必须渲染成 -¥249.00（负号在币种之前）');
-  assert.ok(html.includes('-¥23.00'), '商家打款必须渲染成 -¥23.00（负号在币种之前）');
-
-  // ③ ★ 不得残留「¥-」形态。
-  assert.ok(!html.includes('¥-'), '不得出现「¥-」形态（负号在币种之后）');
-
-  // ④ 边界：1 分（最小单位）也必须是 -¥0.01，而不是 ¥-0.01。
+  // 边界：1 分（最小单位）与 0 分（不得写成 -¥0.00）各自单独渲染一次。
   const cent = overviewShape();
   cent.financeSummary = { paymentInCents: 0, refundOutCents: -1, payoutOutCents: 0, netInCents: -1 };
   const second = loadAdminApp({ data: cent });
   const centHtml = renderView(second.app, second.elements, 'finance');
-  assert.ok(centHtml.includes('-¥0.01'), '1 分必须渲染成 -¥0.01（负号在币种之前）');
-  assert.ok(!centHtml.includes('¥-'), '1 分场景也不得出现「¥-」形态');
-  // 零仍是 ¥0.00（不得被写成 -¥0.00）。
-  assert.ok(centHtml.includes('¥0.00'), '零必须仍是 ¥0.00，不得写成 -¥0.00');
-  assert.ok(!centHtml.includes('-¥0.00'), '零不得渲染成 -¥0.00');
+
+  // ★ 四组条件**全部求值后**再一次性断言。
+  //   此前 ②（负值形态）用的是 `assert.ok`：它一旦抛错，③④ 就是**从未执行**——
+  //   红跑里那两条的判别力**无从证明**（「非空转」不能靠「它们看起来对」来声称）。
+  const violations = [];
+  const expect = (ok, message) => { if (!ok) violations.push(message); };
+
+  // ① 正数形态**不得**被改变 —— 这是回归保护，不是本次的目标。
+  //    ★ 这两条同时是「面板真的渲染了 money() 输出」的**正向锚点**：它们若成立，
+  //      下面的负值断言就不是在空 HTML 上求值。
+  expect(html.includes('¥1,200.00'), '正数必须仍是 ¥1,200.00（本次不得改动正数形态）');
+  expect(html.includes('¥928.00'), '正数必须仍是 ¥928.00（本次不得改动正数形态）');
+
+  // ② ★ 负值：负号必须在币种【之前】。
+  expect(html.includes('-¥249.00'), '退款支出必须渲染成 -¥249.00（负号在币种之前）');
+  expect(html.includes('-¥23.00'), '商家打款必须渲染成 -¥23.00（负号在币种之前）');
+
+  // ③ ★ 不得残留「¥-」形态。
+  expect(!html.includes('¥-'), '不得出现「¥-」形态（负号在币种之后）');
+
+  // ④ 边界：1 分（最小单位）也必须是 -¥0.01，而不是 ¥-0.01；零不得被写成 -¥0.00。
+  expect(centHtml.includes('-¥0.01'), '1 分必须渲染成 -¥0.01（负号在币种之前）');
+  expect(!centHtml.includes('¥-'), '1 分场景也不得出现「¥-」形态');
+  expect(centHtml.includes('¥0.00'), '零必须仍是 ¥0.00，不得写成 -¥0.00');
+  expect(!centHtml.includes('-¥0.00'), '零不得渲染成 -¥0.00');
+
+  assert.equal(violations.length, 0, `#63 金额形态共 ${violations.length} 条不满足：\n  - ${violations.join('\n  - ')}`);
+});
+
+// ── (b) 结构式判据：状态码必须都有中文标签，不得回落成原样英文代码 ──────────────
+//
+// `label(v)` 的定义是 `statuses[v]||v||'—'` ⇒ **只要 `v` 不是 `statuses` 的 key，
+// 它就被原样显示给用户**（英文代码直接进页面）。本判据把「会被 `label()` 消费的状态码」
+// 全部枚举出来，逐个要求它是 `statuses` 的 key。
+//
+// ★ key 集必须取【运行时】的 `statuses`，**不能**只解析第 6 行的字面量 ——
+//   `statuses` 还被 3 处**顶层** `Object.assign(statuses, …)` 追加
+//   （leads / admins / market）。只取字面量会在 `marketView` 的
+//   `['ACTIVE','RESERVED','SOLD','REMOVED']` 上**误红** —— 那 4 个是 market 合法追加的。
+//   而误红之后最危险的「修法」是把这 4 个塞进第 6 行字面量，那会把 market 语义
+//   **固化进全局字典**，加重「同名 key 跨域覆盖」问题（如 `ACTIVE` 先写「启用」后被写成「在售」）。
+//
+// ★ 三种 `statusesList` 形态都要覆盖 —— 缺任何一种就是**静默漏报**：
+//   ① 数组字面量   `statusesList:['PENDING','PAID']`
+//   ② 引用形态     `statusesList: options.afterSales`   ← 不是字面量
+//   ③ 命名常量     `statusesList: leadStatuses`
+//   并且 `statusControl()` 走的是 **`options[view]`**，**完全不经过 `statusesList`**
+//   ⇒ 只扫 `statusesList` 的判据**天然覆盖不到它**，必须单独覆盖。
+
+test('(b) 状态码不得回落成原样英文：statusesList 三形态 + statusControl 的 options 全覆盖', () => {
+  const source = fs.readFileSync(ADMIN_JS_PATH, 'utf8');
+  const { app } = loadAdminApp({});
+  const statusKeys = Object.keys(app.statuses);
+
+  // 判据本体：返回违规列表（空 = 通过）。抽成函数是为了能做下面的**反向控制**。
+  const violationsOf = (name, list) => {
+    if (!Array.isArray(list)) return [`${name} 求值结果不是数组（实得 ${typeof list}）—— 判据无法检查它`];
+    return list
+      .filter((code) => !statusKeys.includes(code))
+      .map((code) => `${name} 里的 ${code} 不是 statuses 的 key（会被原样显示成英文代码）`);
+  };
+
+  // ① + ② + ③：源码里每一处 `statusesList: <expr>`，把 `<expr>` 在模块上下文里求值。
+  //   用「求值」而不是「解析字面量」，三种形态就统一覆盖了，将来加新形态也不会漏。
+  //   ★ 正则必须吃下**点号路径**（`options.afterSales`）：只写 `[A-Za-z_$][\w$]*`
+  //     会停在 `options` 上，求值得到整个 `options` 对象 ⇒ 判据静默失效。
+  const sites = [...source.matchAll(/statusesList\s*:\s*(\[[^\]]*\]|[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)/g)];
+  // ★ 完备性自测：不得漏扫任何一处 `statusesList:`（正则若漏掉一种形态，这里会红）。
+  const rawSites = (source.match(/statusesList\s*:/g) || []).length;
+  assert.equal(sites.length, rawSites,
+    `(b) 判据自测：扫描到的 statusesList 站点数必须等于源码里的总数（扫到 ${sites.length} / 实际 ${rawSites}）`);
+
+  const violations = [];
+  let literalForms = 0;
+  let referenceForms = 0;
+  for (const site of sites) {
+    const line = source.slice(0, site.index).split('\n').length;
+    const expr = site[1];
+    if (expr.startsWith('[')) literalForms += 1; else referenceForms += 1;
+    let list;
+    try {
+      list = vm.runInNewContext(expr, app, { timeout: 2000 });
+    } catch (error) {
+      violations.push(`L${line} statusesList:${expr} 无法在模块上下文求值（${error.message}）`);
+      continue;
+    }
+    violations.push(...violationsOf(`L${line} statusesList:${expr}`, list));
+  }
+  // 两种形态都必须**真的被扫到**，否则「三种形态全覆盖」是自称的。
+  assert.ok(literalForms >= 10, `(b) 判据自测：字面量形态至少 10 处，实得 ${literalForms}`);
+  assert.ok(referenceForms >= 6, `(b) 判据自测：引用形态至少 6 处，实得 ${referenceForms}`);
+
+  // ④ `statusControl` 走 `options[view]`，不经过 `statusesList` ⇒ 单独覆盖全部 6 组。
+  const optionGroups = Object.entries(app.options);
+  assert.ok(optionGroups.length >= 6, `(b) 判据自测：options 至少 6 组，实得 ${optionGroups.length}`);
+  for (const [view, list] of optionGroups) violations.push(...violationsOf(`options.${view}`, list));
+
+  assert.equal(violations.length, 0, `(b) 状态码回落共 ${violations.length} 条：\n  - ${violations.join('\n  - ')}`);
+
+  // ★ 反向控制（判据必须能红）：
+  //   ① 塞一个确实不存在的状态码 ⇒ 必须被报出；
+  //   ② 合法 key（**含 `Object.assign` 追加的** `ACTIVE`/`RESERVED`）⇒ 不得误报。
+  assert.deepEqual(
+    violationsOf('自测', ['PENDING', '__NOT_A_STATUS__']),
+    ['自测 里的 __NOT_A_STATUS__ 不是 statuses 的 key（会被原样显示成英文代码）'],
+    '(b) 判据自测：不存在的状态码必须被报出'
+  );
+  assert.deepEqual(
+    violationsOf('自测', ['PENDING', 'ACTIVE', 'RESERVED', 'SOLD', 'REMOVED', 'DISABLED']),
+    [],
+    '(b) 判据自测：合法 key（含 Object.assign 追加的）不得被误报'
+  );
+});
+
+// ── (b2) 端到端：渲染真实数据后，`label()` 不得收到任何没有中文标签的值 ──────────────
+//
+// ★ 为什么 (b) 不够：`(b)` 只扫 `statusesList` 与 `options` 两条**静态**路径。
+//   而 `label()` 还有第三条路径 —— **行内动态值**，例如 `phones` / `recharges` 的
+//   `label(x.paymentStatus)`。服务端确实会写 `paymentStatus:'UNPAID'`（见 `src/app.js`），
+//   而 `UNPAID` 曾经不在 `statuses` 里 ⇒ 页面把英文 `UNPAID` 直接显示给用户。
+//   ★ 实测（变异：把补上的 4 个 key 删回去）：`(b)` **只报出 3 条**（PAYMENT/REFUND/PAYOUT），
+//     对 `UNPAID` **恒绿** ⇒ 单靠 (b)，`UNPAID` 的修复**无人看守**。
+// ⇒ 补一条**渲染级**判据：把 `label()` 打桩记录实参，渲染全部可达视图，
+//   断言「没有任何实参不在 `statuses` 里」。它与路径形态无关 ⇒ 覆盖所有路径。
+
+test('(b2) 端到端：渲染真实数据后，label() 不得收到任何没有中文标签的值', () => {
+  const MARKER = "const label=v=>statuses[v]||v||'—';";
+  const instrument = (source) => {
+    // 判据自测：定位不到 `label()` 定义就必须红，否则打桩会**静默失效**（判据恒绿）。
+    assert.ok(source.includes(MARKER), '(b2) 判据自测：必须能定位 label() 定义');
+    return source.replace(MARKER,
+      "const label=v=>{ if(v!==undefined&&v!==null&&v!==''&&!(v in statuses)){__unknown.push(v);} return statuses[v]||v||'—'; };");
+  };
+
+  // 每个集合里**会被 `label()` 消费**的字段，以及它们的取值域（取自服务端实测）。
+  const PAY_STATUSES = ['UNPAID', 'PAID', 'CANCELLED', 'EXPIRED', 'PARTIALLY_REFUNDED', 'REFUNDED'];
+  const SPEC = {
+    orders: { status: ['PENDING_PAYMENT', 'PAID', 'FULFILLING', 'COMPLETED', 'CANCELLED', 'AFTER_SALE'], paymentStatus: PAY_STATUSES, base: { orderNo: 'SO1', totalInCents: 100, items: [] } },
+    paymentOrders: { status: ['PENDING', 'PAID', 'CANCELLED', 'PARTIALLY_REFUNDED', 'REFUNDED'], paymentStatus: PAY_STATUSES, base: {} },
+    phoneCardOrders: { status: ['PENDING_PAYMENT', 'PENDING_REALNAME', 'ACTIVATED', 'CANCELLED', 'REJECTED'], paymentStatus: PAY_STATUSES, base: { customerName: 'c', phone: '1', planName: 'p', amountInCents: 1 } },
+    rechargeOrders: { status: ['PENDING_PAYMENT', 'PENDING_CREDIT', 'CREDITED', 'CANCELLED', 'REJECTED'], paymentStatus: PAY_STATUSES, base: { phone: '1', paidInCents: 1, receiveInCents: 1 } },
+    plateApplications: { status: ['PENDING_PAYMENT', 'MATERIAL_PENDING', 'REVIEWING', 'COMPLETED', 'REJECTED'], paymentStatus: PAY_STATUSES, base: { customerName: 'c', studentNo: 's' } },
+    afterSales: { status: ['SUBMITTED', 'REVIEWING', 'CLOSED', 'REJECTED'], base: { orderId: 'o', type: 'REFUND', quantity: 0, customerName: 'c' } },
+    broadbandApplications: { status: ['PENDING_VERIFY', 'APPROVED', 'REJECTED'], base: { ownerPhone: '1', companionPhone: '2' } },
+    marketItems: { status: ['ACTIVE', 'RESERVED', 'SOLD', 'REMOVED'], base: { title: 't', sellerName: 's', categoryText: 'c', conditionText: 'k', priceText: '1', contact: 'x', statusText: 'z' } },
+    productReviews: { visibility: ['PUBLISHED', 'HIDDEN'], base: { rating: 5, content: 'c', productId: 'p' } },
+    forumPosts: { status: ['PUBLISHED', 'HIDDEN'], base: { title: 't', authorName: 'a', boardText: 'b', content: 'c', likes: 1, commentCount: 1 } },
+    merchantScores: { grade: ['EXCELLENT', 'GOOD', 'WATCH', 'RISK'], stage: ['NORMAL', 'LIMITED', 'RESTRICTED'], base: { score: 90, merchantName: 'm' } },
+    slaAlerts: { level: ['OVERDUE', 'WARNING'], status: ['OPEN', 'ACKNOWLEDGED', 'RESOLVED'], base: { title: 't', ownerName: 'o' } },
+    settlements: { settlementStatus: ['PENDING_DELIVERY', 'IN_ACCOUNT_PERIOD', 'FROZEN', 'PENDING_SETTLE', 'PAYOUT_REQUESTED', 'SETTLED', 'REFUNDED'], base: { merchantName: 'm', amountInCents: 1 } },
+    payoutRequests: { status: ['PENDING_REVIEW', 'SETTLED', 'REJECTED', 'CANCELLED'], base: { merchantName: 'm', amountInCents: 1 } },
+    leads: { status: ['SUBMITTED', 'FOLLOW_UP', 'COMPLETED', 'INVALID'], base: { customerName: 'c', businessType: 'b' } },
+    qualificationRenewals: { status: ['PENDING_REVIEW', 'APPROVED', 'REJECTED'], base: { merchantName: 'm' } },
+    merchants: { status: ['APPROVED', 'PENDING_REVIEW', 'REJECTED'], base: { name: 'n' } },
+    financeEvents: { eventType: ['PAYMENT', 'REFUND', 'PAYOUT', 'DEPOSIT_SETTLEMENT'], base: { amountInCents: 1, referenceId: 'r' } },
+    adminUsers: { status: ['ACTIVE', 'DISABLED'], base: { username: 'u', displayName: 'd', role: 'OPERATOR' } }
+  };
+
+  // 造行：每个字段的每个取值各一行，其余字段取该字段的第一个值。
+  const buildRows = (spec) => {
+    const fieldNames = Object.keys(spec).filter((key) => key !== 'base');
+    const out = [];
+    let index = 0;
+    for (const field of fieldNames) {
+      for (const value of spec[field]) {
+        const row = { id: `r${index}`, createdAt: '2026-01-01T00:00:00Z', ...(spec.base || {}) };
+        for (const other of fieldNames) row[other] = spec[other][0];
+        row[field] = value;
+        index += 1;
+        out.push(row);
+      }
+    }
+    return out;
+  };
+
+  const data = overviewShape();
+  for (const [collection, spec] of Object.entries(SPEC)) data[collection] = buildRows(spec);
+
+  // ★ 视图清单必须含 `admins`：它在 `:265` 的 `views` 表里**没有**，
+  //   而是在 `render` 被**重新赋值**时（`if (state.view === 'admins')`）接进来的。
+  //   只读 `:265` 会漏掉它 —— 而它恰恰是 `ACTIVE` 标签被覆盖后的渲染点。
+  const VIEWS = ['dashboard', 'merchants', 'qualification', 'leads', 'products', 'stock', 'promos',
+    'reviews', 'market', 'forum', 'orders', 'payments', 'phones', 'recharges', 'finance',
+    'serviceCollabs', 'settlements', 'payouts', 'rentals', 'patrol', 'scores', 'broadband',
+    'plates', 'afterSales', 'notifications', 'logs', 'settings', 'admins'];
+
+  const seen = new Set();
+  const silent = [];
+  for (const view of VIEWS) {
+    const { app, elements } = loadAdminApp({ data, sourceTransform: instrument });
+    const html = renderView(app, elements, view);
+    // 判据自测：视图必须**真的渲染出内容**，否则「扫过了」是假的。
+    if (!html) silent.push(view);
+    for (const value of app.__unknown) seen.add(value);
+  }
+  assert.deepEqual(silent, [], `(b2) 判据自测：以下视图没有渲染出任何内容：${JSON.stringify(silent)}`);
+
+  assert.equal(seen.size, 0,
+    `(b2) 以下状态码没有中文标签，会被原样显示成英文代码：${JSON.stringify([...seen])}`);
+
+  // ★ 反向控制：打桩必须真的能捕获（否则上面那条断言恒绿，判据就是装饰）。
+  const probeData = overviewShape();
+  probeData.phoneCardOrders = [{
+    id: 'x', status: 'PENDING_PAYMENT', paymentStatus: '__NOT_A_STATUS__',
+    customerName: 'c', phone: '1', planName: 'p', amountInCents: 1, createdAt: '2026-01-01T00:00:00Z'
+  }];
+  const probe = loadAdminApp({ data: probeData, sourceTransform: instrument });
+  renderView(probe.app, probe.elements, 'phones');
+  assert.deepEqual([...probe.app.__unknown], ['__NOT_A_STATUS__'],
+    '(b2) 判据自测：打桩必须能捕获不存在的状态码');
 });

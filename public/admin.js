@@ -3,7 +3,18 @@ const state={data:null,revenueTrend:null,view:'dashboard',query:'',status:'ALL',
 const lowStockThreshold=Number((state.data.settings||{}).lowStockThreshold??10);
 const titles={dashboard:'经营概览',merchants:'商家入驻',qualification:'资质复审',products:'商品中心',stock:'库存流水',promos:'话费活动',reviews:'商品评价',market:'市集商品',forum:'学校论坛',orders:'电瓶车订单',payments:'支付单',phones:'电话卡订单',recharges:'话费权益',finance:'财务流水',broadband:'宽带资格',plates:'牌照辅助',afterSales:'售后工单',notifications:'站内通知',logs:'操作日志',settings:'运营设置',settlements:'商家结算',payouts:'商家提现',patrol:'超时预警',scores:'商家服务分',rentals:'租赁管理'};
 titles.serviceCollabs='服务单协同';
-const statuses={PENDING_PAYMENT:'待支付',PAID:'已支付',FULFILLING:'配送中',COMPLETED:'已完成',CANCELLED:'已取消',PENDING:'待支付',EXPIRED:'支付超时',PARTIALLY_REFUNDED:'部分退款',REFUNDED:'已退款',PENDING_REALNAME:'待实名',ACTIVATED:'已激活',PENDING_CREDIT:'待到账',CREDITED:'已到账',PENDING_VERIFY:'待核验',APPROVED:'已通过',REJECTED:'未通过',MATERIAL_PENDING:'待材料',REVIEWING:'处理中',SUBMITTED:'待审核',CLOSED:'已关闭',AFTER_SALE:'售后中',REJECTED:'未通过',PUBLISHED:'已展示',HIDDEN:'已隐藏',PENDING_SETTLE:'可结算',SETTLED:'已结算',PENDING_DELIVERY:'待交付核验',IN_ACCOUNT_PERIOD:'账期中',FROZEN:'售后冻结',PAYOUT_REQUESTED:'提现待审核',PENDING_REVIEW:'待审核',OPEN:'待认领',ACKNOWLEDGED:'已认领',RESOLVED:'已关闭',OVERDUE:'已超时',WARNING:'即将超时',NORMAL:'正常经营',LIMITED:'限流整改',RESTRICTED:'暂停上新',EXCELLENT:'优秀',GOOD:'良好',WATCH:'观察',RISK:'高风险',AUTO:'自动上架',MATCHED:'账实相符',DIFFERENCES:'存在差异',DEPOSIT_SETTLEMENT:'押金结算'};
+const statuses={PENDING_PAYMENT:'待支付',PAID:'已支付',FULFILLING:'配送中',COMPLETED:'已完成',CANCELLED:'已取消',PENDING:'待支付',EXPIRED:'支付超时',PARTIALLY_REFUNDED:'部分退款',REFUNDED:'已退款',PENDING_REALNAME:'待实名',ACTIVATED:'已激活',PENDING_CREDIT:'待到账',CREDITED:'已到账',PENDING_VERIFY:'待核验',APPROVED:'已通过',REJECTED:'未通过',MATERIAL_PENDING:'待材料',REVIEWING:'处理中',SUBMITTED:'待审核',CLOSED:'已关闭',AFTER_SALE:'售后中',REJECTED:'未通过',PUBLISHED:'已展示',HIDDEN:'已隐藏',PENDING_SETTLE:'可结算',SETTLED:'已结算',PENDING_DELIVERY:'待交付核验',IN_ACCOUNT_PERIOD:'账期中',FROZEN:'售后冻结',PAYOUT_REQUESTED:'提现待审核',PENDING_REVIEW:'待审核',OPEN:'待认领',ACKNOWLEDGED:'已认领',RESOLVED:'已关闭',OVERDUE:'已超时',WARNING:'即将超时',NORMAL:'正常经营',LIMITED:'限流整改',RESTRICTED:'暂停上新',EXCELLENT:'优秀',GOOD:'良好',WATCH:'观察',RISK:'高风险',AUTO:'自动上架',MATCHED:'账实相符',DIFFERENCES:'存在差异',DEPOSIT_SETTLEMENT:'押金结算',PAYMENT:'支付收入',REFUND:'退款支出',PAYOUT:'商家打款',UNPAID:'未支付'};
+// ★ 末尾这 4 个 key 曾经**缺失**，导致 `label()` 的 `statuses[v]||v` 回落分支把它们**原样显示成英文代码**。
+//   实测（给 `label()` 打桩 + 渲染全部 28 个可达视图、每个枚举值各造一行）只此 4 个会漏：
+//     - `PAYMENT` / `REFUND` / `PAYOUT`：`finance` 视图的状态筛选下拉
+//       （同一排的 `DEPOSIT_SETTLEMENT` 却有中文「押金结算」—— 同一下拉里中英混排）
+//     - `UNPAID`：`phones` / `recharges` 表格行的支付状态（`label(x.paymentStatus)`），
+//       服务端确实会写入该值（`src/app.js` 的 `paymentStatus:'UNPAID'`）
+//   文案**不另造**，与既有单点表逐字一致：前三者取自 `financeTypeLabels`，`UNPAID` 取自 orders/plates 的本地表。
+//   ★ 为什么放进这个字面量、而不是再加一处 `Object.assign`：本文件已有 3 处 `Object.assign(statuses,…)`
+//     （leads / admins / market），它们正是下面「同名 key 被覆盖」问题的来源（如 `ACTIVE` 先被写「启用」
+//     后被 market 写成「在售」，管理员列表因此把启用中的账号显示成「在售」）。
+//     新 key 只在这里定义一次，不引入第 4 个覆盖点。
 const endpointTypes={orders:'orders',phones:'phone-card-orders',recharges:'recharge-orders',broadband:'broadband-applications',plates:'plate-applications',afterSales:'after-sales'};
 const collections={orders:'orders',payments:'paymentOrders',phones:'phoneCardOrders',recharges:'rechargeOrders',broadband:'broadbandApplications',plates:'plateApplications',afterSales:'afterSales',finance:'financeEvents',settlements:'settlements',payouts:'payoutRequests',patrol:'slaAlerts',scores:'merchantScores'};
 const financeTypeLabels={PAYMENT:'支付收入',REFUND:'退款支出',PAYOUT:'商家打款',DEPOSIT_SETTLEMENT:'押金结算'};

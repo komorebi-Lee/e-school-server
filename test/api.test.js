@@ -3220,6 +3220,12 @@ test('operations report provides trends and csv export', async () => {
   // ★ 防空转：本场景必须真的有退款，否则下面的「非负」断言退化为 0 >= 0。
   assert.ok(csvRefundTotal > 0, `CSV 退款支出合计必须为正的展示值（actual ${csvRefundTotalCell}）`);
   assert.ok(!csvRefundTotalCell.includes('-'), `CSV 退款支出列不得出现负号（actual ${csvRefundTotalCell}）`);
+  // ★ 幅度断言（team-lead 补充 1）：上面两条只是**谓词** —— `> 0` 与「无负号」
+  //   对**错误的幅度**同样成立（把换算写坏 `/100` → `/1000` 得 `0.23`，两条都通过）。
+  //   ⇒ 「用户可见输出不变」这个目标不能只由谓词承载，必须钉住**值本身**。
+  //   形态：**精确值**（见 payout 侧同款注释里对「共享单例 store 累积」耦合的说明）。
+  assert.equal(csvRefundTotalCell, '11463.00',
+    `CSV 退款支出合计的幅度必须钉住（actual ${csvRefundTotalCell}）`);
 
   // ★ 展示层守卫（payoutOutCents，与退款列**对称**）：数据层统一为「出账为负」后，
   //   CSV 的「商家打款(元)」列**必须仍是正数** —— 本次改动的目标是「不改变任何用户可见输出」。
@@ -3233,6 +3239,21 @@ test('operations report provides trends and csv export', async () => {
   // ★ 防空转：本场景必须真的有打款，否则「为正」断言会退化成没有判别力的比较。
   assert.ok(csvPayoutTotal > 0, `CSV 商家打款合计必须为正的展示值（actual ${csvPayoutTotalCell}）`);
   assert.ok(!csvPayoutTotalCell.includes('-'), `CSV 商家打款列不得出现负号（actual ${csvPayoutTotalCell}）`);
+  // ★ 幅度断言（team-lead 补充 1）：`#62` 自己声称的目标是「**用户可见输出无变化**」，
+  //   而上面两条谓词**不能**承载那个目标 —— 把换算写坏（`/100` → `/1000`）得 `0.23`，
+  //   `> 0` 通过、无负号通过 ⇒ ③ 仍全绿。⇒ 必须钉住**值本身**。
+  //
+  //   ★ 形态选择：**精确值**（不是区间）。理由与代价都写在这里：
+  //     本文件**没有 `beforeEach`**，`store` 是**整个文件共用的单例**，
+  //     所以 CSV 合计 = 本文件此前所有用例**累计**的打款之和。
+  //       · 加法**可交换** ⇒ **调换用例顺序不会改变合计** ⇒ 精确值对「重排」是安全的；
+  //       · 但**新增/删除**一个打款用例、或改动其金额，合计就会变 ⇒ 精确值会红。
+  //         那个红是**有意义**的（强制作者重新确认用户可见输出），
+  //         代价是它把「幅度回归」与「用例增删」耦合了起来 —— 明知并接受，故写明。
+  //     不取区间的原因：上界找不到「不是差不多」的理由（打款会随用例累积），
+  //     下界若只钉「至少本笔」则与 `> 0` 同弱 ⇒ 区间反而给出虚假的安全感。
+  assert.equal(csvPayoutTotalCell, '23.00',
+    `CSV 商家打款合计的幅度必须钉住（actual ${csvPayoutTotalCell}）`);
 
   const unauthorized = await fetch(`${baseUrl}/api/admin/operations-report/export`);
   assert.equal(unauthorized.status, 401);
