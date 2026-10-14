@@ -312,7 +312,7 @@ test('③ ★ 两个映射表都含 RETURN_RESTORE，键集完全一致，且管
   assert.equal(labelKeys.length, 8, '补完后应为 8 个键（原 7 + RETURN_RESTORE）');
 
   // 端到端渲染：真的走一遍管理端台账视图，确认没有把原始英文码漏到界面上。
-  const runnable = source.replace('const state={data:null,', 'const state={data:{settings:{}},');
+  const runnable = source;
   const elements = new Map();
   const element = (selector) => {
     if (!elements.has(selector)) {

@@ -5,8 +5,7 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 test('admin payments view renders reconciliation controls and differences', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8')
-    .replace('const state={data:null,', 'const state={data:{settings:{}},');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'admin.js'), 'utf8');
   const elements = new Map();
   const element = (selector) => {
     if (!elements.has(selector)) {

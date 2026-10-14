@@ -8,15 +8,19 @@ const ADMIN_JS_PATH = path.join(__dirname, '..', 'public', 'admin.js');
 const ADMIN_HTML_PATH = path.join(__dirname, '..', 'public', 'admin.html');
 
 /**
- * 读出 `admin.js` 源码。
+ * 读出 `admin.js` 源码 —— **原始文件，不做任何字符串替换**。
  *
- * `const state={data:null,` 的替换是必要的：文件第 3 行的
- * `lowStockThreshold` 在**模块求值时**就要读 `state.data.settings`，
- * 不预置一个空对象会直接抛错。这与 `admin-reconciliation-ui.test.js` 的处置一致。
+ * 这里曾有一段 `.replace('const state={data:null,', …)` 补丁，用来绕开文件第 3 行
+ * `lowStockThreshold` 在模块求值时读 `state.data.settings` 的空指针。
+ * 该补丁掩盖了真实缺陷：线上管理端加载即抛
+ * `TypeError: Cannot read properties of null (reading 'settings')`，登录按钮完全无响应。
+ * 现已把 `lowStockThreshold` 改为惰性取值（函数），补丁随之删除。
+ *
+ * ★ 纪律：**测试必须跑交付给用户的那个文件**，不得改写被测源码来换取可测性 ——
+ *   否则测的是一个不存在的文件，全绿也没有意义。
  */
 function readAdminSource() {
-  return fs.readFileSync(ADMIN_JS_PATH, 'utf8')
-    .replace('const state={data:null,', 'const state={data:{settings:{}},');
+  return fs.readFileSync(ADMIN_JS_PATH, 'utf8');
 }
 
 /** 造一个足够所有视图渲染的 overview 形状（键名取自 `admin.js` 的实际引用）。 */
