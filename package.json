@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "hash-admin-password": "node scripts/hash-admin-password.js",
+    "preflight": "node scripts/preflight-deploy.js",
     "test": "node --test"
   },
   "dependencies": {
